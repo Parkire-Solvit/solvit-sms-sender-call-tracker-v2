@@ -50,6 +50,7 @@ Migrations acquire a PostgreSQL transaction and record each applied file in `sch
 
 ```bash
 npm run db:migrate  # apply pending database migrations
+npm run db:import-sqlite # one-time, idempotent legacy import from /data/solvit.db
 npm run lint        # TypeScript validation
 npm run build       # production build
 npm start           # start built server
