@@ -42,11 +42,10 @@ async function startServer() {
     const submittedUser = (username || "").trim().toLowerCase();
     const submittedPass = (password || "").trim();
 
-    const envUser = (process.env.ADMIN_USERNAME || "admin").trim().toLowerCase();
-    const envPass = (process.env.ADMIN_PASSWORD || "admin123").trim();
+    const envUser = (process.env.ADMIN_USERNAME || "").trim().toLowerCase();
+    const envPass = (process.env.ADMIN_PASSWORD || "").trim();
 
-    const isValid = (submittedUser === "admin" && submittedPass === "admin123") ||
-                    (submittedUser === envUser && submittedPass === envPass);
+    const isValid = Boolean(envUser && envPass) && submittedUser === envUser && submittedPass === envPass;
 
     if (isValid) {
       console.log(`[AUTH] Admin login successful for "${username}"`);
