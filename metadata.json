@@ -1,0 +1,8 @@
+{
+  "name": "Solvit Call Tracker and Compliance Portal",
+  "description": "Call tracking and communications SLA compliance portal for Solvit.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

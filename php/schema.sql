@@ -1,0 +1,3 @@
+-- The canonical production schema is managed exclusively by migrations.
+-- Run `npm run db:migrate`; do not mutate schema during PHP startup.
+-- See ../migrations/001_initial_postgresql.sql.
