@@ -14,7 +14,7 @@ async function startServer() {
   app.use(cors());
   app.use(express.json());
 
-  const PORT = 3000;
+  const PORT = Number(process.env.PORT || 3000);
 
   // PostgreSQL only. Schema changes are applied by `npm run db:migrate`.
   const db = await initDatabase();
