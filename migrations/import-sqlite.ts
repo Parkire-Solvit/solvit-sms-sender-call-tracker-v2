@@ -66,7 +66,8 @@ try {
            MAX(a.last_active_at) AS last_active_at,
            MAX(CASE WHEN a.tag IS NOT NULL AND TRIM(a.tag) <> '' THEN a.tag END) AS tag
     FROM agents a
-    WHERE EXISTS (SELECT 1 FROM events e WHERE e.agent_id = a.id)
+    JOIN (SELECT DISTINCT agent_id FROM events) used_agents
+      ON used_agents.agent_id = a.id
     GROUP BY a.name
     ORDER BY a.name
   `);
