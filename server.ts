@@ -86,6 +86,8 @@ async function startServer() {
     const {
       agent_name,
       agentName,
+      agent_id,
+      agentId,
       type,
       target_phone,
       targetPhone,
@@ -124,8 +126,16 @@ async function startServer() {
         // Ignore if exists
       }
 
-      // 2. Find agent ID by name
-      let agent = await db.queryOne("SELECT id FROM agents WHERE name = ?", [name]);
+      // 2. Prefer the stable ID supplied by configured Android devices. Name lookup
+      // remains supported for older app versions during the transition.
+      const requestedAgentId = Number(agent_id || agentId || 0);
+      let agent = Number.isInteger(requestedAgentId) && requestedAgentId > 0
+        ? await db.queryOne("SELECT id FROM agents WHERE id = ?", [requestedAgentId])
+        : null;
+
+      if (!agent) {
+        agent = await db.queryOne("SELECT id FROM agents WHERE name = ?", [name]);
+      }
 
       // 3. Auto-create agent if not found
       if (!agent && name !== "Unknown Agent") {
@@ -195,6 +205,9 @@ async function startServer() {
       res.json({ success: true });
     } catch (err) {
       console.error(err);
+      if ((err as any)?.code === "23505") {
+        return res.status(409).json({ error: "Another agent already uses that name" });
+      }
       res.status(500).json({ error: "Database error" });
     }
   });

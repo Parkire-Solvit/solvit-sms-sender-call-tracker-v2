@@ -20,6 +20,7 @@ interface ComplianceAgentTableProps {
   selectedTag: string;
   onSelectTag: (tag: string) => void;
   onEditAgentTag: (agent: { id: number; name: string; tag: string }) => void;
+  onEditAgentName: (agent: { id: number; name: string }) => void;
   onInspectAgent: (agentId: number) => void;
 }
 
@@ -29,6 +30,7 @@ export const ComplianceAgentTable: React.FC<ComplianceAgentTableProps> = ({
   selectedTag,
   onSelectTag,
   onEditAgentTag,
+  onEditAgentName,
   onInspectAgent,
 }) => {
   const [activeSubTab, setActiveSubTab] = useState<'compliance' | 'activity'>('compliance');
@@ -189,9 +191,15 @@ export const ComplianceAgentTable: React.FC<ComplianceAgentTableProps> = ({
                 >
                   <td className="px-5 py-3.5">
                     <div className="flex flex-col">
-                      <span className="font-bold text-slate-900 text-sm">
+                      <button
+                        type="button"
+                        onClick={() => onEditAgentName({ id: ag.agent_id, name: ag.agent_name })}
+                        className="inline-flex w-fit items-center gap-1.5 font-bold text-slate-900 text-sm hover:text-amber-700"
+                        title="Edit agent name"
+                      >
                         {ag.agent_name}
-                      </span>
+                        <Edit2 className="w-3 h-3 opacity-60" />
+                      </button>
                       {ag.phone_number && ag.phone_number !== 'Simulated' && (
                         <span className="text-[10px] text-slate-400 font-mono">
                           {ag.phone_number}
