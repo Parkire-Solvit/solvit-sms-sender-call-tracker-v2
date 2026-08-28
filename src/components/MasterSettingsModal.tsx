@@ -105,7 +105,7 @@ export const MasterSettingsModal: React.FC<MasterSettingsModalProps> = ({
 
   const handleResetDefaults = () => {
     if (confirm('Are you sure you want to reset all compliance settings to system defaults?')) {
-      setSettings(DEFAULT_SETTINGS);
+      setSettings({ ...DEFAULT_SETTINGS, sms_template: settings.sms_template });
     }
   };
 
@@ -316,26 +316,49 @@ export const MasterSettingsModal: React.FC<MasterSettingsModalProps> = ({
                     </div>
 
                     {settings.sms_followup_enabled && (
-                      <div className="pt-3 border-t border-slate-100 flex items-center justify-between">
-                        <span className="text-xs font-semibold text-slate-700">
-                          SMS Follow-up Deadline (after failed outgoing call):
-                        </span>
-                        <div className="flex items-center gap-2">
-                          <input
-                            id="input-sms-deadline-minutes"
-                            type="number"
-                            min="1"
-                            max="1440"
-                            value={settings.sms_deadline_minutes}
-                            onChange={(e) =>
-                              setSettings({
-                                ...settings,
-                                sms_deadline_minutes: Math.max(1, parseInt(e.target.value) || 1),
-                              })
-                            }
-                            className="w-24 px-3 py-1.5 text-right font-mono font-bold text-slate-900 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-amber-500 focus:border-amber-500 outline-none"
+                      <div className="pt-3 border-t border-slate-100 space-y-4">
+                        <div className="flex items-center justify-between">
+                          <span className="text-xs font-semibold text-slate-700">
+                            SMS Follow-up Deadline (after failed outgoing call):
+                          </span>
+                          <div className="flex items-center gap-2">
+                            <input
+                              id="input-sms-deadline-minutes"
+                              type="number"
+                              min="1"
+                              max="1440"
+                              value={settings.sms_deadline_minutes}
+                              onChange={(e) =>
+                                setSettings({
+                                  ...settings,
+                                  sms_deadline_minutes: Math.max(1, parseInt(e.target.value) || 1),
+                                })
+                              }
+                              className="w-24 px-3 py-1.5 text-right font-mono font-bold text-slate-900 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-amber-500 focus:border-amber-500 outline-none"
+                            />
+                            <span className="text-xs font-semibold text-slate-500">minutes</span>
+                          </div>
+                        </div>
+                        <div>
+                          <div className="flex items-center justify-between mb-1.5">
+                            <label htmlFor="input-sms-template" className="text-xs font-semibold text-slate-700">
+                              SMS Message Template
+                            </label>
+                            <span className="text-[11px] text-slate-400">{settings.sms_template.length}/1000</span>
+                          </div>
+                          <textarea
+                            id="input-sms-template"
+                            rows={4}
+                            maxLength={1000}
+                            required
+                            value={settings.sms_template}
+                            onChange={(e) => setSettings({ ...settings, sms_template: e.target.value })}
+                            placeholder="Enter the message sent by the app. Use {agent_name} where the agent's name should appear."
+                            className="w-full px-3.5 py-2.5 text-sm text-slate-900 border border-slate-300 rounded-lg focus:ring-2 focus:ring-amber-500 focus:border-amber-500 outline-none resize-y"
                           />
-                          <span className="text-xs font-semibold text-slate-500">minutes</span>
+                          <p className="mt-1.5 text-[11px] text-slate-500">
+                            The app must fetch this template from the server. <code className="font-mono text-amber-700">{'{agent_name}'}</code> is replaced with the agent's current dashboard name.
+                          </p>
                         </div>
                       </div>
                     )}

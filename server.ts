@@ -219,6 +219,30 @@ async function startServer() {
     });
   });
 
+  // Device configuration: the app uses this instead of local hardcoded names/templates.
+  app.get("/api/app-config/:id", async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) {
+      return res.status(400).json({ error: "A valid agent ID is required" });
+    }
+
+    try {
+      const agent = await db.queryOne("SELECT id, name FROM agents WHERE id = ?", [id]);
+      if (!agent) return res.status(404).json({ error: "Agent not found" });
+
+      const settings = await getSystemSettings(db);
+      res.json({
+        agent_id: agent.id,
+        agent_name: agent.name,
+        sms_template: settings.sms_template,
+        sms_followup_enabled: settings.sms_followup_enabled,
+      });
+    } catch (err) {
+      console.error("[API] Error fetching app configuration:", err);
+      res.status(500).json({ error: "Failed to fetch app configuration" });
+    }
+  });
+
   // Master System Settings API
   app.get("/api/settings", async (req, res) => {
     try {
@@ -235,6 +259,12 @@ async function startServer() {
     const { settings, changed_by } = req.body || {};
     if (!settings || typeof settings !== "object") {
       return res.status(400).json({ error: "Settings object is required" });
+    }
+    if (settings.sms_followup_enabled && !String(settings.sms_template || "").trim()) {
+      return res.status(400).json({ error: "SMS template is required when SMS follow-up is enabled" });
+    }
+    if (settings.sms_template !== undefined && String(settings.sms_template).length > 1000) {
+      return res.status(400).json({ error: "SMS template must be 1000 characters or fewer" });
     }
 
     try {

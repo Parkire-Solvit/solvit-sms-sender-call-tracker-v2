@@ -13,6 +13,7 @@ class SettingsManager {
             'reconnection_window_minutes' => 1440,
             'sms_followup_enabled' => true,
             'sms_deadline_minutes' => 30,
+            'sms_template' => '',
             'working_hours_schedule' => [
                 'monday' => ['enabled' => true, 'open' => '09:00', 'close' => '17:00'],
                 'tuesday' => ['enabled' => true, 'open' => '09:00', 'close' => '17:00'],
@@ -48,6 +49,7 @@ class SettingsManager {
             'reconnection_window_minutes' => (int)$row['reconnection_window_minutes'],
             'sms_followup_enabled' => (bool)$row['sms_followup_enabled'],
             'sms_deadline_minutes' => (int)$row['sms_deadline_minutes'],
+            'sms_template' => (string)($row['sms_template'] ?? ''),
             'working_hours_schedule' => $schedule,
             'clock_mode' => $row['clock_mode'] ?: 'working_hours',
             'min_connection_duration' => (int)($row['min_connection_duration'] ?? 0),
@@ -64,6 +66,7 @@ class SettingsManager {
             'reconnection_window_minutes',
             'sms_followup_enabled',
             'sms_deadline_minutes',
+            'sms_template',
             'clock_mode',
             'min_connection_duration'
         ];
@@ -93,13 +96,14 @@ class SettingsManager {
         $merged = array_merge($current, $newSettings);
         $scheduleJson = json_encode($merged['working_hours_schedule']);
 
-        $sql = "INSERT INTO system_settings (id, callback_window_minutes, reconnection_window_minutes, sms_followup_enabled, sms_deadline_minutes, working_hours_schedule, clock_mode, min_connection_duration)
-                    VALUES (1, ?, ?, ?, ?, ?, ?, ?)
+        $sql = "INSERT INTO system_settings (id, callback_window_minutes, reconnection_window_minutes, sms_followup_enabled, sms_deadline_minutes, sms_template, working_hours_schedule, clock_mode, min_connection_duration)
+                    VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT (id) DO UPDATE SET
                       callback_window_minutes = EXCLUDED.callback_window_minutes,
                       reconnection_window_minutes = EXCLUDED.reconnection_window_minutes,
                       sms_followup_enabled = EXCLUDED.sms_followup_enabled,
                       sms_deadline_minutes = EXCLUDED.sms_deadline_minutes,
+                      sms_template = EXCLUDED.sms_template,
                       working_hours_schedule = EXCLUDED.working_hours_schedule,
                       clock_mode = EXCLUDED.clock_mode,
                       min_connection_duration = EXCLUDED.min_connection_duration,
@@ -111,6 +115,7 @@ class SettingsManager {
             $merged['reconnection_window_minutes'],
             $merged['sms_followup_enabled'] ? 1 : 0,
             $merged['sms_deadline_minutes'],
+            $merged['sms_template'],
             $scheduleJson,
             $merged['clock_mode'],
             $merged['min_connection_duration']

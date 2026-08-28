@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS system_settings (
   reconnection_window_minutes INTEGER NOT NULL DEFAULT 1440,
   sms_followup_enabled BOOLEAN NOT NULL DEFAULT TRUE,
   sms_deadline_minutes INTEGER NOT NULL DEFAULT 30,
+  sms_template TEXT NOT NULL DEFAULT '',
   working_hours_schedule JSONB NOT NULL,
   clock_mode VARCHAR(50) NOT NULL DEFAULT 'working_hours',
   min_connection_duration INTEGER NOT NULL DEFAULT 0,

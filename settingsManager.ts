@@ -15,14 +15,15 @@ export async function getSystemSettings(db: DbAdapter): Promise<SystemSettings> 
       const defaultSched = JSON.stringify(DEFAULT_SETTINGS.working_hours_schedule);
       await db.execute(
           `INSERT INTO system_settings 
-           (id, callback_window_minutes, reconnection_window_minutes, sms_followup_enabled, sms_deadline_minutes, working_hours_schedule, clock_mode, min_connection_duration)
-           VALUES (1, ?, ?, ?, ?, ?, ?, ?)
+           (id, callback_window_minutes, reconnection_window_minutes, sms_followup_enabled, sms_deadline_minutes, sms_template, working_hours_schedule, clock_mode, min_connection_duration)
+           VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT (id) DO NOTHING`,
           [
             DEFAULT_SETTINGS.callback_window_minutes,
             DEFAULT_SETTINGS.reconnection_window_minutes,
             DEFAULT_SETTINGS.sms_followup_enabled ? 1 : 0,
             DEFAULT_SETTINGS.sms_deadline_minutes,
+            DEFAULT_SETTINGS.sms_template,
             defaultSched,
             DEFAULT_SETTINGS.clock_mode,
             DEFAULT_SETTINGS.min_connection_duration,
@@ -47,6 +48,7 @@ export async function getSystemSettings(db: DbAdapter): Promise<SystemSettings> 
       reconnection_window_minutes: Number(row.reconnection_window_minutes ?? DEFAULT_SETTINGS.reconnection_window_minutes),
       sms_followup_enabled: row.sms_followup_enabled === 1 || row.sms_followup_enabled === true || row.sms_followup_enabled === '1',
       sms_deadline_minutes: Number(row.sms_deadline_minutes ?? DEFAULT_SETTINGS.sms_deadline_minutes),
+      sms_template: String(row.sms_template ?? ''),
       working_hours_schedule: parsedSchedule,
       clock_mode: row.clock_mode === 'continuous_24_7' ? 'continuous_24_7' : 'working_hours',
       min_connection_duration: Number(row.min_connection_duration ?? DEFAULT_SETTINGS.min_connection_duration),
@@ -80,6 +82,10 @@ export async function updateSystemSettings(
       incoming.sms_deadline_minutes !== undefined
         ? Number(incoming.sms_deadline_minutes)
         : current.sms_deadline_minutes,
+    sms_template:
+      incoming.sms_template !== undefined
+        ? String(incoming.sms_template).trim()
+        : current.sms_template,
     working_hours_schedule:
       incoming.working_hours_schedule !== undefined
         ? incoming.working_hours_schedule
@@ -123,6 +129,13 @@ export async function updateSystemSettings(
       newVal: `${updated.sms_deadline_minutes} mins`,
     });
   }
+  if (current.sms_template !== updated.sms_template) {
+    changesToLog.push({
+      key: 'sms_template',
+      oldVal: current.sms_template,
+      newVal: updated.sms_template,
+    });
+  }
   if (current.clock_mode !== updated.clock_mode) {
     changesToLog.push({
       key: 'clock_mode',
@@ -152,13 +165,14 @@ export async function updateSystemSettings(
   const schedJson = JSON.stringify(updated.working_hours_schedule);
   await db.execute(
       `INSERT INTO system_settings 
-       (id, callback_window_minutes, reconnection_window_minutes, sms_followup_enabled, sms_deadline_minutes, working_hours_schedule, clock_mode, min_connection_duration)
-       VALUES (1, ?, ?, ?, ?, ?, ?, ?)
+       (id, callback_window_minutes, reconnection_window_minutes, sms_followup_enabled, sms_deadline_minutes, sms_template, working_hours_schedule, clock_mode, min_connection_duration)
+       VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT (id) DO UPDATE SET
          callback_window_minutes = EXCLUDED.callback_window_minutes,
          reconnection_window_minutes = EXCLUDED.reconnection_window_minutes,
          sms_followup_enabled = EXCLUDED.sms_followup_enabled,
          sms_deadline_minutes = EXCLUDED.sms_deadline_minutes,
+         sms_template = EXCLUDED.sms_template,
          working_hours_schedule = EXCLUDED.working_hours_schedule,
          clock_mode = EXCLUDED.clock_mode,
          min_connection_duration = EXCLUDED.min_connection_duration,
@@ -168,6 +182,7 @@ export async function updateSystemSettings(
         updated.reconnection_window_minutes,
         updated.sms_followup_enabled ? 1 : 0,
         updated.sms_deadline_minutes,
+        updated.sms_template,
         schedJson,
         updated.clock_mode,
         updated.min_connection_duration,

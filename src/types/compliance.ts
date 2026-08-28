@@ -19,6 +19,7 @@ export interface SystemSettings {
   reconnection_window_minutes: number; // default 1440 (24h)
   sms_followup_enabled: boolean; // default true
   sms_deadline_minutes: number; // default 30
+  sms_template: string;
   working_hours_schedule: WorkingHoursSchedule;
   clock_mode: 'working_hours' | 'continuous_24_7'; // default working_hours
   min_connection_duration: number; // in seconds, default 0
@@ -48,6 +49,7 @@ export const DEFAULT_SETTINGS: SystemSettings = {
   reconnection_window_minutes: 1440,
   sms_followup_enabled: true,
   sms_deadline_minutes: 30,
+  sms_template: '',
   working_hours_schedule: DEFAULT_WORKING_HOURS,
   clock_mode: 'working_hours',
   min_connection_duration: 0,
