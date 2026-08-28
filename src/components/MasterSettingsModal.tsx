@@ -37,7 +37,7 @@ export const MasterSettingsModal: React.FC<MasterSettingsModalProps> = ({
   onClose,
   onSettingsSaved,
 }) => {
-  const [activeTab, setActiveTab] = useState<'rules' | 'schedule' | 'logs'>('rules');
+  const [activeTab, setActiveTab] = useState<'rules' | 'schedule' | 'logs' | 'sms'>('rules');
   const [settings, setSettings] = useState<SystemSettings>(DEFAULT_SETTINGS);
   const [logs, setLogs] = useState<SettingsChangeLog[]>([]);
   const [loading, setLoading] = useState(false);
@@ -180,6 +180,18 @@ export const MasterSettingsModal: React.FC<MasterSettingsModalProps> = ({
             <History className="w-4 h-4" />
             Audit &amp; Change Log ({logs.length})
           </button>
+          <button
+            id="tab-sms-template-btn"
+            onClick={() => setActiveTab('sms')}
+            className={`flex items-center gap-2 py-3 px-4 text-xs font-semibold border-b-2 transition-all ${
+              activeTab === 'sms'
+                ? 'border-amber-600 text-amber-700 bg-white shadow-xs rounded-t-lg'
+                : 'border-transparent text-slate-500 hover:text-slate-700'
+            }`}
+          >
+            <MessageSquare className="w-4 h-4" />
+            SMS Template
+          </button>
         </div>
 
         {/* Content Body */}
@@ -316,7 +328,7 @@ export const MasterSettingsModal: React.FC<MasterSettingsModalProps> = ({
                     </div>
 
                     {settings.sms_followup_enabled && (
-                      <div className="pt-3 border-t border-slate-100 space-y-4">
+                      <div className="pt-3 border-t border-slate-100">
                         <div className="flex items-center justify-between">
                           <span className="text-xs font-semibold text-slate-700">
                             SMS Follow-up Deadline (after failed outgoing call):
@@ -338,27 +350,6 @@ export const MasterSettingsModal: React.FC<MasterSettingsModalProps> = ({
                             />
                             <span className="text-xs font-semibold text-slate-500">minutes</span>
                           </div>
-                        </div>
-                        <div>
-                          <div className="flex items-center justify-between mb-1.5">
-                            <label htmlFor="input-sms-template" className="text-xs font-semibold text-slate-700">
-                              SMS Message Template
-                            </label>
-                            <span className="text-[11px] text-slate-400">{settings.sms_template.length}/1000</span>
-                          </div>
-                          <textarea
-                            id="input-sms-template"
-                            rows={4}
-                            maxLength={1000}
-                            required
-                            value={settings.sms_template}
-                            onChange={(e) => setSettings({ ...settings, sms_template: e.target.value })}
-                            placeholder="Enter the message sent by the app. Use {agent_name} where the agent's name should appear."
-                            className="w-full px-3.5 py-2.5 text-sm text-slate-900 border border-slate-300 rounded-lg focus:ring-2 focus:ring-amber-500 focus:border-amber-500 outline-none resize-y"
-                          />
-                          <p className="mt-1.5 text-[11px] text-slate-500">
-                            The app must fetch this template from the server. <code className="font-mono text-amber-700">{'{agent_name}'}</code> is replaced with the agent's current dashboard name.
-                          </p>
                         </div>
                       </div>
                     )}
@@ -619,6 +610,39 @@ export const MasterSettingsModal: React.FC<MasterSettingsModalProps> = ({
                       </table>
                     </div>
                   )}
+                </div>
+              )}
+
+              {/* TAB 4: SMS TEMPLATE */}
+              {activeTab === 'sms' && (
+                <div className="space-y-4">
+                  <div>
+                    <h3 className="text-sm font-bold text-slate-900">App SMS Message Template</h3>
+                    <p className="text-xs text-slate-500 mt-1">
+                      This database-backed message is the single source of truth for SMS sent by the app.
+                    </p>
+                  </div>
+                  <div className="p-5 rounded-xl border border-slate-200 bg-white shadow-xs">
+                    <div className="flex items-center justify-between mb-2">
+                      <label htmlFor="input-sms-template" className="text-xs font-semibold text-slate-700">
+                        SMS Message
+                      </label>
+                      <span className="text-[11px] text-slate-400">{settings.sms_template.length}/1000</span>
+                    </div>
+                    <textarea
+                      id="input-sms-template"
+                      rows={7}
+                      maxLength={1000}
+                      required={settings.sms_followup_enabled}
+                      value={settings.sms_template}
+                      onChange={(e) => setSettings({ ...settings, sms_template: e.target.value })}
+                      placeholder="Enter the message sent by the app. Use {agent_name} where the agent's name should appear."
+                      className="w-full px-3.5 py-2.5 text-sm text-slate-900 border border-slate-300 rounded-lg focus:ring-2 focus:ring-amber-500 focus:border-amber-500 outline-none resize-y"
+                    />
+                    <div className="mt-3 p-3 bg-amber-50 border border-amber-100 rounded-lg text-xs text-amber-900">
+                      Use <code className="font-mono font-bold">{'{agent_name}'}</code> where the current agent name should appear. The Android app must fetch this value from <code className="font-mono">/api/app-config/{'{agent_id}'}</code>.
+                    </div>
+                  </div>
                 </div>
               )}
             </>
