@@ -6,20 +6,13 @@
 import { useState, useEffect, useCallback, FormEvent } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
-  MessageSquare, 
   ShieldCheck, 
-  Activity, 
   ArrowRight, 
-  CheckCircle2,
   XCircle,
   Clock,
   History,
   ChevronRight,
   Phone,
-  PhoneCall,
-  PhoneIncoming,
-  PhoneOutgoing,
-  PhoneOff,
   AlertCircle,
   Download,
   Filter,
@@ -33,8 +26,6 @@ import {
   Users,
   UserMinus,
   Settings as SettingsIcon,
-  Smartphone,
-  LayoutDashboard,
   Tag as TagIcon,
   ExternalLink
 } from 'lucide-react';
@@ -70,12 +61,6 @@ interface DbStatus {
 }
 
 export default function App() {
-  const [view, setView] = useState<'admin' | 'preview'>('admin');
-  const [agentName, setAgentName] = useState<string>('Kelvin Kimathi');
-  const [customTemplate, setCustomTemplate] = useState<string>(
-    'Hi, this is {agent_name} from Solvit. I tried calling you regarding your inquiry. Please call me back when convenient so we can assist you.'
-  );
-  const [isRegistered, setIsRegistered] = useState<boolean>(true);
   const [stats, setStats] = useState<any>(null);
   const [complianceStats, setComplianceStats] = useState<{
     summary?: any;
@@ -107,45 +92,6 @@ export default function App() {
   
   // Selected phone for Contact History Thread Modal
   const [inspectedPhone, setInspectedPhone] = useState<string | null>(null);
-
-  // Load agent profile & custom template for simulator
-  useEffect(() => {
-    const savedName = localStorage.getItem('solvit_agent_name') || localStorage.getItem('nellions_agent_name');
-    const savedTemplate = localStorage.getItem('solvit_sms_template') || localStorage.getItem('nellions_sms_template');
-    if (savedTemplate) {
-      setCustomTemplate(savedTemplate);
-    }
-    if (savedName) {
-      setAgentName(savedName);
-      setIsRegistered(true);
-      logAgentToServer(savedName);
-    }
-  }, []);
-
-  const logAgentToServer = async (name: string) => {
-    try {
-      const res = await fetch('/api/log-agent', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, phone_number: 'Simulated' })
-      });
-      const data = await res.json();
-      if (data.agent_id) {
-        localStorage.setItem('solvit_agent_id', data.agent_id.toString());
-      }
-    } catch (err) {
-      console.error('Failed to log agent:', err);
-    }
-  };
-
-  const handleSaveName = () => {
-    if (agentName.trim()) {
-      localStorage.setItem('solvit_agent_name', agentName.trim());
-      localStorage.setItem('solvit_sms_template', customTemplate);
-      setIsRegistered(true);
-      logAgentToServer(agentName.trim());
-    }
-  };
 
   // Check for existing session
   useEffect(() => {
@@ -263,7 +209,7 @@ export default function App() {
           
           <div className="flex flex-wrap items-center gap-2.5">
             {/* Quick Contact Search Bar */}
-            {isAdminAuthenticated && view === 'admin' && (
+            {isAdminAuthenticated && (
               <SearchContactBar onSelectPhone={(phone) => setInspectedPhone(phone)} />
             )}
 
@@ -279,37 +225,6 @@ export default function App() {
                 <span>Master Settings</span>
               </button>
             )}
-
-            {/* View switcher */}
-            <div className="flex bg-slate-100 p-1 rounded-xl">
-              <button 
-                id="nav-tab-admin-dashboard"
-                onClick={() => {
-                  setView('admin');
-                  if (isAdminAuthenticated) {
-                    fetchAllStats(startDate, endDate, selectedAgentId, selectedTag);
-                  }
-                }}
-                className={cn(
-                  "px-3.5 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer",
-                  view === 'admin' ? "bg-white text-[#ff353e] shadow-xs" : "text-slate-600 hover:text-[#ff353e]"
-                )}
-              >
-                <LayoutDashboard className="w-3.5 h-3.5" />
-                <span>Admin Dashboard</span>
-              </button>
-              <button 
-                id="nav-tab-app-simulator"
-                onClick={() => setView('preview')}
-                className={cn(
-                  "px-3.5 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer",
-                  view === 'preview' ? "bg-white text-[#ff353e] shadow-xs" : "text-slate-600 hover:text-[#ff353e]"
-                )}
-              >
-                <Smartphone className="w-3.5 h-3.5" />
-                <span>App Simulator</span>
-              </button>
-            </div>
 
             {isAdminAuthenticated && (
               <button
@@ -327,23 +242,7 @@ export default function App() {
       </nav>
 
       {/* Main View Area */}
-      {view === 'preview' ? (
-        <AgentPreview 
-          agentName={agentName} 
-          setAgentName={setAgentName}
-          customTemplate={customTemplate}
-          setCustomTemplate={setCustomTemplate}
-          isRegistered={isRegistered}
-          setIsRegistered={setIsRegistered}
-          handleSaveName={handleSaveName}
-          onSwitchToAdmin={() => {
-            setView('admin');
-            if (isAdminAuthenticated) {
-              fetchAllStats(startDate, endDate, selectedAgentId, selectedTag);
-            }
-          }}
-        />
-      ) : !isAdminAuthenticated ? (
+      {!isAdminAuthenticated ? (
         <div className="max-w-md mx-auto mt-20 px-6">
           <motion.div 
             initial={{ opacity: 0, y: 20 }}
@@ -980,362 +879,6 @@ function ComplianceAdminDashboard({
           setDrilldownCardType(null);
         }}
       />
-    </div>
-  );
-}
-
-// --- Agent Android App Simulator Component ---
-function AgentPreview({ 
-  agentName, 
-  setAgentName, 
-  customTemplate, 
-  setCustomTemplate, 
-  isRegistered, 
-  setIsRegistered, 
-  handleSaveName,
-  onSwitchToAdmin
-}: any) {
-  const [showOverlay, setShowOverlay] = useState<boolean>(false);
-  const [lastCallNumber, setLastCallNumber] = useState<string>('0712 345 678');
-  const [smsSent, setSmsSent] = useState<boolean>(false);
-  const [countdown, setCountdown] = useState<number>(60);
-  const [callDuration, setCallDuration] = useState<number>(45);
-  const [seedingLoading, setSeedingLoading] = useState<boolean>(false);
-  const [simulationLog, setSimulationLog] = useState<Array<{
-    id: string;
-    time: string;
-    type: string;
-    phone: string;
-    status: string;
-    detail: string;
-  }>>([]);
-
-  const addLog = (type: string, phone: string, status: string, detail: string) => {
-    const timeStr = new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-    setSimulationLog(prev => [
-      { id: Math.random().toString(), time: timeStr, type, phone, status, detail },
-      ...prev.slice(0, 9)
-    ]);
-  };
-
-  const triggerCallEvent = async (status: string, duration = 0) => {
-    setShowOverlay(status === 'MISSED');
-    if (status === 'MISSED') {
-      setCountdown(60);
-      setSmsSent(false);
-    }
-
-    const effectiveName = (agentName || 'Kelvin Kimathi').trim();
-    if (!isRegistered) {
-      handleSaveName();
-    }
-
-    try {
-      const res = await fetch('/api/log-event', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          agent_name: effectiveName,
-          type: 'CALL',
-          target_phone: lastCallNumber,
-          status: status,
-          duration: duration
-        })
-      });
-      if (res.ok) {
-        addLog('CALL', lastCallNumber, status, duration > 0 ? `Duration: ${duration}s` : 'Call event logged');
-      }
-    } catch (err) {
-      console.error(err);
-    }
-  };
-
-  useEffect(() => {
-    let timer: any;
-    if (showOverlay && countdown > 0) {
-      timer = setInterval(() => setCountdown((prev: number) => prev - 1), 1000);
-    } else if (countdown === 0) {
-      setShowOverlay(false);
-    }
-    return () => clearInterval(timer);
-  }, [showOverlay, countdown]);
-
-  const handleSendSms = async () => {
-    setSmsSent(true);
-    const effectiveName = (agentName || 'Kelvin Kimathi').trim();
-
-    try {
-      const res = await fetch('/api/log-event', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          agent_name: effectiveName,
-          type: 'SMS',
-          target_phone: lastCallNumber,
-          status: 'SENT'
-        })
-      });
-      if (res.ok) {
-        addLog('SMS', lastCallNumber, 'SENT', 'Auto follow-up SMS text dispatched');
-      }
-    } catch (err) {
-      console.error(err);
-    }
-
-    setTimeout(() => {
-      setShowOverlay(false);
-      setSmsSent(false);
-    }, 2000);
-  };
-
-  const handleSeedFullScenario = async () => {
-    setSeedingLoading(true);
-    try {
-      const res = await fetch('/api/seed-simulation', { method: 'POST' });
-      const data = await res.json();
-      if (res.ok) {
-        addLog('SYSTEM', 'Multi-Agent', 'SEEDED', data.message || 'Seeded realistic daily activity scenario');
-        if (onSwitchToAdmin) {
-          setTimeout(() => onSwitchToAdmin(), 800);
-        }
-      }
-    } catch (err) {
-      console.error('Failed to seed simulation:', err);
-    } finally {
-      setSeedingLoading(false);
-    }
-  };
-
-  return (
-    <div className="max-w-4xl mx-auto px-6 py-8">
-      <div className="bg-white rounded-3xl p-8 border border-slate-200 shadow-sm space-y-6">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-          <div className="flex items-center gap-3">
-            <div className="w-12 h-12 rounded-2xl bg-[#ff353e]/10 text-[#ff353e] flex items-center justify-center font-bold">
-              <Smartphone className="w-6 h-6" />
-            </div>
-            <div>
-              <h2 className="text-xl font-bold text-slate-900">Solvit Android Tracker Simulator</h2>
-              <p className="text-xs text-slate-500">Test call events, durations, obligations, and SLA compliance</p>
-            </div>
-          </div>
-
-          <div className="flex items-center gap-2">
-            <button
-              onClick={handleSeedFullScenario}
-              disabled={seedingLoading}
-              className="px-4 py-2 bg-slate-900 hover:bg-slate-800 text-white font-bold rounded-xl text-xs flex items-center gap-1.5 shadow-sm transition-all cursor-pointer"
-              title="Populate complete demo dataset with multiple agents, calls, callbacks, and obligations"
-            >
-              <RefreshCw className={cn("w-3.5 h-3.5", seedingLoading && "animate-spin")} />
-              <span>{seedingLoading ? 'Generating...' : '⚡ Seed Full Scenario Data'}</span>
-            </button>
-
-            {onSwitchToAdmin && (
-              <button
-                onClick={onSwitchToAdmin}
-                className="px-4 py-2 bg-[#ff353e] hover:bg-[#e02831] text-white font-bold rounded-xl text-xs flex items-center gap-1.5 shadow-xs transition-all cursor-pointer"
-              >
-                <span>View Dashboard</span>
-                <ArrowRight className="w-3.5 h-3.5" />
-              </button>
-            )}
-          </div>
-        </div>
-
-        {/* Profile Setup */}
-        <div className="p-5 bg-slate-50 rounded-2xl border border-slate-200 space-y-4">
-          <div className="flex flex-col sm:flex-row gap-4 items-end">
-            <div className="flex-1">
-              <label className="block text-xs font-bold text-slate-700 uppercase mb-1">Simulated Agent Name</label>
-              <input
-                type="text"
-                value={agentName}
-                onChange={(e) => setAgentName(e.target.value)}
-                placeholder="e.g. Kelvin Kimathi"
-                className="w-full px-3.5 py-2 bg-white border border-slate-300 rounded-xl text-xs font-semibold focus:ring-2 focus:ring-[#ff353e] outline-none"
-              />
-            </div>
-            <button
-              onClick={handleSaveName}
-              className="px-5 py-2 bg-[#ff353e] text-white rounded-xl text-xs font-bold hover:bg-[#e02831] shadow-xs cursor-pointer"
-            >
-              Save Agent
-            </button>
-          </div>
-
-          <div className="flex flex-col sm:flex-row gap-4 items-center">
-            <div className="w-full sm:w-1/2">
-              <label className="block text-xs font-bold text-slate-700 uppercase mb-1">Target Customer Phone Number</label>
-              <input
-                type="text"
-                value={lastCallNumber}
-                onChange={(e) => setLastCallNumber(e.target.value)}
-                className="w-full px-3.5 py-2 bg-white border border-slate-300 rounded-xl text-xs font-mono font-bold focus:ring-2 focus:ring-amber-500 outline-none"
-              />
-            </div>
-            <div className="w-full sm:w-1/2">
-              <label className="block text-xs font-bold text-slate-700 uppercase mb-1">Simulated Connected Duration (Sec)</label>
-              <input
-                type="number"
-                value={callDuration}
-                onChange={(e) => setCallDuration(Number(e.target.value) || 0)}
-                className="w-full px-3.5 py-2 bg-white border border-slate-300 rounded-xl text-xs font-mono font-bold focus:ring-2 focus:ring-amber-500 outline-none"
-              />
-            </div>
-          </div>
-        </div>
-
-        {/* Action Triggers */}
-        <div className="space-y-4">
-          <div className="flex items-center justify-between">
-            <h3 className="text-sm font-bold text-slate-900">Simulate Incoming &amp; Outgoing Calls</h3>
-            <span className="text-[11px] text-slate-500 font-medium">Click any action to emit real-time event to database</span>
-          </div>
-
-          {/* Incoming Calls Section */}
-          <div className="space-y-1.5">
-            <div className="text-[11px] font-bold uppercase tracking-wider text-slate-500 flex items-center gap-1.5">
-              <PhoneIncoming className="w-3.5 h-3.5 text-blue-600" />
-              <span>Incoming Customer Calls</span>
-            </div>
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-              <button
-                onClick={() => triggerCallEvent('MISSED', 0)}
-                className="p-3.5 rounded-xl border border-rose-200 bg-rose-50 hover:bg-rose-100 text-rose-800 text-xs font-bold text-left transition-colors cursor-pointer"
-              >
-                <div className="text-rose-600 font-bold mb-1 flex items-center justify-between">
-                  <span>1. Incoming Missed Call</span>
-                  <PhoneIncoming className="w-3.5 h-3.5" />
-                </div>
-                <span className="text-[10px] text-rose-600 font-normal block">Customer called, agent missed. Triggers 30m callback SLA</span>
-              </button>
-
-              <button
-                onClick={() => triggerCallEvent('INCOMING', callDuration)}
-                className="p-3.5 rounded-xl border border-blue-200 bg-blue-50 hover:bg-blue-100 text-blue-800 text-xs font-bold text-left transition-colors cursor-pointer"
-              >
-                <div className="text-blue-600 font-bold mb-1 flex items-center justify-between">
-                  <span>2. Incoming Answered Call</span>
-                  <PhoneCall className="w-3.5 h-3.5" />
-                </div>
-                <span className="text-[10px] text-blue-600 font-normal block">Inbound call answered directly ({callDuration}s duration)</span>
-              </button>
-
-              <button
-                onClick={() => triggerCallEvent('CONNECTED', callDuration)}
-                className="p-3.5 rounded-xl border border-emerald-200 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 text-xs font-bold text-left transition-colors cursor-pointer"
-              >
-                <div className="text-emerald-600 font-bold mb-1 flex items-center justify-between">
-                  <span>3. Incoming Callback Connected</span>
-                  <CheckCircle2 className="w-3.5 h-3.5" />
-                </div>
-                <span className="text-[10px] text-emerald-600 font-normal block">Agent successfully connected callback ({callDuration}s)</span>
-              </button>
-            </div>
-          </div>
-
-          {/* Outgoing Calls Section */}
-          <div className="space-y-1.5 pt-1">
-            <div className="text-[11px] font-bold uppercase tracking-wider text-slate-500 flex items-center gap-1.5">
-              <PhoneOutgoing className="w-3.5 h-3.5 text-amber-600" />
-              <span>Outgoing Agent Calls &amp; Follow-ups</span>
-            </div>
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-              <button
-                onClick={() => triggerCallEvent('NOT_PICKED', 0)}
-                className="p-3.5 rounded-xl border border-amber-200 bg-amber-50 hover:bg-amber-100 text-amber-800 text-xs font-bold text-left transition-colors cursor-pointer"
-              >
-                <div className="text-amber-600 font-bold mb-1 flex items-center justify-between">
-                  <span>4. Outgoing Unanswered / Failed</span>
-                  <PhoneOff className="w-3.5 h-3.5" />
-                </div>
-                <span className="text-[10px] text-amber-600 font-normal block">Agent called, customer did not answer. Triggers 24h reconnect SLA</span>
-              </button>
-
-              <button
-                onClick={() => triggerCallEvent('CONNECTED', callDuration)}
-                className="p-3.5 rounded-xl border border-teal-200 bg-teal-50 hover:bg-teal-100 text-teal-800 text-xs font-bold text-left transition-colors cursor-pointer"
-              >
-                <div className="text-teal-600 font-bold mb-1 flex items-center justify-between">
-                  <span>5. Outgoing Connected Call</span>
-                  <PhoneOutgoing className="w-3.5 h-3.5" />
-                </div>
-                <span className="text-[10px] text-teal-600 font-normal block">Agent dialed customer &amp; spoke ({callDuration}s duration)</span>
-              </button>
-
-              <button
-                onClick={handleSendSms}
-                className="p-3.5 rounded-xl border border-purple-200 bg-purple-50 hover:bg-purple-100 text-purple-800 text-xs font-bold text-left transition-colors cursor-pointer"
-              >
-                <div className="text-purple-600 font-bold mb-1 flex items-center justify-between">
-                  <span>6. Outgoing Follow-up SMS</span>
-                  <MessageSquare className="w-3.5 h-3.5" />
-                </div>
-                <span className="text-[10px] text-purple-600 font-normal block">Dispatches follow-up SMS to customer</span>
-              </button>
-            </div>
-          </div>
-        </div>
-
-        {/* Live Simulation Feed */}
-        {simulationLog.length > 0 && (
-          <div className="p-4 bg-slate-900 rounded-2xl text-slate-100 font-mono text-xs space-y-2">
-            <div className="flex items-center justify-between border-b border-slate-800 pb-2">
-              <span className="font-bold text-emerald-400 flex items-center gap-1.5">
-                <Activity className="w-3.5 h-3.5" />
-                Live Ingestion Stream
-              </span>
-              <span className="text-[10px] text-slate-400">Showing last {simulationLog.length} events</span>
-            </div>
-            <div className="space-y-1.5 max-h-40 overflow-y-auto">
-              {simulationLog.map(item => (
-                <div key={item.id} className="flex items-center justify-between text-[11px] py-0.5 border-b border-slate-800/40">
-                  <div className="flex items-center gap-2">
-                    <span className="text-slate-500">{item.time}</span>
-                    <span className={cn(
-                      "px-1.5 py-0.2 rounded font-bold text-[10px]",
-                      item.status === 'MISSED' ? "bg-rose-900/60 text-rose-300" :
-                      item.status === 'CONNECTED' ? "bg-emerald-900/60 text-emerald-300" :
-                      item.status === 'SENT' ? "bg-purple-900/60 text-purple-300" :
-                      "bg-amber-900/60 text-amber-300"
-                    )}>
-                      {item.type} • {item.status}
-                    </span>
-                    <span className="text-slate-300">{item.phone}</span>
-                  </div>
-                  <span className="text-slate-400 text-[10px]">{item.detail}</span>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {/* Floating Overlay Simulation */}
-        {showOverlay && (
-          <div className="mt-8 p-5 bg-[#ff353e] text-white rounded-2xl shadow-xl flex items-center justify-between animate-in fade-in slide-in-from-bottom-4 duration-300">
-            <div>
-              <span className="text-xs font-bold uppercase tracking-wider text-red-100 block">Solvit Quick Response Overlay</span>
-              <p className="text-sm font-bold mt-0.5">Missed call from {lastCallNumber}</p>
-              <p className="text-xs text-red-100">Auto-dismisses in {countdown}s</p>
-            </div>
-            <div className="flex gap-2">
-              <button
-                onClick={() => triggerCallEvent('CONNECTED', 30)}
-                className="px-4 py-2 bg-slate-900 hover:bg-black text-white rounded-xl text-xs font-bold cursor-pointer"
-              >
-                Call Back Now
-              </button>
-              <button
-                onClick={handleSendSms}
-                className="px-4 py-2 bg-white text-[#ff353e] rounded-xl text-xs font-bold hover:bg-red-50 cursor-pointer"
-              >
-                {smsSent ? 'SMS Sent!' : 'Send SMS Follow-up'}
-              </button>
-            </div>
-          </div>
-        )}
-      </div>
     </div>
   );
 }
