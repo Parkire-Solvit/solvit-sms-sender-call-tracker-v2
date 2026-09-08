@@ -153,17 +153,17 @@ async function startServer() {
         agent = await db.queryOne("SELECT id FROM agents WHERE name = 'Unknown Agent'");
       }
 
-      const agent_id = agent?.id || null;
+      const resolvedAgentId = agent?.id || null;
 
       const result = await db.execute(
         `INSERT INTO events (agent_id, type, target_phone, status, duration, reg_no)
          VALUES (?, ?, ?, ?, ?, ?)`,
-        [agent_id, type, finalTargetPhone, status, finalDuration, finalRegNo]
+        [resolvedAgentId, type, finalTargetPhone, status, finalDuration, finalRegNo]
       );
 
       // Update agent heartbeat
-      if (agent_id) {
-        await db.execute("UPDATE agents SET last_active_at = CURRENT_TIMESTAMP WHERE id = ?", [agent_id]);
+      if (resolvedAgentId) {
+        await db.execute("UPDATE agents SET last_active_at = CURRENT_TIMESTAMP WHERE id = ?", [resolvedAgentId]);
       }
 
       res.json({ success: true, id: result.lastInsertId });
