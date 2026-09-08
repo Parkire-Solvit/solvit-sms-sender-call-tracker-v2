@@ -76,13 +76,14 @@ export default function App() {
   const [showDbModal, setShowDbModal] = useState(false);
   const [showMasterSettings, setShowMasterSettings] = useState(false);
 
-  const getNairobiDate = () => {
-    const now = new Date();
-    const nairobi = new Date(now.getTime() + (3 * 60 * 60 * 1000));
-    return nairobi.toISOString().split('T')[0];
+  const getNairobiDate = (daysAgo = 0) => {
+    const date = new Date(Date.now() - (daysAgo * 24 * 60 * 60 * 1000));
+    return date.toLocaleDateString('en-CA', { timeZone: 'Africa/Nairobi' });
   };
 
-  const [startDate, setStartDate] = useState<string>(getNairobiDate());
+  // Show recent history on first load. A today-only default looked like data
+  // loss whenever no device had submitted an event yet that day.
+  const [startDate, setStartDate] = useState<string>(getNairobiDate(30));
   const [endDate, setEndDate] = useState<string>(getNairobiDate());
   const [selectedAgentId, setSelectedAgentId] = useState<string>('');
   const [selectedTag, setSelectedTag] = useState<string>('');
