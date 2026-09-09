@@ -121,6 +121,7 @@ export interface AgentComplianceSummary {
   phone_number?: string;
   installed_at?: string;
   last_active_at?: string;
+  archived_at?: string | null;
   
   // Compliance
   incoming_callback_met: number;

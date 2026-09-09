@@ -10,7 +10,8 @@ import {
   Phone, 
   MessageSquare,
   ChevronRight,
-  Filter
+  Filter,
+  Archive
 } from 'lucide-react';
 import { AgentComplianceSummary, TagGroupCompliance } from '../types/compliance';
 
@@ -22,6 +23,7 @@ interface ComplianceAgentTableProps {
   onEditAgentTag: (agent: { id: number; name: string; tag: string }) => void;
   onEditAgentName: (agent: { id: number; name: string }) => void;
   onInspectAgent: (agentId: number) => void;
+  onArchiveAgent: (agent: { id: number; name: string }) => void;
 }
 
 export const ComplianceAgentTable: React.FC<ComplianceAgentTableProps> = ({
@@ -32,6 +34,7 @@ export const ComplianceAgentTable: React.FC<ComplianceAgentTableProps> = ({
   onEditAgentTag,
   onEditAgentName,
   onInspectAgent,
+  onArchiveAgent,
 }) => {
   const [activeSubTab, setActiveSubTab] = useState<'compliance' | 'activity'>('compliance');
 
@@ -194,12 +197,16 @@ export const ComplianceAgentTable: React.FC<ComplianceAgentTableProps> = ({
                       <button
                         type="button"
                         onClick={() => onEditAgentName({ id: ag.agent_id, name: ag.agent_name })}
+                        disabled={Boolean(ag.archived_at)}
                         className="inline-flex w-fit items-center gap-1.5 font-bold text-slate-900 text-sm hover:text-amber-700"
                         title="Edit agent name"
                       >
                         {ag.agent_name}
                         <Edit2 className="w-3 h-3 opacity-60" />
                       </button>
+                      {ag.archived_at && (
+                        <span className="mt-1 w-fit rounded-full bg-slate-200 px-2 py-0.5 text-[10px] font-bold text-slate-600">Archived</span>
+                      )}
                       {ag.phone_number && ag.phone_number !== 'Simulated' && (
                         <span className="text-[10px] text-slate-400 font-mono">
                           {ag.phone_number}
@@ -212,6 +219,7 @@ export const ComplianceAgentTable: React.FC<ComplianceAgentTableProps> = ({
                     <button
                       type="button"
                       onClick={() => onEditAgentTag({ id: ag.agent_id, name: ag.agent_name, tag: ag.tag })}
+                      disabled={Boolean(ag.archived_at)}
                       className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-semibold bg-slate-100 hover:bg-amber-100 text-slate-700 hover:text-amber-800 transition-colors border border-slate-200"
                     >
                       <TagIcon className="w-3 h-3 text-slate-400" />
@@ -299,14 +307,27 @@ export const ComplianceAgentTable: React.FC<ComplianceAgentTableProps> = ({
                   )}
 
                   <td className="px-4 py-3.5 text-right">
-                    <button
-                      type="button"
-                      onClick={() => onInspectAgent(ag.agent_id)}
-                      className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-semibold text-slate-600 hover:text-amber-700 hover:bg-amber-50 rounded-lg transition-colors"
-                    >
-                      Inspect
-                      <ChevronRight className="w-3.5 h-3.5" />
-                    </button>
+                    <div className="inline-flex items-center gap-1">
+                      {!ag.archived_at && (
+                        <button
+                          type="button"
+                          onClick={() => onArchiveAgent({ id: ag.agent_id, name: ag.agent_name })}
+                          className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-semibold text-slate-500 hover:text-rose-700 hover:bg-rose-50 rounded-lg transition-colors"
+                          title="Archive agent while preserving reporting history"
+                        >
+                          <Archive className="w-3.5 h-3.5" />
+                          Archive
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => onInspectAgent(ag.agent_id)}
+                        className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-semibold text-slate-600 hover:text-amber-700 hover:bg-amber-50 rounded-lg transition-colors"
+                      >
+                        Inspect
+                        <ChevronRight className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
                   </td>
                 </tr>
               ))

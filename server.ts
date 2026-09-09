@@ -130,11 +130,17 @@ async function startServer() {
       // remains supported for older app versions during the transition.
       const requestedAgentId = Number(agent_id || agentId || 0);
       let agent = Number.isInteger(requestedAgentId) && requestedAgentId > 0
-        ? await db.queryOne("SELECT id FROM agents WHERE id = ?", [requestedAgentId])
+        ? await db.queryOne("SELECT id, archived_at FROM agents WHERE id = ?", [requestedAgentId])
         : null;
 
       if (!agent) {
-        agent = await db.queryOne("SELECT id FROM agents WHERE name = ?", [name]);
+        agent = await db.queryOne("SELECT id, archived_at FROM agents WHERE name = ?", [name]);
+      }
+
+      // Archived agents retain their history but must not create future activity.
+      if (agent?.archived_at) {
+        console.log(`[API] Skipping event for archived agent: ${name} (${agent.id})`);
+        return res.json({ success: true, skipped: true, reason: "agent_archived" });
       }
 
       // 3. Auto-create agent if not found
@@ -208,6 +214,52 @@ async function startServer() {
       if ((err as any)?.code === "23505") {
         return res.status(409).json({ error: "Another agent already uses that name" });
       }
+      res.status(500).json({ error: "Database error" });
+    }
+  });
+
+  // Archive/reactivate agents without deleting their events or SLA history.
+  app.post("/api/agents/:id/archive", async (req, res) => {
+    try {
+      const result = await db.execute(
+        "UPDATE agents SET archived_at = CURRENT_TIMESTAMP WHERE id = ? AND name != 'Unknown Agent' AND archived_at IS NULL",
+        [req.params.id]
+      );
+      if (!result.affectedRows) return res.status(404).json({ error: "Active agent not found" });
+      res.json({ success: true });
+    } catch (err) {
+      console.error("[API] Unable to archive agent:", err);
+      res.status(500).json({ error: "Database error" });
+    }
+  });
+
+  app.post("/api/agents/:id/reactivate", async (req, res) => {
+    try {
+      const result = await db.execute(
+        "UPDATE agents SET archived_at = NULL, last_active_at = CURRENT_TIMESTAMP WHERE id = ? AND name != 'Unknown Agent' AND archived_at IS NOT NULL",
+        [req.params.id]
+      );
+      if (!result.affectedRows) return res.status(404).json({ error: "Archived agent not found" });
+      res.json({ success: true });
+    } catch (err) {
+      console.error("[API] Unable to reactivate agent:", err);
+      res.status(500).json({ error: "Database error" });
+    }
+  });
+
+  app.get("/api/archived-agents", async (_req, res) => {
+    try {
+      const agents = await db.queryAll(
+        `SELECT a.id, a.name, a.phone_number, a.tag, a.archived_at, COUNT(e.id)::int AS event_count
+         FROM agents a
+         LEFT JOIN events e ON e.agent_id = a.id
+         WHERE a.archived_at IS NOT NULL
+         GROUP BY a.id
+         ORDER BY a.archived_at DESC`
+      );
+      res.json(agents);
+    } catch (err) {
+      console.error("[API] Unable to list archived agents:", err);
       res.status(500).json({ error: "Database error" });
     }
   });
@@ -387,7 +439,17 @@ function computeActivitySummary(events: any[], totalAgents: number = 0) {
       eventsQuery += " ORDER BY e.timestamp ASC";
 
       const events = await db.queryAll(eventsQuery, eventsParams);
-      const allAgentsList = await db.queryAll("SELECT id, name, tag FROM agents WHERE name != 'Unknown Agent' ORDER BY name ASC");
+      const allAgentsList = await db.queryAll(
+        `SELECT id, name, tag, archived_at FROM agents
+         WHERE name != 'Unknown Agent'
+         AND (archived_at IS NULL OR EXISTS (
+           SELECT 1 FROM events historical_event
+           WHERE historical_event.agent_id = agents.id
+           AND date(historical_event.timestamp, '+3 hours') BETWEEN ? AND ?
+         ))
+         ORDER BY name ASC`,
+        [start, end]
+      );
       const summary = computeActivitySummary(events, allAgentsList.length);
 
       res.json({
@@ -420,8 +482,15 @@ function computeActivitySummary(events: any[], totalAgents: number = 0) {
       const settings = await getSystemSettings(db);
 
       // 2. Fetch all agents
-      let agentsQuery = "SELECT id, name, phone_number, tag, installed_at, last_active_at FROM agents WHERE name != 'Unknown Agent'";
-      const agentsParams: any[] = [];
+      let agentsQuery = `SELECT id, name, phone_number, tag, installed_at, last_active_at, archived_at
+        FROM agents
+        WHERE name != 'Unknown Agent'
+        AND (archived_at IS NULL OR EXISTS (
+          SELECT 1 FROM events historical_event
+          WHERE historical_event.agent_id = agents.id
+          AND date(historical_event.timestamp, '+3 hours') BETWEEN ? AND ?
+        ))`;
+      const agentsParams: any[] = [start, end];
       if (filterAgentId) {
         agentsQuery += " AND id = ?";
         agentsParams.push(filterAgentId);
@@ -461,7 +530,17 @@ function computeActivitySummary(events: any[], totalAgents: number = 0) {
       const complianceResult = evaluateCompliance(events, agents, settings, new Date());
 
       // 5. Activity Summary
-      const allAgentsList = await db.queryAll("SELECT id, name, tag FROM agents WHERE name != 'Unknown Agent' ORDER BY name ASC");
+      const allAgentsList = await db.queryAll(
+        `SELECT id, name, tag, archived_at FROM agents
+         WHERE name != 'Unknown Agent'
+         AND (archived_at IS NULL OR EXISTS (
+           SELECT 1 FROM events historical_event
+           WHERE historical_event.agent_id = agents.id
+           AND date(historical_event.timestamp, '+3 hours') BETWEEN ? AND ?
+         ))
+         ORDER BY name ASC`,
+        [start, end]
+      );
       const summary = computeActivitySummary(events, allAgentsList.length);
 
       // 6. Recent events with compliance labels (last 100)

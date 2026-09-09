@@ -1,7 +1,7 @@
 import pg from "pg";
 
 const { Pool } = pg;
-const REQUIRED_SCHEMA_VERSION = 1;
+const REQUIRED_SCHEMA_VERSION = 4;
 
 export interface DbAdapter {
   type: "postgresql";

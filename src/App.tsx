@@ -25,6 +25,8 @@ import {
   LogOut,
   Users,
   UserMinus,
+  Archive,
+  RotateCcw,
   Settings as SettingsIcon,
   Tag as TagIcon,
   ExternalLink
@@ -457,6 +459,8 @@ function ComplianceAdminDashboard({
   const [internalContacts, setInternalContacts] = useState<any[]>([]);
   const [showInternalContactsModal, setShowInternalContactsModal] = useState(false);
   const [newInternalContact, setNewInternalContact] = useState({ phone_number: '', label: '' });
+  const [archivedAgents, setArchivedAgents] = useState<any[]>([]);
+  const [showArchivedAgentsModal, setShowArchivedAgentsModal] = useState(false);
 
   const [callbackListFilter, setCallbackListFilter] = useState<string>('ALL');
   const [drilldownCardType, setDrilldownCardType] = useState<DrilldownCardType | null>(null);
@@ -509,6 +513,39 @@ function ComplianceAdminDashboard({
   useEffect(() => {
     fetchInternalContacts();
   }, []);
+
+  const fetchArchivedAgents = async () => {
+    try {
+      const res = await fetch('/api/archived-agents');
+      if (!res.ok) throw new Error('Unable to load archived agents.');
+      setArchivedAgents(await res.json());
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const archiveAgent = async (agent: { id: number; name: string }) => {
+    if (!window.confirm(`Archive ${agent.name}? Their historical events and SLA results will be preserved.`)) return;
+    const res = await fetch(`/api/agents/${agent.id}/archive`, { method: 'POST' });
+    if (!res.ok) {
+      const result = await res.json().catch(() => ({}));
+      alert(result.error || 'Unable to archive the agent.');
+      return;
+    }
+    await fetchArchivedAgents();
+    onRefresh();
+  };
+
+  const reactivateAgent = async (id: number) => {
+    const res = await fetch(`/api/agents/${id}/reactivate`, { method: 'POST' });
+    if (!res.ok) {
+      const result = await res.json().catch(() => ({}));
+      alert(result.error || 'Unable to reactivate the agent.');
+      return;
+    }
+    await fetchArchivedAgents();
+    onRefresh();
+  };
 
   const updateAgentTag = async (id: number, tag: string) => {
     try {
@@ -657,6 +694,18 @@ function ComplianceAdminDashboard({
             Exclusions ({internalContacts.length})
           </button>
 
+          <button
+            id="btn-manage-archived-agents"
+            onClick={() => {
+              fetchArchivedAgents();
+              setShowArchivedAgentsModal(true);
+            }}
+            className="px-3.5 py-2 bg-slate-100 text-slate-700 border border-slate-200 rounded-xl text-xs font-bold hover:bg-slate-200 transition-all h-[36px] flex items-center justify-center gap-1.5"
+          >
+            <Archive className="w-3.5 h-3.5" />
+            Archived Agents
+          </button>
+
           {/* Export Excel Button */}
           <button 
             id="btn-export-excel"
@@ -738,7 +787,44 @@ function ComplianceAdminDashboard({
           setEditingName(agent);
         }}
         onInspectAgent={(agentId) => setSelectedAgentId(agentId.toString())}
+        onArchiveAgent={archiveAgent}
       />
+
+      {showArchivedAgentsModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-sm p-4">
+          <div className="bg-white rounded-2xl p-6 shadow-2xl border border-slate-200 w-full max-w-lg">
+            <div className="flex items-start justify-between gap-4 mb-4">
+              <div>
+                <h3 className="text-base font-bold text-slate-900">Archived Agents</h3>
+                <p className="text-xs text-slate-500 mt-1">Historical events and SLA reporting remain unchanged.</p>
+              </div>
+              <button type="button" onClick={() => setShowArchivedAgentsModal(false)} className="text-slate-400 hover:text-slate-700">
+                <XCircle className="w-5 h-5" />
+              </button>
+            </div>
+            <div className="max-h-80 overflow-y-auto divide-y divide-slate-100 border border-slate-200 rounded-xl">
+              {archivedAgents.length === 0 ? (
+                <p className="p-6 text-center text-sm text-slate-500">No archived agents.</p>
+              ) : archivedAgents.map((agent) => (
+                <div key={agent.id} className="flex items-center justify-between gap-3 p-3">
+                  <div>
+                    <p className="text-sm font-bold text-slate-900">{agent.name}</p>
+                    <p className="text-[11px] text-slate-500">{agent.tag || 'Uncategorised'} · {agent.event_count} historical events</p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => reactivateAgent(agent.id)}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-50 text-emerald-700 text-xs font-bold hover:bg-emerald-100"
+                  >
+                    <RotateCcw className="w-3.5 h-3.5" />
+                    Reactivate
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Edit Agent Name Modal */}
       {editingName && (
