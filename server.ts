@@ -254,7 +254,7 @@ async function startServer() {
          FROM agents a
          LEFT JOIN events e ON e.agent_id = a.id
          WHERE a.archived_at IS NOT NULL
-         GROUP BY a.id
+         GROUP BY a.id, a.name, a.phone_number, a.tag, a.archived_at
          ORDER BY a.archived_at DESC`
       );
       res.json(agents);
