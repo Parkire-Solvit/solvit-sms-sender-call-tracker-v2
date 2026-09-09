@@ -220,10 +220,13 @@ async function startServer() {
 
   // Archive/reactivate agents without deleting their events or SLA history.
   app.post("/api/agents/:id/archive", async (req, res) => {
+    const reason = String(req.body?.reason || "").trim();
+    if (!reason) return res.status(400).json({ error: "Archive reason is required" });
+    if (reason.length > 500) return res.status(400).json({ error: "Archive reason must be 500 characters or fewer" });
     try {
       const result = await db.execute(
-        "UPDATE agents SET archived_at = CURRENT_TIMESTAMP WHERE id = ? AND name != 'Unknown Agent' AND archived_at IS NULL",
-        [req.params.id]
+        "UPDATE agents SET archived_at = CURRENT_TIMESTAMP, archive_reason = ? WHERE id = ? AND name != 'Unknown Agent' AND archived_at IS NULL",
+        [reason, req.params.id]
       );
       if (!result.affectedRows) return res.status(404).json({ error: "Active agent not found" });
       res.json({ success: true });
@@ -250,11 +253,11 @@ async function startServer() {
   app.get("/api/archived-agents", async (_req, res) => {
     try {
       const agents = await db.queryAll(
-        `SELECT a.id, a.name, a.phone_number, a.tag, a.archived_at, COUNT(e.id)::int AS event_count
+        `SELECT a.id, a.name, a.phone_number, a.tag, a.archived_at, a.archive_reason, COUNT(e.id)::int AS event_count
          FROM agents a
          LEFT JOIN events e ON e.agent_id = a.id
          WHERE a.archived_at IS NOT NULL
-         GROUP BY a.id, a.name, a.phone_number, a.tag, a.archived_at
+         GROUP BY a.id, a.name, a.phone_number, a.tag, a.archived_at, a.archive_reason
          ORDER BY a.archived_at DESC`
       );
       res.json(agents);

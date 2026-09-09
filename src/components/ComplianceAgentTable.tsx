@@ -312,7 +312,7 @@ export const ComplianceAgentTable: React.FC<ComplianceAgentTableProps> = ({
                         <button
                           type="button"
                           onClick={() => onArchiveAgent({ id: ag.agent_id, name: ag.agent_name })}
-                          className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-semibold text-slate-500 hover:text-rose-700 hover:bg-rose-50 rounded-lg transition-colors"
+                          className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold text-white bg-rose-600 hover:bg-rose-700 border border-rose-700 rounded-lg shadow-sm transition-colors"
                           title="Archive agent while preserving reporting history"
                         >
                           <Archive className="w-3.5 h-3.5" />

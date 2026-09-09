@@ -461,6 +461,10 @@ function ComplianceAdminDashboard({
   const [newInternalContact, setNewInternalContact] = useState({ phone_number: '', label: '' });
   const [archivedAgents, setArchivedAgents] = useState<any[]>([]);
   const [showArchivedAgentsModal, setShowArchivedAgentsModal] = useState(false);
+  const [archiveCandidate, setArchiveCandidate] = useState<{ id: number; name: string } | null>(null);
+  const [archiveReason, setArchiveReason] = useState('');
+  const [archiveError, setArchiveError] = useState('');
+  const [archivingAgent, setArchivingAgent] = useState(false);
 
   const [callbackListFilter, setCallbackListFilter] = useState<string>('ALL');
   const [drilldownCardType, setDrilldownCardType] = useState<DrilldownCardType | null>(null);
@@ -524,16 +528,41 @@ function ComplianceAdminDashboard({
     }
   };
 
-  const archiveAgent = async (agent: { id: number; name: string }) => {
-    if (!window.confirm(`Archive ${agent.name}? Their historical events and SLA results will be preserved.`)) return;
-    const res = await fetch(`/api/agents/${agent.id}/archive`, { method: 'POST' });
-    if (!res.ok) {
-      const result = await res.json().catch(() => ({}));
-      alert(result.error || 'Unable to archive the agent.');
+  const openArchiveAgentModal = (agent: { id: number; name: string }) => {
+    setArchiveCandidate(agent);
+    setArchiveReason('');
+    setArchiveError('');
+  };
+
+  const archiveAgent = async () => {
+    if (!archiveCandidate) return;
+    const reason = archiveReason.trim();
+    if (!reason) {
+      setArchiveError('Please provide a reason for archiving this agent.');
       return;
     }
-    await fetchArchivedAgents();
-    onRefresh();
+    setArchivingAgent(true);
+    setArchiveError('');
+    try {
+      const res = await fetch(`/api/agents/${archiveCandidate.id}/archive`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reason })
+      });
+      if (!res.ok) {
+        const result = await res.json().catch(() => ({}));
+        setArchiveError(result.error || 'Unable to archive the agent.');
+        return;
+      }
+      setArchiveCandidate(null);
+      setArchiveReason('');
+      await fetchArchivedAgents();
+      onRefresh();
+    } catch {
+      setArchiveError('Unable to reach the server. Please try again.');
+    } finally {
+      setArchivingAgent(false);
+    }
   };
 
   const reactivateAgent = async (id: number) => {
@@ -787,8 +816,67 @@ function ComplianceAdminDashboard({
           setEditingName(agent);
         }}
         onInspectAgent={(agentId) => setSelectedAgentId(agentId.toString())}
-        onArchiveAgent={archiveAgent}
+        onArchiveAgent={openArchiveAgentModal}
       />
+
+      {archiveCandidate && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-sm p-4">
+          <div className="bg-white rounded-2xl p-6 shadow-2xl border border-slate-200 w-full max-w-md">
+            <div className="flex items-start gap-3">
+              <div className="w-10 h-10 shrink-0 rounded-xl bg-rose-100 text-rose-700 flex items-center justify-center">
+                <Archive className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-base font-bold text-slate-900">Archive {archiveCandidate.name}?</h3>
+                <p className="text-xs text-slate-600 mt-1 leading-relaxed">
+                  Their historical calls, SMS records, compliance scores and SLA results will be preserved in reporting. The agent will stop appearing as active and new events from that agent will be ignored until reactivated.
+                </p>
+              </div>
+            </div>
+
+            <label htmlFor="archive-agent-reason" className="block mt-5 mb-1.5 text-xs font-bold text-slate-700">
+              Reason for archiving <span className="text-rose-600">*</span>
+            </label>
+            <textarea
+              id="archive-agent-reason"
+              autoFocus
+              value={archiveReason}
+              onChange={(e) => {
+                setArchiveReason(e.target.value);
+                if (archiveError) setArchiveError('');
+              }}
+              maxLength={500}
+              rows={4}
+              placeholder="For example: Agent left the company or device was reassigned"
+              className="w-full resize-none px-3 py-2 border border-slate-300 rounded-xl text-sm focus:ring-2 focus:ring-rose-500 focus:border-rose-500 outline-none"
+            />
+            <div className="flex justify-between mt-1">
+              <span className="text-xs font-semibold text-rose-600">{archiveError}</span>
+              <span className="text-[10px] text-slate-400">{archiveReason.length}/500</span>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-5">
+              <button
+                type="button"
+                onClick={() => setArchiveCandidate(null)}
+                disabled={archivingAgent}
+                className="px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-lg disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={archiveAgent}
+                disabled={archivingAgent || !archiveReason.trim()}
+                className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-bold text-white bg-rose-600 hover:bg-rose-700 rounded-lg shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                <Archive className="w-3.5 h-3.5" />
+                {archivingAgent ? 'Archiving...' : 'Submit & Archive'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {showArchivedAgentsModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-sm p-4">
@@ -810,6 +898,7 @@ function ComplianceAdminDashboard({
                   <div>
                     <p className="text-sm font-bold text-slate-900">{agent.name}</p>
                     <p className="text-[11px] text-slate-500">{agent.tag || 'Uncategorised'} · {agent.event_count} historical events</p>
+                    {agent.archive_reason && <p className="text-[11px] text-slate-600 mt-1"><strong>Reason:</strong> {agent.archive_reason}</p>}
                   </div>
                   <button
                     type="button"
