@@ -35,6 +35,7 @@ export interface RawAgent {
   tag?: string;
   installed_at?: string;
   last_active_at?: string;
+  archived_at?: string | null;
 }
 
 // Convert a UTC Date to Nairobi Local Date Components
@@ -673,6 +674,7 @@ export function evaluateCompliance(
       phone_number: agent.phone_number,
       installed_at: agent.installed_at,
       last_active_at: agent.last_active_at,
+      archived_at: agent.archived_at,
 
       incoming_callback_met: 0,
       incoming_callback_total: 0,
