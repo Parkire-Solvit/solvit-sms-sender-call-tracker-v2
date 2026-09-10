@@ -465,6 +465,7 @@ function ComplianceAdminDashboard({
   const [archiveReason, setArchiveReason] = useState('');
   const [archiveError, setArchiveError] = useState('');
   const [archivingAgent, setArchivingAgent] = useState(false);
+  const [locallyArchivedAgentIds, setLocallyArchivedAgentIds] = useState<Set<number>>(new Set());
 
   const [callbackListFilter, setCallbackListFilter] = useState<string>('ALL');
   const [drilldownCardType, setDrilldownCardType] = useState<DrilldownCardType | null>(null);
@@ -554,6 +555,7 @@ function ComplianceAdminDashboard({
         setArchiveError(result.error || 'Unable to archive the agent.');
         return;
       }
+      setLocallyArchivedAgentIds((current) => new Set(current).add(archiveCandidate.id));
       setArchiveCandidate(null);
       setArchiveReason('');
       await fetchArchivedAgents();
@@ -572,6 +574,11 @@ function ComplianceAdminDashboard({
       alert(result.error || 'Unable to reactivate the agent.');
       return;
     }
+    setLocallyArchivedAgentIds((current) => {
+      const next = new Set(current);
+      next.delete(id);
+      return next;
+    });
     await fetchArchivedAgents();
     onRefresh();
   };
@@ -676,12 +683,12 @@ function ComplianceAdminDashboard({
   // Archived agents remain in the API response so historical aggregates and
   // exports stay accurate, but they are hidden from active dashboard controls.
   const agentsList = (complianceStats?.agents || stats?.agents || []).filter(
-    (agent: any) => !agent.archived_at
+    (agent: any) => !agent.archived_at && !locallyArchivedAgentIds.has(Number(agent.agent_id || agent.id))
   );
   const openObligations = complianceStats?.open_obligations || [];
   const turnaroundReport = complianceStats?.turnaround_report;
   const allAgents = (complianceStats?.allAgents || stats?.allAgents || []).filter(
-    (agent: any) => !agent.archived_at
+    (agent: any) => !agent.archived_at && !locallyArchivedAgentIds.has(Number(agent.id || agent.agent_id))
   );
   const activeSummary = complianceStats?.summary || complianceStats?.raw_summary || stats?.summary || stats?.raw_summary || {};
 
