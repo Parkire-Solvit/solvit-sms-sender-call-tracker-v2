@@ -673,10 +673,16 @@ function ComplianceAdminDashboard({
     }
   };
 
-  const agentsList = complianceStats?.agents || stats?.agents || [];
+  // Archived agents remain in the API response so historical aggregates and
+  // exports stay accurate, but they are hidden from active dashboard controls.
+  const agentsList = (complianceStats?.agents || stats?.agents || []).filter(
+    (agent: any) => !agent.archived_at
+  );
   const openObligations = complianceStats?.open_obligations || [];
   const turnaroundReport = complianceStats?.turnaround_report;
-  const allAgents = complianceStats?.allAgents || stats?.allAgents || [];
+  const allAgents = (complianceStats?.allAgents || stats?.allAgents || []).filter(
+    (agent: any) => !agent.archived_at
+  );
   const activeSummary = complianceStats?.summary || complianceStats?.raw_summary || stats?.summary || stats?.raw_summary || {};
 
   const formatMinutes = (minutes: number | null | undefined) => {
