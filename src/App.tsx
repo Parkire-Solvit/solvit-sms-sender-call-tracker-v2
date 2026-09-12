@@ -29,7 +29,9 @@ import {
   RotateCcw,
   Settings as SettingsIcon,
   Tag as TagIcon,
-  ExternalLink
+  ExternalLink,
+  Car,
+  LayoutDashboard
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { clsx, type ClassValue } from 'clsx';
@@ -43,6 +45,7 @@ import { ComplianceAgentTable } from './components/ComplianceAgentTable';
 import { SearchContactBar } from './components/SearchContactBar';
 import { ConsolidatedMetricCards } from './components/ConsolidatedMetricCards';
 import { CardDrilldownModal, DrilldownCardType } from './components/CardDrilldownModal';
+import { InsuranceCallbackSection } from './components/InsuranceCallbackSection';
 import { SystemSettings, TurnaroundTimeReport, Obligation, AgentComplianceSummary, TagGroupCompliance } from './types/compliance';
 
 function cn(...inputs: ClassValue[]) {
@@ -95,6 +98,7 @@ export default function App() {
   
   // Selected phone for Contact History Thread Modal
   const [inspectedPhone, setInspectedPhone] = useState<string | null>(null);
+  const [activePage, setActivePage] = useState<'dashboard' | 'callbacks'>('dashboard');
 
   // Check for existing session
   useEffect(() => {
@@ -211,6 +215,34 @@ export default function App() {
           </div>
           
           <div className="flex flex-wrap items-center gap-2.5">
+            {/* Page Tabs: Dashboard / Insurance Callbacks */}
+            {isAdminAuthenticated && (
+              <div className="flex items-center gap-1 bg-slate-100 rounded-xl p-1 mr-1">
+                <button
+                  id="nav-tab-dashboard"
+                  onClick={() => setActivePage('dashboard')}
+                  className={cn(
+                    "px-3.5 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer",
+                    activePage === 'dashboard' ? "bg-white text-[#ff353e] shadow-xs" : "text-slate-600 hover:text-[#ff353e]"
+                  )}
+                >
+                  <LayoutDashboard className="w-3.5 h-3.5" />
+                  <span>Dashboard</span>
+                </button>
+                <button
+                  id="nav-tab-insurance-callbacks"
+                  onClick={() => setActivePage('callbacks')}
+                  className={cn(
+                    "px-3.5 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer",
+                    activePage === 'callbacks' ? "bg-white text-[#ff353e] shadow-xs" : "text-slate-600 hover:text-[#ff353e]"
+                  )}
+                >
+                  <Car className="w-3.5 h-3.5" />
+                  <span>Insurance Callbacks</span>
+                </button>
+              </div>
+            )}
+
             {/* Quick Contact Search Bar */}
             {isAdminAuthenticated && (
               <SearchContactBar onSelectPhone={(phone) => setInspectedPhone(phone)} />
@@ -263,22 +295,6 @@ export default function App() {
             </div>
 
             <form onSubmit={handleLogin} className="space-y-4">
-              <div className="p-3 bg-red-50/60 border border-red-100 rounded-xl flex items-center justify-between text-xs">
-                <div className="text-slate-700">
-                  <span className="font-bold text-[#ff353e]">Default Credentials:</span>
-                  <div className="text-[11px] text-slate-500 mt-0.5">
-                    User: <strong className="text-slate-800 font-mono">admin</strong> | Pass: <strong className="text-slate-800 font-mono">admin123</strong>
-                  </div>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => setLoginForm({ username: 'admin', password: 'admin123' })}
-                  className="px-3 py-1.5 bg-[#ff353e] hover:bg-[#e02831] text-white font-bold rounded-lg text-xs shadow-xs transition-all cursor-pointer shrink-0"
-                >
-                  Quick Fill
-                </button>
-              </div>
-
               <div>
                 <label className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Username</label>
                 <input 
@@ -320,8 +336,13 @@ export default function App() {
             </form>
           </motion.div>
         </div>
+      ) : activePage === 'callbacks' ? (
+        <InsuranceCallbackSection
+          allAgents={complianceStats?.allAgents || stats?.allAgents || []}
+          onOpenSettings={() => setShowMasterSettings(true)}
+        />
       ) : (
-        <ComplianceAdminDashboard 
+        <ComplianceAdminDashboard
           stats={stats}
           complianceStats={complianceStats}
           loading={loading} 
