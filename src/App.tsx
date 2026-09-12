@@ -46,6 +46,7 @@ import { SearchContactBar } from './components/SearchContactBar';
 import { ConsolidatedMetricCards } from './components/ConsolidatedMetricCards';
 import { CardDrilldownModal, DrilldownCardType } from './components/CardDrilldownModal';
 import { InsuranceCallbackSection } from './components/InsuranceCallbackSection';
+import { AgentPerformanceNarrative } from './components/AgentPerformanceNarrative';
 import { SystemSettings, TurnaroundTimeReport, Obligation, AgentComplianceSummary, TagGroupCompliance } from './types/compliance';
 
 function cn(...inputs: ClassValue[]) {
@@ -88,8 +89,8 @@ export default function App() {
 
   // Show recent history on first load. A today-only default looked like data
   // loss whenever no device had submitted an event yet that day.
-  const [startDate, setStartDate] = useState<string>(getNairobiDate(30));
-  const [endDate, setEndDate] = useState<string>(getNairobiDate());
+  const [startDate, setStartDate] = useState<string>(getNairobiDate(1));
+  const [endDate, setEndDate] = useState<string>(getNairobiDate(1));
   const [selectedAgentId, setSelectedAgentId] = useState<string>('');
   const [selectedTag, setSelectedTag] = useState<string>('');
   const [isAdminAuthenticated, setIsAdminAuthenticated] = useState(false);
@@ -188,9 +189,8 @@ export default function App() {
 
   useEffect(() => {
     if (isAdminAuthenticated) {
+      // Auto-refresh removed: data loads on filter change and via the manual Refresh button only.
       fetchAllStats(startDate, endDate, selectedAgentId, selectedTag);
-      const interval = setInterval(() => fetchAllStats(startDate, endDate, selectedAgentId, selectedTag), 25000);
-      return () => clearInterval(interval);
     }
   }, [startDate, endDate, selectedAgentId, selectedTag, fetchAllStats, isAdminAuthenticated]);
 
@@ -851,6 +851,12 @@ function ComplianceAdminDashboard({
         }}
         onInspectAgent={(agentId) => setSelectedAgentId(agentId.toString())}
         onArchiveAgent={openArchiveAgentModal}
+      />
+
+      {/* Customer Service Performance Narrative Summary */}
+      <AgentPerformanceNarrative
+        agents={agentsList}
+        turnaroundReport={turnaroundReport}
       />
 
       {archiveCandidate && (

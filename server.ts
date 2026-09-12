@@ -367,10 +367,33 @@ function computeActivitySummary(events: any[], totalAgents: number = 0) {
   let total_calls_not_picked = 0;
   let total_calls_missed = 0;
 
+  const lastLegByPhone = new Map<string, { status: string; timestamp: number }>();
+  const CORRELATION_WINDOW_MS = 30 * 60 * 1000;
+
   for (const e of events) {
     const type = (e.type || "").toUpperCase();
     const status = (e.status || "").toUpperCase();
     const duration = Number(e.duration) || 0;
+    const phone = e.target_phone;
+    const ts = new Date(e.timestamp).getTime();
+
+    if (type === "CALL" && (status === "INCOMING" || status === "OUTGOING")) {
+      lastLegByPhone.set(phone, { status, timestamp: ts });
+    }
+
+    if (type === "CALL" && status === "CONNECTED") {
+      const leg = lastLegByPhone.get(phone);
+      const wasIncoming = leg && leg.status === "INCOMING" && (ts - leg.timestamp) <= CORRELATION_WINDOW_MS;
+      if (wasIncoming) {
+        total_calls_incoming_connected += 1;
+      } else {
+        total_calls_made += 1;
+        total_calls_outgoing_connected += 1;
+      }
+      total_calls_connected += 1;
+      lastLegByPhone.delete(phone);
+      continue;
+    }
 
     if (type === "SMS") {
       total_sms += 1;
@@ -380,14 +403,6 @@ function computeActivitySummary(events: any[], totalAgents: number = 0) {
         total_calls_incoming += 1;
       } else if (status === "INCOMING") {
         total_calls_incoming += 1;
-        if (duration > 0) {
-          total_calls_incoming_connected += 1;
-          total_calls_connected += 1;
-        }
-      } else if (status === "CONNECTED") {
-        total_calls_made += 1;
-        total_calls_outgoing_connected += 1;
-        total_calls_connected += 1;
       } else if (["NOT_PICKED", "FAILED", "BUSY", "NO_ANSWER"].includes(status)) {
         total_calls_made += 1;
         total_calls_not_picked += 1;

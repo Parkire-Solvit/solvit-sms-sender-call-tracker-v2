@@ -795,6 +795,9 @@ export function evaluateCompliance(
   let totalOpenIncoming = 0;
   let totalOpenOutgoing = 0;
   let totalOpenSms = 0;
+  let totalBreachedIncoming = 0;
+  let totalBreachedOutgoing = 0;
+  let totalBreachedSms = 0;
 
   allObligations.forEach((obl) => {
     if (obl.status === 'OPEN') {
@@ -806,12 +809,15 @@ export function evaluateCompliance(
       if (obl.obligation_type === 'MISSED_INCOMING_CALLBACK') {
         totalIncomingFinal += 1;
         if (obl.status === 'MET') totalIncomingMet += 1;
+        if (obl.status === 'BREACHED') totalBreachedIncoming += 1;
       } else if (obl.obligation_type === 'OUTGOING_RECONNECTION') {
         totalOutgoingFinal += 1;
         if (obl.status === 'MET') totalOutgoingMet += 1;
+        if (obl.status === 'BREACHED') totalBreachedOutgoing += 1;
       } else if (obl.obligation_type === 'SMS_FOLLOWUP') {
         totalSmsFinal += 1;
         if (obl.status === 'MET') totalSmsMet += 1;
+        if (obl.status === 'BREACHED') totalBreachedSms += 1;
       }
     }
   });
@@ -821,16 +827,19 @@ export function evaluateCompliance(
     incoming_callback_met: totalIncomingMet,
     incoming_callback_total: totalIncomingFinal,
     open_incoming_count: totalOpenIncoming,
+    breached_incoming_count: totalBreachedIncoming,
 
     outgoing_reconnect_compliance_pct: totalOutgoingFinal > 0 ? Math.round((totalOutgoingMet / totalOutgoingFinal) * 100) : null,
     outgoing_reconnect_met: totalOutgoingMet,
     outgoing_reconnect_total: totalOutgoingFinal,
     open_outgoing_count: totalOpenOutgoing,
+    breached_outgoing_count: totalBreachedOutgoing,
 
     sms_followup_compliance_pct: totalSmsFinal > 0 ? Math.round((totalSmsMet / totalSmsFinal) * 100) : null,
     sms_followup_met: totalSmsMet,
     sms_followup_total: totalSmsFinal,
     open_sms_count: totalOpenSms,
+    breached_sms_count: totalBreachedSms,
 
     open_obligations_count: totalOpenObligations,
   };
