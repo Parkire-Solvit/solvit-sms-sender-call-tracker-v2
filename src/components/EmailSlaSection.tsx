@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { AlertTriangle, Mail, RefreshCw, Settings2 } from 'lucide-react';
-import { emailWorkingMinutesBetween, isEmailWorkingTime, nextEmailWorkingStart } from '../../shared/emailBusinessHours';
+import { emailDeadlineLabel } from '../../shared/emailDeadlineLabel';
 
 type Thread = {
   id: number; subject: string; customer_email: string; received_at: string;
@@ -44,26 +44,6 @@ async function api<T>(url: string, init?: RequestInit): Promise<T> {
   const data = await response.json();
   if (!response.ok) throw new Error(data.error || `Request failed (${response.status})`);
   return data as T;
-}
-
-function deadlineLabel(value: string, done: boolean, now: number, calendar: Settings | null): string {
-  if (done) return 'Completed';
-  const due = new Date(value);
-  const current = new Date(now);
-  if (!calendar) return 'Calendar pending';
-  const holidays = calendar.holidayDates;
-  if (due < current) {
-    const overdue = Math.ceil(emailWorkingMinutesBetween(due, current, holidays));
-    const label = overdue ? `${overdue} working min overdue` : 'Overdue';
-    return isEmailWorkingTime(current, holidays) ? label : `${label} (paused)`;
-  }
-  if (!isEmailWorkingTime(current, holidays)) {
-    const resumes = nextEmailWorkingStart(current, holidays);
-    return `Paused until ${resumes.toLocaleString('en-KE', { timeZone: 'Africa/Nairobi', weekday: 'short', hour: 'numeric', minute: '2-digit' })}`;
-  }
-  const minutes = Math.ceil(emailWorkingMinutesBetween(current, due, holidays));
-  if (minutes === 0) return 'Due now';
-  return `${minutes} working min left`;
 }
 
 export function EmailSlaSection({ employeeEmail }: { employeeEmail?: string }) {
@@ -209,8 +189,8 @@ export function EmailSlaSection({ employeeEmail }: { employeeEmail?: string }) {
             <td className="py-3 whitespace-nowrap">{new Date(thread.received_at).toLocaleString('en-KE', { timeZone: 'Africa/Nairobi' })}</td>
             <td className="max-w-xs"><p className="font-medium truncate">{thread.subject || '(no subject)'}</p><p className="text-xs text-slate-500 truncate">{thread.customer_email}</p></td>
             <td>{thread.owner_name || 'Unassigned'}</td>
-            <td className={thread.response_breached || (!thread.first_response_at && new Date(thread.response_due_at).getTime() <= now) ? 'text-red-700 font-semibold' : ''}>{deadlineLabel(thread.response_due_at, Boolean(thread.first_response_at), now, thread.sla_settings_snapshot)}</td>
-            <td className={thread.resolution_breached || (!thread.resolved_at && new Date(thread.resolution_due_at).getTime() <= now) ? 'text-red-700 font-semibold' : ''}>{deadlineLabel(thread.resolution_due_at, Boolean(thread.resolved_at), now, thread.sla_settings_snapshot)}</td>
+            <td className={thread.response_breached || (!thread.first_response_at && new Date(thread.response_due_at).getTime() <= now) ? 'text-red-700 font-semibold' : ''}>{emailDeadlineLabel(thread.response_due_at, Boolean(thread.first_response_at), now, thread.sla_settings_snapshot)}</td>
+            <td className={thread.resolution_breached || (!thread.resolved_at && new Date(thread.resolution_due_at).getTime() <= now) ? 'text-red-700 font-semibold' : ''}>{emailDeadlineLabel(thread.resolution_due_at, Boolean(thread.resolved_at), now, thread.sla_settings_snapshot)}</td>
             <td>{thread.status.replaceAll('_', ' ')}{thread.resolved_at && <p className="mt-1 text-xs text-slate-500">By {thread.resolved_by || 'unrecorded'} · {new Date(thread.resolved_at).toLocaleString('en-KE', { timeZone: 'Africa/Nairobi' })}</p>}{thread.resolution_note && <p className="text-xs text-slate-500">{thread.resolution_note}</p>}</td>
             <td className="min-w-44">{!isEmployee && thread.status !== 'RESOLVED' && <select aria-label={`Assign thread ${thread.id}`} value="" disabled={busy} onChange={(event) => void action(`/api/email/threads/${thread.id}/assign`, { memberId: Number(event.target.value) })} className="border rounded px-1 py-1 text-xs"><option value="">Assign / reassign</option>{members.filter((member) => member.is_monitored).map((member) => <option key={member.id} value={member.id}>{member.display_name}</option>)}</select>}
               {thread.status !== 'RESOLVED' && (!isEmployee || thread.status === 'IN_PROGRESS') && <button disabled={busy} onClick={() => { setError(''); setResolveTarget(thread); setResolutionNote(''); }} className="ml-1 text-xs text-emerald-700 whitespace-nowrap">Mark resolved</button>}</td>
