@@ -1,4 +1,4 @@
--- Email SLA data is deliberately separate from SMS/call events.
+-- Email SLA data is deliberately separate from SMS/call and insurance callback events.
 CREATE TABLE IF NOT EXISTS email_sla_settings (
   id INTEGER PRIMARY KEY DEFAULT 1 CHECK (id = 1),
   response_minutes INTEGER NOT NULL DEFAULT 30 CHECK (response_minutes > 0),

@@ -5,6 +5,7 @@ import { initDatabase, getDb } from "./db";
 import { getSystemSettings, updateSystemSettings, getSettingsChangeLogs } from "./settingsManager";
 import { evaluateCompliance, RawEvent, RawAgent } from "./complianceEngine";
 import { clearAdminSession, credentialsMatch, isAdminRequest, requireAdmin, setAdminSession } from './server/auth/adminSession';
+import { assertEmailUserLoginConfiguration, clearEmailUser, emailUser, emailUserLoginEnabled, emailLoginUrl, finishEmailLogin } from './server/auth/emailUserSession';
 import { createEmailRouter } from './server/email/emailRoutes';
 import { configuredEmailRuntime, startEmailPolling } from './server/email/emailSyncService';
 
@@ -40,12 +41,30 @@ async function startServer() {
   await getSystemSettings(db);
 
   const emailRuntime = configuredEmailRuntime();
+  assertEmailUserLoginConfiguration();
   if (emailRuntime) {
-    const migration = await db.queryOne('SELECT version FROM schema_migrations WHERE version = 7');
-    if (!migration) throw new Error('Email SLA requires database migration 007 before it can be enabled');
+    const migration = await db.queryOne('SELECT version FROM schema_migrations WHERE version = 9');
+    if (!migration) throw new Error('Email SLA requires database migration 009 before it can be enabled');
     startEmailPolling(emailRuntime);
   }
   app.use('/api/email', createEmailRouter(emailRuntime));
+
+  app.get('/api/email-auth/config', (_req, res) => res.json({ enabled: Boolean(emailRuntime) && emailUserLoginEnabled() }));
+  app.get('/api/email-auth/start', (_req, res) => {
+    try { res.redirect(emailLoginUrl(res)); }
+    catch { res.status(503).send('Microsoft employee sign-in is not configured'); }
+  });
+  app.get('/api/email-auth/callback', async (req, res) => {
+    try {
+      if (!emailRuntime || !emailUserLoginEnabled()) return res.status(503).send('Microsoft employee sign-in is disabled');
+      await finishEmailLogin(req, res, emailRuntime.mailboxes);
+      res.redirect('/?emailLogin=1');
+    } catch (error) {
+      console.warn('[EMAIL] Employee sign-in failed', (error as Error).message);
+      res.status(403).send('Microsoft sign-in was not accepted for this CS account');
+    }
+  });
+  app.post('/api/email-auth/logout', (_req, res) => { clearEmailUser(res); res.json({ success: true }); });
 
   // --- API Routes ---
 
@@ -82,7 +101,11 @@ async function startServer() {
     }
   });
 
-  app.get('/api/session', (req, res) => res.json({ authenticated: isAdminRequest(req), role: isAdminRequest(req) ? 'admin' : null }));
+  app.get('/api/session', (req, res) => {
+    const admin = isAdminRequest(req);
+    const employee = emailRuntime ? emailUser(req, emailRuntime.mailboxes) : null;
+    res.json({ authenticated: admin || Boolean(employee), role: admin ? 'admin' : employee ? 'employee' : null, email: employee });
+  });
   app.post('/api/logout', (req, res) => { clearAdminSession(req, res); res.json({ success: true }); });
 
   // Log Installation / Heartbeat

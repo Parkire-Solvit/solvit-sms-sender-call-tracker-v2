@@ -29,7 +29,7 @@ Add `server/email/` with `emailTypes.ts`, `emailRepository.ts`, `emailSlaService
 
 Add `server/auth/` for real server-side sessions or signed tokens, role checks, and a separate device-ingest credential strategy. Add `src/components/EmailSlaSection.tsx`, API client/types, and management UI only after backend synchronization and authorization tests pass. Modify `server.ts` only to mount the email router and initialize background reconciliation. Modify `.env.example` with placeholder Microsoft variables, never secrets.
 
-`migrations/007_email_sla_foundation.sql` is the first additive database step: email-specific settings, configurable team/rules/cursor, threads, messages, alerts, sync state, and assignment history. It does not modify existing call/SMS data. It is intentionally not made a startup requirement until the deployment path and authentication are ready.
+`migrations/009_email_sla_foundation.sql` is the first additive email database step, following the insurance-callback migrations 007/008 now on `main`: email-specific settings, configurable team/rules/cursor, threads, messages, alerts, sync state, and assignment history. It does not modify existing call/SMS or callback data.
 
 The first isolated code modules are `server/email/emailSlaService.ts`, `emailAssignmentService.ts`, `graphClient.ts`, and `messageIdentity.ts`, with mocked unit tests. They are not mounted on any API route yet. The Graph client requires an explicit mailbox allowlist, requests immutable IDs, validates continuation URLs, and retrieves only reply-linking headers. These services are not sufficient for live email ingestion: persistence, transactions, authenticated routes, subscription renewal, reconciliation scheduling, and the dashboard are still outstanding.
 
@@ -44,7 +44,7 @@ The first isolated code modules are `server/email/emailSlaService.ts`, `emailAss
 
 ## Sequence and acceptance checks
 
-1. Fix migration-runner duplicate-prefix handling and verify `007` applies transactionally in a test PostgreSQL database.
+1. Verify `009` applies transactionally in a test PostgreSQL database and preserve the existing insurance-callback migrations 007/008.
 2. Implement server-side authentication, roles, CORS restrictions, and protected email route tests without changing device event behavior.
 3. Create a credential only after secure storage is ready; prove read-only access to one allowed and one denied mailbox, with no organization-wide grant.
 4. Build idempotent message repository, per-user Inbox/Sent delta sync, webhook verification, subscription renewal, and reconciliation scheduler. Deduplicate subscriber copies by Internet Message ID and match replies using RFC headers.

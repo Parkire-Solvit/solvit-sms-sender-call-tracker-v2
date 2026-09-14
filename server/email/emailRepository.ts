@@ -36,7 +36,7 @@ function recipients(message: GraphMessage): string[] {
 export async function getEmailSettings(): Promise<EmailSlaSettings> {
   const result = await getPostgresPool().query<SqlRow>('SELECT * FROM email_sla_settings WHERE id = 1');
   const row = result.rows[0];
-  if (!row) throw new Error('Email SLA settings are missing; run migration 007');
+  if (!row) throw new Error('Email SLA settings are missing; run migration 009');
   const settings = {
     responseMinutes: row.response_minutes,
     responseWarningMinutes: row.response_warning_minutes,
@@ -81,9 +81,12 @@ async function assignOwner(client: Client, groupAddress: string, message: GraphM
   const rules = await client.query<SqlRow>(
     `SELECT priority, match_field, match_value, assigned_member_id, enabled FROM email_assignment_rules ORDER BY priority,id`,
   );
+  const directRecipients = recipients(message).filter((email) =>
+    email !== groupAddress && members.rows.some((member) => member.email === email));
   const decision = chooseEmailOwner({
     senderEmail: address(message.from?.emailAddress?.address),
     recipientEmails: recipients(message),
+    directOwnerEmail: directRecipients.length === 1 ? directRecipients[0] : null,
     previousRoundRobinMemberId: cursor.rows[0]?.last_member_id,
   }, members.rows.map((row) => ({
     memberId: Number(row.id), email: row.email, available: row.is_available,
@@ -306,13 +309,25 @@ export async function emitDueAlerts(settings: EmailSlaSettings): Promise<number>
   return count;
 }
 
-export async function listEmailAlerts(): Promise<SqlRow[]> {
+export async function listEmailAlerts(ownerEmail?: string): Promise<SqlRow[]> {
   return (await getPostgresPool().query<SqlRow>(
     `SELECT a.id,a.email_thread_id,a.alert_type,a.emitted_at,t.subject,t.customer_email,m.display_name AS owner_name
      FROM email_alerts a JOIN email_threads t ON t.id=a.email_thread_id
      LEFT JOIN email_team_members m ON m.id=t.assigned_member_id
-     WHERE a.acknowledged_at IS NULL ORDER BY a.emitted_at DESC LIMIT 100`,
+     WHERE a.acknowledged_at IS NULL ${ownerEmail ? 'AND m.email=$1' : ''}
+     ORDER BY a.emitted_at DESC LIMIT 100`, ownerEmail ? [ownerEmail.toLowerCase()] : [],
   )).rows;
+}
+
+export async function acknowledgeEmailAlert(alertId: number, ownerEmail?: string): Promise<boolean> {
+  const result = await getPostgresPool().query(
+    `UPDATE email_alerts a SET acknowledged_at=now()
+     FROM email_threads t LEFT JOIN email_team_members m ON m.id=t.assigned_member_id
+     WHERE a.id=$1 AND a.email_thread_id=t.id AND a.acknowledged_at IS NULL
+     ${ownerEmail ? 'AND m.email=$2' : ''}`,
+    ownerEmail ? [alertId, ownerEmail.toLowerCase()] : [alertId],
+  );
+  return Boolean(result.rowCount);
 }
 
 export async function listEmailTeam(): Promise<SqlRow[]> {
@@ -339,7 +354,7 @@ export async function emailHealth(): Promise<SqlRow[]> {
   )).rows;
 }
 
-export async function emailSummary(): Promise<SqlRow> {
+export async function emailSummary(ownerEmail?: string): Promise<SqlRow> {
   const row = (await getPostgresPool().query<SqlRow>(
     `SELECT COUNT(*)::int AS total_received,
       COUNT(*) FILTER (WHERE status='UNASSIGNED')::int AS unassigned,
@@ -358,7 +373,10 @@ export async function emailSummary(): Promise<SqlRow> {
       COUNT(*) FILTER (WHERE first_response_at IS NOT NULL)::int AS responded,
       COUNT(*) FILTER (WHERE resolved_at IS NOT NULL AND resolution_breached=false)::int AS resolution_met,
       COUNT(*) FILTER (WHERE resolved_at IS NOT NULL)::int AS resolved
-     FROM email_threads CROSS JOIN email_sla_settings s WHERE s.id=1 AND received_at > now()-interval '30 days'`,
+     FROM email_threads t LEFT JOIN email_team_members m ON m.id=t.assigned_member_id
+     CROSS JOIN email_sla_settings s
+     WHERE s.id=1 AND t.received_at > now()-interval '30 days'
+     ${ownerEmail ? 'AND m.email=$1' : ''}`, ownerEmail ? [ownerEmail.toLowerCase()] : [],
   )).rows[0];
   return row;
 }
