@@ -73,3 +73,10 @@ export function getDb(): DbAdapter {
   if (!activeAdapter) throw new Error("Database not initialized. Call initDatabase() first.");
   return activeAdapter;
 }
+
+// Email synchronization needs transactions for idempotent message insertion,
+// ownership selection and cursor updates. Reuse the application's pool.
+export function getPostgresPool(): pg.Pool {
+  if (!pool) throw new Error('Database not initialized. Call initDatabase() first.');
+  return pool;
+}

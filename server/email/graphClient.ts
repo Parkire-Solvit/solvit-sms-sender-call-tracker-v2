@@ -20,6 +20,8 @@ export interface GraphDeltaPage {
   '@odata.deltaLink'?: string;
 }
 
+export interface GraphMailFolder { id: string; displayName: string }
+
 export interface GraphConfig {
   tenantId: string;
   clientId: string;
@@ -83,8 +85,24 @@ export class GraphClient {
     return response.json() as Promise<T>;
   }
 
-  async getDeltaPage(mailbox: string, folder: 'inbox' | 'sentitems', deltaLink?: string): Promise<GraphDeltaPage> {
-    const path = `${this.mailboxPath(mailbox)}/mailFolders/${folder}/messages/delta`;
+  async getMailFolders(mailbox: string): Promise<GraphMailFolder[]> {
+    const base = `${graphOrigin}${this.mailboxPath(mailbox)}/mailFolders`;
+    let url: string | undefined = `${base}?$select=id,displayName&$top=100`;
+    const folders: GraphMailFolder[] = [];
+    while (url) {
+      const parsed = new URL(url);
+      if (parsed.origin !== graphOrigin || parsed.pathname !== new URL(base).pathname) throw new Error('Invalid Graph folder continuation');
+      const page: { value: GraphMailFolder[]; '@odata.nextLink'?: string } = await this.getJson(url);
+      if (!Array.isArray(page.value)) throw new Error('Invalid Graph folder response');
+      folders.push(...page.value.filter((folder) => folder.id && folder.displayName));
+      url = page['@odata.nextLink'];
+    }
+    return folders;
+  }
+
+  async getDeltaPage(mailbox: string, folder: string, deltaLink?: string): Promise<GraphDeltaPage> {
+    if (!folder || folder.includes('/')) throw new Error('Invalid Graph folder ID');
+    const path = `${this.mailboxPath(mailbox)}/mailFolders/${encodeURIComponent(folder)}/messages/delta`;
     const initialUrl = `${graphOrigin}${path}` +
       '?$select=id,conversationId,internetMessageId,subject,from,toRecipients,ccRecipients,receivedDateTime,sentDateTime';
     const url = deltaLink || initialUrl;

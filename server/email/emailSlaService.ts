@@ -71,14 +71,14 @@ export function dueEmailAlerts(
   if (!state.firstResponseAt) {
     if (elapsed >= settings.responseWarningMinutes) due.push('RESPONSE_WARNING');
     if (elapsed >= settings.responseUrgentMinutes) due.push('RESPONSE_URGENT');
-    if (elapsed > settings.responseMinutes) due.push('RESPONSE_BREACH');
+    if (elapsed >= settings.responseMinutes) due.push('RESPONSE_BREACH');
   } else if (state.responseBreached) {
     due.push('RESPONSE_BREACH');
   }
   if (!state.resolvedAt) {
     if (elapsed >= settings.resolutionWarningMinutes) due.push('RESOLUTION_WARNING');
     if (elapsed >= settings.resolutionUrgentMinutes) due.push('RESOLUTION_URGENT');
-    if (elapsed > settings.resolutionMinutes) due.push('RESOLUTION_BREACH');
+    if (elapsed >= settings.resolutionMinutes) due.push('RESOLUTION_BREACH');
   } else if (state.resolutionBreached) {
     due.push('RESOLUTION_BREACH');
   }

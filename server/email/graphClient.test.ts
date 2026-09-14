@@ -64,3 +64,17 @@ test('rejects duplicate or malformed mailbox configuration', () => {
   assert.throws(() => new GraphClient({ ...config, mailboxes: ['mercy@example.com', 'MERCY@example.com'] }), /allowlist/);
   assert.throws(() => new GraphClient({ ...config, mailboxes: ['not-an-email'] }), /allowlist/);
 });
+
+test('discovers the CS Team folder within an allowed personal mailbox', async () => {
+  const calls: string[] = [];
+  const http = async (input: string | URL | Request) => {
+    calls.push(String(input));
+    return new Response(JSON.stringify(calls.length === 1
+      ? { access_token: 'mock-token', expires_in: 3600 }
+      : { value: [{ id: 'team-folder-id', displayName: 'Team' }] }), { status: 200 });
+  };
+  const client = new GraphClient(config, http as typeof fetch);
+  assert.deepEqual(await client.getMailFolders('mercy@example.com'), [{ id: 'team-folder-id', displayName: 'Team' }]);
+  assert.match(calls[1], /users\/mercy%40example\.com\/mailFolders/);
+  assert.doesNotMatch(calls[1], /body|attachments/i);
+});

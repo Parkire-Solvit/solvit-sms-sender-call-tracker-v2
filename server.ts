@@ -1,17 +1,33 @@
 import express from "express";
 import { createServer as createViteServer } from "vite";
 import path from "path";
-import cors from "cors";
 import { initDatabase, getDb } from "./db";
 import { getSystemSettings, updateSystemSettings, getSettingsChangeLogs } from "./settingsManager";
 import { evaluateCompliance, RawEvent, RawAgent } from "./complianceEngine";
+import { clearAdminSession, credentialsMatch, isAdminRequest, requireAdmin, setAdminSession } from './server/auth/adminSession';
+import { createEmailRouter } from './server/email/emailRoutes';
+import { configuredEmailRuntime, startEmailPolling } from './server/email/emailSyncService';
 
 // SSE Clients for real-time agent name push
 const agentClients = new Map<number, any>();
 
 async function startServer() {
   const app = express();
-  app.use(cors());
+  // Browser access is same-origin by default. Native Android requests are not
+  // affected by CORS, which is a browser policy.
+  const allowedOrigins = new Set((process.env.CORS_ALLOWED_ORIGINS || '').split(',').map((s) => s.trim()).filter(Boolean));
+  app.use((req, res, next) => {
+    const origin = req.headers.origin;
+    if (origin && allowedOrigins.has(origin)) {
+      res.setHeader('Access-Control-Allow-Origin', origin);
+      res.setHeader('Vary', 'Origin');
+      res.setHeader('Access-Control-Allow-Credentials', 'true');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+      res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS');
+      if (req.method === 'OPTIONS') return res.sendStatus(204);
+    }
+    next();
+  });
   app.use(express.json());
 
   const PORT = Number(process.env.PORT || 3000);
@@ -22,6 +38,14 @@ async function startServer() {
 
   // Ensure default system settings exist
   await getSystemSettings(db);
+
+  const emailRuntime = configuredEmailRuntime();
+  if (emailRuntime) {
+    const migration = await db.queryOne('SELECT version FROM schema_migrations WHERE version = 7');
+    if (!migration) throw new Error('Email SLA requires database migration 007 before it can be enabled');
+    startEmailPolling(emailRuntime);
+  }
+  app.use('/api/email', createEmailRouter(emailRuntime));
 
   // --- API Routes ---
 
@@ -36,25 +60,30 @@ async function startServer() {
     });
   });
 
+  const loginAttempts = new Map<string, { count: number; resetAt: number }>();
+
   // Admin Login
   app.post("/api/login", (req, res) => {
     const { username, password } = req.body || {};
-    const submittedUser = (username || "").trim().toLowerCase();
-    const submittedPass = (password || "").trim();
+    const key = req.ip || 'unknown';
+    const now = Date.now();
+    const current = loginAttempts.get(key);
+    const attempt = current && current.resetAt > now ? current : { count: 0, resetAt: now + 15 * 60_000 };
+    if (attempt.count >= 30) return res.status(429).json({ error: 'Too many login attempts' });
 
-    const envUser = (process.env.ADMIN_USERNAME || "").trim().toLowerCase();
-    const envPass = (process.env.ADMIN_PASSWORD || "").trim();
-
-    const isValid = Boolean(envUser && envPass) && submittedUser === envUser && submittedPass === envPass;
-
-    if (isValid) {
-      console.log(`[AUTH] Admin login successful for "${username}"`);
-      res.json({ success: true, token: "solvit-admin-session" });
+    if (credentialsMatch(username, password)) {
+      loginAttempts.delete(key);
+      setAdminSession(req, res);
+      res.json({ success: true, role: 'admin' });
     } else {
-      console.warn(`[AUTH] Invalid login attempt for "${username}"`);
+      attempt.count++;
+      loginAttempts.set(key, attempt);
       res.status(401).json({ error: "Invalid credentials" });
     }
   });
+
+  app.get('/api/session', (req, res) => res.json({ authenticated: isAdminRequest(req), role: isAdminRequest(req) ? 'admin' : null }));
+  app.post('/api/logout', (req, res) => { clearAdminSession(req, res); res.json({ success: true }); });
 
   // Log Installation / Heartbeat
   app.post("/api/log-agent", async (req, res) => {
@@ -180,7 +209,7 @@ async function startServer() {
   });
 
   // Update Agent Tag
-  app.post("/api/update-agent-tag", async (req, res) => {
+  app.post("/api/update-agent-tag", requireAdmin, async (req, res) => {
     const { id, tag } = req.body;
     if (!id || tag === undefined) return res.status(400).json({ error: "ID and Tag are required" });
 
@@ -194,7 +223,7 @@ async function startServer() {
   });
 
   // Update Agent Name (and push to device)
-  app.post("/api/update-agent-name", async (req, res) => {
+  app.post("/api/update-agent-name", requireAdmin, async (req, res) => {
     const { id, name } = req.body;
     const finalName = (name || "").trim();
     if (!id || !finalName) return res.status(400).json({ error: "ID and Name are required" });
@@ -219,7 +248,7 @@ async function startServer() {
   });
 
   // Archive/reactivate agents without deleting their events or SLA history.
-  app.post("/api/agents/:id/archive", async (req, res) => {
+  app.post("/api/agents/:id/archive", requireAdmin, async (req, res) => {
     const reason = String(req.body?.reason || "").trim();
     if (!reason) return res.status(400).json({ error: "Archive reason is required" });
     if (reason.length > 500) return res.status(400).json({ error: "Archive reason must be 500 characters or fewer" });
@@ -236,7 +265,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/agents/:id/reactivate", async (req, res) => {
+  app.post("/api/agents/:id/reactivate", requireAdmin, async (req, res) => {
     try {
       const result = await db.execute(
         "UPDATE agents SET archived_at = NULL, last_active_at = CURRENT_TIMESTAMP WHERE id = ? AND name != 'Unknown Agent' AND archived_at IS NOT NULL",
@@ -250,7 +279,7 @@ async function startServer() {
     }
   });
 
-  app.get("/api/archived-agents", async (_req, res) => {
+  app.get("/api/archived-agents", requireAdmin, async (_req, res) => {
     try {
       const agents = await db.queryAll(
         `SELECT a.id, a.name, a.phone_number, a.tag, a.archived_at, a.archive_reason, COUNT(e.id)::int AS event_count
@@ -312,7 +341,7 @@ async function startServer() {
   });
 
   // Master System Settings API
-  app.get("/api/settings", async (req, res) => {
+  app.get("/api/settings", requireAdmin, async (req, res) => {
     try {
       const settings = await getSystemSettings(db);
       const changeLogs = await getSettingsChangeLogs(db);
@@ -323,7 +352,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/settings", async (req, res) => {
+  app.post("/api/settings", requireAdmin, async (req, res) => {
     const { settings, changed_by } = req.body || {};
     if (!settings || typeof settings !== "object") {
       return res.status(400).json({ error: "Settings object is required" });
@@ -408,7 +437,7 @@ function computeActivitySummary(events: any[], totalAgents: number = 0) {
 }
 
   // Global Activity Summary Stats & Legacy Endpoint
-  app.get("/api/stats", async (req, res) => {
+  app.get("/api/stats", requireAdmin, async (req, res) => {
     const { startDate, endDate, agentId, tag } = req.query;
     const now = new Date();
     const nairobiOffset = 3 * 60 * 60 * 1000;
@@ -468,7 +497,7 @@ function computeActivitySummary(events: any[], totalAgents: number = 0) {
   });
 
   // Comprehensive Compliance Stats Endpoint
-  app.get("/api/compliance-stats", async (req, res) => {
+  app.get("/api/compliance-stats", requireAdmin, async (req, res) => {
     const { startDate, endDate, agentId, tag } = req.query;
 
     const now = new Date();
@@ -597,7 +626,7 @@ function computeActivitySummary(events: any[], totalAgents: number = 0) {
   });
 
   // Search Contacts (Flexibly matching phone numbers)
-  app.get("/api/search-contacts", async (req, res) => {
+  app.get("/api/search-contacts", requireAdmin, async (req, res) => {
     const { query } = req.query;
     if (!query || typeof query !== "string") {
       return res.json([]);
@@ -629,7 +658,7 @@ function computeActivitySummary(events: any[], totalAgents: number = 0) {
   });
 
   // Get Contact History & Thread Compliance Verdicts
-  app.get("/api/contact-history", async (req, res) => {
+  app.get("/api/contact-history", requireAdmin, async (req, res) => {
     const { phone } = req.query;
     if (!phone || typeof phone !== "string") {
       return res.status(400).json({ error: "Phone number is required" });
@@ -695,7 +724,7 @@ function computeActivitySummary(events: any[], totalAgents: number = 0) {
 
 
   // Events Detail
-  app.get("/api/events-detail", async (req, res) => {
+  app.get("/api/events-detail", requireAdmin, async (req, res) => {
     const { agent_id, type, status, startDate, endDate } = req.query;
     const start = (startDate as string) || new Date().toISOString().split("T")[0];
     const end = (endDate as string) || start;
@@ -772,7 +801,7 @@ function computeActivitySummary(events: any[], totalAgents: number = 0) {
   });
 
   // Internal Contacts API
-  app.get("/api/internal-contacts", async (req, res) => {
+  app.get("/api/internal-contacts", requireAdmin, async (req, res) => {
     try {
       const contacts = await db.queryAll("SELECT * FROM internal_contacts ORDER BY created_at DESC");
       res.json(contacts);
@@ -781,7 +810,7 @@ function computeActivitySummary(events: any[], totalAgents: number = 0) {
     }
   });
 
-  app.post("/api/internal-contacts", async (req, res) => {
+  app.post("/api/internal-contacts", requireAdmin, async (req, res) => {
     const { phone_number, label } = req.body;
     if (!phone_number) return res.status(400).json({ error: "Phone number is required" });
     const normalizedPhone = phone_number.replace(/[^\d+]/g, "");
@@ -796,7 +825,7 @@ function computeActivitySummary(events: any[], totalAgents: number = 0) {
     }
   });
 
-  app.delete("/api/internal-contacts/:id", async (req, res) => {
+  app.delete("/api/internal-contacts/:id", requireAdmin, async (req, res) => {
     try {
       await db.execute("DELETE FROM internal_contacts WHERE id = ?", [req.params.id]);
       res.json({ success: true });
@@ -806,7 +835,7 @@ function computeActivitySummary(events: any[], totalAgents: number = 0) {
   });
 
   // Export Full Data
-  app.get("/api/export-full-data", async (req, res) => {
+  app.get("/api/export-full-data", requireAdmin, async (req, res) => {
     const { startDate, endDate, agentId, tag } = req.query;
     const start = startDate as string;
     const end = endDate as string;

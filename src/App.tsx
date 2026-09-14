@@ -43,6 +43,7 @@ import { ComplianceAgentTable } from './components/ComplianceAgentTable';
 import { SearchContactBar } from './components/SearchContactBar';
 import { ConsolidatedMetricCards } from './components/ConsolidatedMetricCards';
 import { CardDrilldownModal, DrilldownCardType } from './components/CardDrilldownModal';
+import { EmailSlaSection } from './components/EmailSlaSection';
 import { SystemSettings, TurnaroundTimeReport, Obligation, AgentComplianceSummary, TagGroupCompliance } from './types/compliance';
 
 function cn(...inputs: ClassValue[]) {
@@ -90,17 +91,18 @@ export default function App() {
   const [selectedAgentId, setSelectedAgentId] = useState<string>('');
   const [selectedTag, setSelectedTag] = useState<string>('');
   const [isAdminAuthenticated, setIsAdminAuthenticated] = useState(false);
+  const [dashboardTab, setDashboardTab] = useState<'calls' | 'email'>('calls');
   const [loginForm, setLoginForm] = useState({ username: '', password: '' });
   const [loginError, setLoginError] = useState('');
   
   // Selected phone for Contact History Thread Modal
   const [inspectedPhone, setInspectedPhone] = useState<string | null>(null);
 
-  // Check for existing session
+  // The server, not localStorage, determines whether this browser is signed in.
   useEffect(() => {
-    if (localStorage.getItem('solvit_admin_token') || localStorage.getItem('nellions_admin_token')) {
-      setIsAdminAuthenticated(true);
-    }
+    fetch('/api/session').then((res) => res.json()).then((session) => {
+      setIsAdminAuthenticated(Boolean(session.authenticated));
+    }).catch(() => setIsAdminAuthenticated(false));
   }, []);
 
   // Fetch Database engine status
@@ -131,7 +133,7 @@ export default function App() {
       });
       if (res.ok) {
         setIsAdminAuthenticated(true);
-        localStorage.setItem('solvit_admin_token', 'true');
+        setLoginForm({ username: '', password: '' });
       } else {
         setLoginError('Invalid username or password');
       }
@@ -141,6 +143,7 @@ export default function App() {
   };
 
   const handleLogout = () => {
+    void fetch('/api/logout', { method: 'POST' });
     setIsAdminAuthenticated(false);
     localStorage.removeItem('solvit_admin_token');
     localStorage.removeItem('nellions_admin_token');
@@ -263,22 +266,6 @@ export default function App() {
             </div>
 
             <form onSubmit={handleLogin} className="space-y-4">
-              <div className="p-3 bg-red-50/60 border border-red-100 rounded-xl flex items-center justify-between text-xs">
-                <div className="text-slate-700">
-                  <span className="font-bold text-[#ff353e]">Default Credentials:</span>
-                  <div className="text-[11px] text-slate-500 mt-0.5">
-                    User: <strong className="text-slate-800 font-mono">admin</strong> | Pass: <strong className="text-slate-800 font-mono">admin123</strong>
-                  </div>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => setLoginForm({ username: 'admin', password: 'admin123' })}
-                  className="px-3 py-1.5 bg-[#ff353e] hover:bg-[#e02831] text-white font-bold rounded-lg text-xs shadow-xs transition-all cursor-pointer shrink-0"
-                >
-                  Quick Fill
-                </button>
-              </div>
-
               <div>
                 <label className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Username</label>
                 <input 
@@ -321,7 +308,12 @@ export default function App() {
           </motion.div>
         </div>
       ) : (
-        <ComplianceAdminDashboard 
+        <>
+        <div className="max-w-7xl mx-auto px-4 pt-5 flex gap-2" role="tablist" aria-label="Dashboard sections">
+          <button role="tab" aria-selected={dashboardTab === 'calls'} onClick={() => setDashboardTab('calls')} className={`px-4 py-2 rounded-xl text-sm font-bold ${dashboardTab === 'calls' ? 'bg-slate-900 text-white' : 'bg-white border border-slate-200 text-slate-700'}`}>Calls &amp; SMS</button>
+          <button role="tab" aria-selected={dashboardTab === 'email'} onClick={() => setDashboardTab('email')} className={`px-4 py-2 rounded-xl text-sm font-bold ${dashboardTab === 'email' ? 'bg-slate-900 text-white' : 'bg-white border border-slate-200 text-slate-700'}`}>Email SLA</button>
+        </div>
+        {dashboardTab === 'email' ? <EmailSlaSection /> : <ComplianceAdminDashboard
           stats={stats}
           complianceStats={complianceStats}
           loading={loading} 
@@ -338,7 +330,8 @@ export default function App() {
           onInspectContact={(phone) => setInspectedPhone(phone)}
           onOpenMasterSettings={() => setShowMasterSettings(true)}
           onOpenDbModal={() => setShowDbModal(true)}
-        />
+        />}
+        </>
       )}
 
       {/* Master Settings Modal */}
