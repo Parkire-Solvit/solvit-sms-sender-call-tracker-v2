@@ -95,11 +95,19 @@ export function createEmailRouter(config: EmailRuntimeConfig | null): Router {
     const updated = await assignEmailThread(id, memberId);
     response.status(updated ? 200 : 404).json(updated ? { success: true } : { error: 'Thread or member not found' });
   }));
-  router.post('/threads/:id/resolve', requireAdmin, safe(async (request, response) => {
+  router.post('/threads/:id/resolve', safe(async (request, response) => {
     const id = positiveId(request.params.id);
     if (!id) return response.status(400).json({ error: 'Invalid thread ID' });
-    const updated = await resolveEmailThread(id);
-    response.status(updated ? 200 : 404).json(updated ? { success: true } : { error: 'Open thread not found' });
+    const rawNote = request.body?.note;
+    if (rawNote !== undefined && (typeof rawNote !== 'string' || rawNote.length > 500)) {
+      return response.status(400).json({ error: 'Resolution note must be 500 characters or less' });
+    }
+    const ownerEmail: string | null = response.locals.emailOwner || null;
+    const actor = ownerEmail || process.env.ADMIN_USERNAME?.trim().toLowerCase() || 'admin';
+    const updated = await resolveEmailThread(id, actor, ownerEmail, rawNote?.trim() || null);
+    response.status(updated ? 200 : ownerEmail ? 409 : 404).json(updated ? { success: true } : {
+      error: ownerEmail ? 'Only an in-progress email currently assigned to you can be resolved' : 'Open thread not found',
+    });
   }));
   router.post('/sync', requireAdmin, safe(async (_request, response) => response.json(await runEmailSync(config!))));
   return router;

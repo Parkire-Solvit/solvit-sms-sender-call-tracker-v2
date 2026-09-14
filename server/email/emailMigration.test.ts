@@ -49,6 +49,14 @@ test('numeric migration sequence survives the two legacy 004 files and repairs S
     assert.equal(applied011.rows.length, 1);
     const applied012 = await db.query<{ version: number }>('SELECT version FROM schema_migrations WHERE version=12');
     assert.equal(applied012.rows.length, 1);
+    const applied013 = await db.query<{ version: number }>('SELECT version FROM schema_migrations WHERE version=13');
+    assert.equal(applied013.rows.length, 1);
+    const applied014 = await db.query<{ version: number }>('SELECT version FROM schema_migrations WHERE version=14');
+    assert.equal(applied014.rows.length, 1);
+    const resolutionColumns = await db.query<{ column_name: string }>(
+      "SELECT column_name FROM information_schema.columns WHERE table_name='email_threads' AND column_name IN ('resolved_by','resolution_note') ORDER BY column_name",
+    );
+    assert.deepEqual(resolutionColumns.rows.map((row) => row.column_name), ['resolution_note', 'resolved_by']);
     const holidays = await db.query<{ holiday_dates: string[] }>('SELECT holiday_dates FROM email_sla_settings WHERE id=1');
     assert.deepEqual(holidays.rows[0].holiday_dates, []);
     const snapshotColumn = await db.query<{ column_name: string }>(
@@ -59,5 +67,53 @@ test('numeric migration sequence survives the two legacy 004 files and repairs S
       "SELECT tablename FROM pg_tables WHERE schemaname='public' AND tablename='email_assignment_notifications'",
     );
     assert.equal(notificationTable.rows.length, 1);
+  } finally { await db.close(); }
+});
+
+test('migration 014 recalculates old night-time deadlines and preserves the previous values', async () => {
+  const db = new PGlite();
+  try {
+    const directory = new URL('../../migrations/', import.meta.url);
+    for (const file of ['009_email_sla_foundation.sql', '011_email_business_calendar.sql',
+      '012_email_assignment_notifications.sql', '013_email_resolution_audit.sql']) {
+      await db.exec(await fs.readFile(new URL(file, directory), 'utf8'));
+    }
+    await db.query(`INSERT INTO email_threads (mailbox,root_internet_message_id,customer_email,
+      received_at,response_due_at,resolution_due_at,status,response_breached)
+      VALUES ('cs-team@solvit.co.ke','old-night','customer@example.com',
+      '2026-09-14T17:12:00Z','2026-09-14T17:42:00Z','2026-09-14T19:12:00Z',
+      'AWAITING_RESPONSE',true)`);
+    await db.query(`INSERT INTO email_threads (mailbox,root_internet_message_id,customer_email,
+      received_at,first_response_at,response_due_at,resolution_due_at,status,response_breached,
+      sla_settings_snapshot)
+      VALUES ('cs-team@solvit.co.ke','old-holiday','customer@example.com',
+      '2026-09-18T13:50:00Z','2026-09-18T14:30:00Z',
+      '2026-09-18T14:20:00Z','2026-09-18T15:50:00Z','IN_PROGRESS',true,
+      '{"responseMinutes":30,"responseWarningMinutes":20,"responseUrgentMinutes":25,
+        "resolutionMinutes":120,"resolutionWarningMinutes":90,"resolutionUrgentMinutes":105,
+        "holidayDates":["2026-09-21"]}')`);
+    await db.query("INSERT INTO email_alerts (email_thread_id,alert_type) VALUES (1,'RESPONSE_BREACH')");
+    await db.exec(await fs.readFile(new URL('014_recalculate_email_business_hours.sql', directory), 'utf8'));
+    const result = await db.query<{
+      response_due_at: string; resolution_due_at: string; response_breached: boolean;
+      sla_settings_snapshot: { responseMinutes: number };
+    }>('SELECT response_due_at,resolution_due_at,response_breached,sla_settings_snapshot FROM email_threads WHERE id=1');
+    assert.equal(new Date(result.rows[0].response_due_at).toISOString(), '2026-09-15T05:30:00.000Z');
+    assert.equal(new Date(result.rows[0].resolution_due_at).toISOString(), '2026-09-15T07:00:00.000Z');
+    assert.equal(result.rows[0].response_breached, false);
+    assert.equal(result.rows[0].sla_settings_snapshot.responseMinutes, 30);
+    const holiday = await db.query<{ response_due_at: string; resolution_due_at: string; response_breached: boolean }>(
+      'SELECT response_due_at,resolution_due_at,response_breached FROM email_threads WHERE id=2',
+    );
+    assert.equal(new Date(holiday.rows[0].response_due_at).toISOString(), '2026-09-22T05:20:00.000Z');
+    assert.equal(new Date(holiday.rows[0].resolution_due_at).toISOString(), '2026-09-22T06:50:00.000Z');
+    assert.equal(holiday.rows[0].response_breached, false);
+    const audit = await db.query<{ previous_response_due_at: string; previous_sla_alerts: unknown[] }>(
+      'SELECT previous_response_due_at,previous_sla_alerts FROM email_sla_recalculation_audit WHERE email_thread_id=1',
+    );
+    assert.equal(new Date(audit.rows[0].previous_response_due_at).toISOString(), '2026-09-14T17:42:00.000Z');
+    assert.equal(audit.rows[0].previous_sla_alerts.length, 1);
+    const alerts = await db.query('SELECT id FROM email_alerts');
+    assert.equal(alerts.rows.length, 0);
   } finally { await db.close(); }
 });

@@ -67,28 +67,25 @@ export function dueEmailAlerts(
   now: Date,
   alreadyEmitted: ReadonlySet<EmailAlertType>,
   unassigned = false,
-  legacyWallClock = false,
 ): EmailAlertType[] {
   validDate(now, 'now');
   validateEmailSlaSettings(settings);
-  // Alerts wait until the next open period. Stored due dates remain authoritative,
-  // including for pre-calendar conversations whose deadlines are not rewritten.
+  // Alerts wait until the next open period; deadlines always use the Nairobi calendar.
   if (!isEmailWorkingTime(now, settings.holidayDates)) return [];
-  const elapsed = (now.getTime() - state.receivedAt.getTime()) / 60_000;
   const responseRemaining = emailWorkingMinutesBetween(now, state.responseDueAt, settings.holidayDates);
   const resolutionRemaining = emailWorkingMinutesBetween(now, state.resolutionDueAt, settings.holidayDates);
   const due: EmailAlertType[] = [];
   if (unassigned) due.push('EMAIL_UNASSIGNED');
   if (!state.firstResponseAt) {
-    if (legacyWallClock ? elapsed >= settings.responseWarningMinutes : responseRemaining <= settings.responseMinutes - settings.responseWarningMinutes) due.push('RESPONSE_WARNING');
-    if (legacyWallClock ? elapsed >= settings.responseUrgentMinutes : responseRemaining <= settings.responseMinutes - settings.responseUrgentMinutes) due.push('RESPONSE_URGENT');
+    if (responseRemaining <= settings.responseMinutes - settings.responseWarningMinutes) due.push('RESPONSE_WARNING');
+    if (responseRemaining <= settings.responseMinutes - settings.responseUrgentMinutes) due.push('RESPONSE_URGENT');
     if (now >= state.responseDueAt) due.push('RESPONSE_BREACH');
   } else if (state.responseBreached) {
     due.push('RESPONSE_BREACH');
   }
   if (!state.resolvedAt) {
-    if (legacyWallClock ? elapsed >= settings.resolutionWarningMinutes : resolutionRemaining <= settings.resolutionMinutes - settings.resolutionWarningMinutes) due.push('RESOLUTION_WARNING');
-    if (legacyWallClock ? elapsed >= settings.resolutionUrgentMinutes : resolutionRemaining <= settings.resolutionMinutes - settings.resolutionUrgentMinutes) due.push('RESOLUTION_URGENT');
+    if (resolutionRemaining <= settings.resolutionMinutes - settings.resolutionWarningMinutes) due.push('RESOLUTION_WARNING');
+    if (resolutionRemaining <= settings.resolutionMinutes - settings.resolutionUrgentMinutes) due.push('RESOLUTION_URGENT');
     if (now >= state.resolutionDueAt) due.push('RESOLUTION_BREACH');
   } else if (state.resolutionBreached) {
     due.push('RESOLUTION_BREACH');

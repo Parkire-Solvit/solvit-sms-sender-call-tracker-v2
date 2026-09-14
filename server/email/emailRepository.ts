@@ -6,6 +6,7 @@ import { chooseEmailOwner } from './emailAssignmentService';
 import { dueEmailAlerts, recordFirstResponse, startEmailSla, validateEmailSlaSettings } from './emailSlaService';
 import type { EmailAlertType, EmailSlaSettings, EmailSlaState } from './emailTypes';
 import { emailWorkingMinutesBetween, isEmailWorkingTime } from '../../shared/emailBusinessHours';
+import { resolveEmailThreadSql } from './emailResolution';
 
 type Client = pg.PoolClient;
 type SqlRow = Record<string, any>;
@@ -260,7 +261,8 @@ export async function listEmailThreads(filter: string, ownerEmail?: string): Pro
   return (await getPostgresPool().query<SqlRow>(
     `SELECT t.id,t.subject,t.customer_email,t.received_at,t.first_response_at,t.resolved_at,
       t.response_due_at,t.resolution_due_at,t.status,t.response_breached,t.resolution_breached,
-      t.assignment_method,t.sla_settings_snapshot,m.email AS owner_email,m.display_name AS owner_name
+      t.assignment_method,t.sla_settings_snapshot,t.resolved_by,t.resolution_note,
+      m.email AS owner_email,m.display_name AS owner_name
      FROM email_threads t LEFT JOIN email_team_members m ON m.id=t.assigned_member_id
      ${conditions.length ? `WHERE ${conditions.join(' AND ')}` : ''}
      ORDER BY t.received_at DESC LIMIT 200`, params,
@@ -296,10 +298,9 @@ export async function assignEmailThread(threadId: number, memberId: number): Pro
   });
 }
 
-export async function resolveEmailThread(threadId: number): Promise<boolean> {
+export async function resolveEmailThread(threadId: number, actor: string, ownerEmail: string | null, note: string | null): Promise<boolean> {
   const result = await getPostgresPool().query(
-    `UPDATE email_threads SET resolved_at=now(),resolution_breached=(now()>resolution_due_at),
-     status='RESOLVED',updated_at=now() WHERE id=$1 AND resolved_at IS NULL`, [threadId],
+    resolveEmailThreadSql, [threadId, ownerEmail, actor, note],
   );
   return Boolean(result.rowCount);
 }
@@ -318,9 +319,9 @@ export async function emitDueAlerts(settings: EmailSlaSettings): Promise<number>
       resolvedAt: row.resolved_at ? new Date(row.resolved_at) : null,
       responseBreached: row.response_breached, resolutionBreached: row.resolution_breached,
     };
-    const snapshot: EmailSlaSettings | null = row.sla_settings_snapshot;
-    const due = dueEmailAlerts(state, snapshot || settings, new Date(), new Set<EmailAlertType>(),
-      row.status === 'UNASSIGNED', !snapshot);
+    const snapshot: EmailSlaSettings = row.sla_settings_snapshot || settings;
+    const due = dueEmailAlerts(state, snapshot, new Date(), new Set<EmailAlertType>(),
+      row.status === 'UNASSIGNED');
     for (const alert of due) {
       const result = await getPostgresPool().query(
         `INSERT INTO email_alerts (email_thread_id,alert_type) VALUES ($1,$2)
@@ -410,16 +411,8 @@ export async function emailSummary(ownerEmail?: string): Promise<SqlRow> {
     row.near_sla = open.filter((thread) => {
       const responseDue = new Date(thread.response_due_at);
       const resolutionDue = new Date(thread.resolution_due_at);
-      const snapshot: EmailSlaSettings | null = thread.sla_settings_snapshot;
-      if (!isEmailWorkingTime(now, snapshot?.holidayDates || settings.holidayDates)) return false;
-      if (!snapshot) {
-        return (!thread.first_response_at && responseDue > now &&
-          responseDue.getTime() - now.getTime() <=
-            (settings.responseMinutes - settings.responseWarningMinutes) * 60_000) ||
-          (!thread.resolved_at && resolutionDue > now &&
-            resolutionDue.getTime() - now.getTime() <=
-              (settings.resolutionMinutes - settings.resolutionWarningMinutes) * 60_000);
-      }
+      const snapshot: EmailSlaSettings = thread.sla_settings_snapshot || settings;
+      if (!isEmailWorkingTime(now, snapshot.holidayDates)) return false;
       return (!thread.first_response_at && responseDue > now &&
         emailWorkingMinutesBetween(now, responseDue, snapshot.holidayDates) <=
           snapshot.responseMinutes - snapshot.responseWarningMinutes) ||
