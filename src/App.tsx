@@ -29,7 +29,9 @@ import {
   RotateCcw,
   Settings as SettingsIcon,
   Tag as TagIcon,
-  ExternalLink
+  ExternalLink,
+  Car,
+  LayoutDashboard
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { clsx, type ClassValue } from 'clsx';
@@ -44,6 +46,8 @@ import { SearchContactBar } from './components/SearchContactBar';
 import { ConsolidatedMetricCards } from './components/ConsolidatedMetricCards';
 import { CardDrilldownModal, DrilldownCardType } from './components/CardDrilldownModal';
 import { EmailSlaSection } from './components/EmailSlaSection';
+import { InsuranceCallbackSection } from './components/InsuranceCallbackSection';
+import { AgentPerformanceNarrative } from './components/AgentPerformanceNarrative';
 import { SystemSettings, TurnaroundTimeReport, Obligation, AgentComplianceSummary, TagGroupCompliance } from './types/compliance';
 
 function cn(...inputs: ClassValue[]) {
@@ -86,19 +90,19 @@ export default function App() {
 
   // Show recent history on first load. A today-only default looked like data
   // loss whenever no device had submitted an event yet that day.
-  const [startDate, setStartDate] = useState<string>(getNairobiDate(30));
-  const [endDate, setEndDate] = useState<string>(getNairobiDate());
+  const [startDate, setStartDate] = useState<string>(getNairobiDate(1));
+  const [endDate, setEndDate] = useState<string>(getNairobiDate(1));
   const [selectedAgentId, setSelectedAgentId] = useState<string>('');
   const [selectedTag, setSelectedTag] = useState<string>('');
   const [isAdminAuthenticated, setIsAdminAuthenticated] = useState(false);
   const [employeeEmail, setEmployeeEmail] = useState<string | null>(null);
   const [employeeLoginEnabled, setEmployeeLoginEnabled] = useState(false);
-  const [dashboardTab, setDashboardTab] = useState<'calls' | 'email'>('calls');
   const [loginForm, setLoginForm] = useState({ username: '', password: '' });
   const [loginError, setLoginError] = useState('');
   
   // Selected phone for Contact History Thread Modal
   const [inspectedPhone, setInspectedPhone] = useState<string | null>(null);
+  const [activePage, setActivePage] = useState<'dashboard' | 'callbacks' | 'email'>('dashboard');
 
   // The server, not localStorage, determines whether this browser is signed in.
   useEffect(() => {
@@ -193,9 +197,8 @@ export default function App() {
 
   useEffect(() => {
     if (isAdminAuthenticated) {
+      // Auto-refresh removed: data loads on filter change and via the manual Refresh button only.
       fetchAllStats(startDate, endDate, selectedAgentId, selectedTag);
-      const interval = setInterval(() => fetchAllStats(startDate, endDate, selectedAgentId, selectedTag), 25000);
-      return () => clearInterval(interval);
     }
   }, [startDate, endDate, selectedAgentId, selectedTag, fetchAllStats, isAdminAuthenticated]);
 
@@ -220,6 +223,42 @@ export default function App() {
           </div>
           
           <div className="flex flex-wrap items-center gap-2.5">
+            {/* Page Tabs: Dashboard / Insurance Callbacks */}
+            {isAdminAuthenticated && (
+              <div className="flex items-center gap-1 bg-slate-100 rounded-xl p-1 mr-1">
+                <button
+                  id="nav-tab-dashboard"
+                  onClick={() => setActivePage('dashboard')}
+                  className={cn(
+                    "px-3.5 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer",
+                    activePage === 'dashboard' ? "bg-white text-[#ff353e] shadow-xs" : "text-slate-600 hover:text-[#ff353e]"
+                  )}
+                >
+                  <LayoutDashboard className="w-3.5 h-3.5" />
+                  <span>Dashboard</span>
+                </button>
+                <button
+                  id="nav-tab-insurance-callbacks"
+                  onClick={() => setActivePage('callbacks')}
+                  className={cn(
+                    "px-3.5 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer",
+                    activePage === 'callbacks' ? "bg-white text-[#ff353e] shadow-xs" : "text-slate-600 hover:text-[#ff353e]"
+                  )}
+                >
+                  <Car className="w-3.5 h-3.5" />
+                  <span>Insurance Callbacks</span>
+                </button>
+                <button
+                  id="nav-tab-email-sla"
+                  onClick={() => setActivePage('email')}
+                  className={cn(
+                    "px-3.5 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer",
+                    activePage === 'email' ? "bg-white text-[#ff353e] shadow-xs" : "text-slate-600 hover:text-[#ff353e]"
+                  )}
+                >Email SLA</button>
+              </div>
+            )}
+
             {/* Quick Contact Search Bar */}
             {isAdminAuthenticated && (
               <SearchContactBar onSelectPhone={(phone) => setInspectedPhone(phone)} />
@@ -318,13 +357,15 @@ export default function App() {
         </div>
       ) : employeeEmail && !isAdminAuthenticated ? (
         <EmailSlaSection employeeEmail={employeeEmail} />
+      ) : activePage === 'email' ? (
+        <EmailSlaSection />
+      ) : activePage === 'callbacks' ? (
+        <InsuranceCallbackSection
+          allAgents={complianceStats?.allAgents || stats?.allAgents || []}
+          onOpenSettings={() => setShowMasterSettings(true)}
+        />
       ) : (
-        <>
-        <div className="max-w-7xl mx-auto px-4 pt-5 flex gap-2" role="tablist" aria-label="Dashboard sections">
-          <button role="tab" aria-selected={dashboardTab === 'calls'} onClick={() => setDashboardTab('calls')} className={`px-4 py-2 rounded-xl text-sm font-bold ${dashboardTab === 'calls' ? 'bg-slate-900 text-white' : 'bg-white border border-slate-200 text-slate-700'}`}>Calls &amp; SMS</button>
-          <button role="tab" aria-selected={dashboardTab === 'email'} onClick={() => setDashboardTab('email')} className={`px-4 py-2 rounded-xl text-sm font-bold ${dashboardTab === 'email' ? 'bg-slate-900 text-white' : 'bg-white border border-slate-200 text-slate-700'}`}>Email SLA</button>
-        </div>
-        {dashboardTab === 'email' ? <EmailSlaSection /> : <ComplianceAdminDashboard
+        <ComplianceAdminDashboard
           stats={stats}
           complianceStats={complianceStats}
           loading={loading} 
@@ -341,8 +382,7 @@ export default function App() {
           onInspectContact={(phone) => setInspectedPhone(phone)}
           onOpenMasterSettings={() => setShowMasterSettings(true)}
           onOpenDbModal={() => setShowDbModal(true)}
-        />}
-        </>
+        />
       )}
 
       {/* Master Settings Modal */}
@@ -834,6 +874,12 @@ function ComplianceAdminDashboard({
         }}
         onInspectAgent={(agentId) => setSelectedAgentId(agentId.toString())}
         onArchiveAgent={openArchiveAgentModal}
+      />
+
+      {/* Customer Service Performance Narrative Summary */}
+      <AgentPerformanceNarrative
+        agents={agentsList}
+        turnaroundReport={turnaroundReport}
       />
 
       {archiveCandidate && (

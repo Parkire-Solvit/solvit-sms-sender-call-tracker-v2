@@ -35,8 +35,8 @@ export function createEmailRouter(config: EmailRuntimeConfig | null): Router {
   }));
   router.get('/threads', safe(async (request, response) => {
     const filter = typeof request.query.filter === 'string' ? request.query.filter : 'all';
-    const allowed = new Set(['all', 'unassigned', 'awaiting', 'in-progress', 'resolved', 'breached']);
-    if (!allowed.has(filter)) return response.status(400).json({ error: 'Invalid thread filter' });
+    const validFilters = new Set(['all', 'unassigned', 'awaiting', 'in-progress', 'resolved', 'breached']);
+    if (!validFilters.has(filter)) return response.status(400).json({ error: 'Invalid thread filter' });
     const actor = emailActor(request, allowed)!;
     const owner = actor.role === 'employee' ? actor.email! : (typeof request.query.owner === 'string' ? request.query.owner.trim() : '');
     if (owner && (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(owner) || !config!.mailboxes.includes(owner.toLowerCase()))) {
