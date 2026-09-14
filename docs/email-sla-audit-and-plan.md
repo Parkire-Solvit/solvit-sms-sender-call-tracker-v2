@@ -1,6 +1,15 @@
 # Email SLA engine: repository audit and implementation plan
 
-Status: additive schema and isolated, unconnected email domain services are in progress; **not connected to a mailbox or deployed**.
+Status: additive schema and isolated, unconnected email domain services are in progress; **not connected to Microsoft Graph or deployed**.
+
+## Verified Microsoft 365 topology (14 September 2026)
+
+- `cs-team@solvit.co.ke` is a Microsoft 365 Group, not a shared user mailbox. The original single-shared-mailbox assumption is invalid.
+- Its group has eight members but seven subscribers. `jmining@solvit.co.ke` is excluded from the email-monitoring pilot.
+- The seven approved user mailboxes are `jmungasi`, `iodago`, `vmusyoka`, `bmuthama`, `modondi`, `dbwosi`, and `cmbugua` at `solvit.co.ke`. A fixed Exchange application scope was created and verified against exactly those seven; an `Application Mail.Read` assignment tests true for `modondi` and false for `jmining`.
+- Entra App registrations shows only the default delegated `User.Read` permission, not an unscoped application `Mail.Read` grant. Do not add an unscoped mail grant.
+- Outlook evidence shows a customer message addressed to the group and a response from an agent's personal mailbox. Incoming copies and replies must therefore be correlated across approved user mailboxes. `conversationId` alone must not be assumed stable across mailboxes; use RFC `Internet-Message-ID`, `In-Reply-To`, and `References` headers. Duplicate subscriber copies need one logical inbound record.
+- The group mailbox itself is not covered by the seven-user Exchange scope. A response sent solely from Group Conversations may not be observed by this pilot. Validate actual agent workflow before claiming complete coverage.
 
 ## Current architecture
 
@@ -22,14 +31,14 @@ Add `server/auth/` for real server-side sessions or signed tokens, role checks, 
 
 `migrations/007_email_sla_foundation.sql` is the first additive database step: email-specific settings, configurable team/rules/cursor, threads, messages, alerts, sync state, and assignment history. It does not modify existing call/SMS data. It is intentionally not made a startup requirement until the deployment path and authentication are ready.
 
-The first isolated code modules are `server/email/emailSlaService.ts`, `emailAssignmentService.ts`, and `graphClient.ts`, with mocked unit tests. They are not mounted on any API route yet. The graph client requests immutable IDs and validates continuation URLs. These services are not sufficient for live email ingestion: persistence, transactions, authenticated routes, subscription renewal, reconciliation scheduling, and the dashboard are still outstanding.
+The first isolated code modules are `server/email/emailSlaService.ts`, `emailAssignmentService.ts`, `graphClient.ts`, and `messageIdentity.ts`, with mocked unit tests. They are not mounted on any API route yet. The Graph client requires an explicit mailbox allowlist, requests immutable IDs, validates continuation URLs, and retrieves only reply-linking headers. These services are not sufficient for live email ingestion: persistence, transactions, authenticated routes, subscription renewal, reconciliation scheduling, and the dashboard are still outstanding.
 
 ## Security and integration gates
 
 - Replace the client-side login flag with a verifiable server session; protect **all** email and admin routes. Give employee and manager roles appropriate row-level visibility. Add CS roster identity mapping; `agents` currently represents Android/device agents, not necessarily Outlook users.
 - Constrain CORS to approved origins; validate payloads and rate-limit login, webhook, and management routes. Avoid logging tokens, email bodies, and attachments.
-- Obtain Microsoft 365 administrator approval for an Entra application, CS shared-mailbox access, and least-privilege Graph permissions. The app should be scoped to the CS mailbox, not all organizational mailboxes. Configure a public HTTPS webhook URL and validation flow.
-- Confirm the exact CS mailbox, member identities, direct-owner/rule semantics, business-hour policy, resolution workflow, and notification ownership before turning on live ingestion.
+- The Entra app and fixed seven-user Exchange RBAC scope exist, but no credential has been created. Keep the app allowlist synchronized with that scope. Scope tests do not substitute for a real Graph access test.
+- Confirm direct-owner/rule semantics, business-hour policy, resolution workflow, and notification ownership before turning on live ingestion.
 - Webhooks are triggers, not the source of truth. Persist folder-specific delta links; reconcile Inbox and Sent Items, use immutable message IDs where supported, and enforce `graph_message_id` uniqueness. Initial backfill scope must be agreed to avoid generating historical alerts.
 - Define conversation grouping carefully: Graph conversation IDs may span multiple customer requests; the MVP should document and test whether a new inbound message reopens or joins an existing resolved thread.
 
@@ -37,8 +46,8 @@ The first isolated code modules are `server/email/emailSlaService.ts`, `emailAss
 
 1. Fix migration-runner duplicate-prefix handling and verify `007` applies transactionally in a test PostgreSQL database.
 2. Implement server-side authentication, roles, CORS restrictions, and protected email route tests without changing device event behavior.
-3. Add Graph client and health check using environment credentials, then prove read-only access to the CS mailbox.
-4. Build idempotent message repository, Inbox/Sent delta sync, webhook verification, subscription renewal, and reconciliation scheduler.
+3. Create a credential only after secure storage is ready; prove read-only access to one allowed and one denied mailbox, with no organization-wide grant.
+4. Build idempotent message repository, per-user Inbox/Sent delta sync, webhook verification, subscription renewal, and reconciliation scheduler. Deduplicate subscriber copies by Internet Message ID and match replies using RFC headers.
 5. Add configurable CS roster, direct/rule/round-robin assignment, and manual reassignment without resetting received-at or due-at timestamps.
 6. Add response/resolution SLA and once-only alert stages, with unit tests for all boundary cases.
 7. Expose protected employee/manager APIs, then add the Email SLA section and settings UI to the existing dashboard.

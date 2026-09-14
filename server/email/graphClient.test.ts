@@ -2,25 +2,65 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { GraphClient } from './graphClient';
 
-const config = { tenantId: 'tenant', clientId: 'client', clientSecret: 'secret', mailbox: 'cs@example.com' };
+const config = {
+  tenantId: 'tenant', clientId: 'client', clientSecret: 'secret',
+  mailboxes: ['mercy@example.com', 'joyce@example.com'],
+};
 
-test('delta transport uses app token and requests immutable message IDs', async () => {
+test('delta transport selects allowed mailbox, metadata and immutable IDs', async () => {
   const calls: Array<{ url: string; init?: RequestInit }> = [];
   const http = async (input: string | URL | Request, init?: RequestInit) => {
     calls.push({ url: String(input), init });
     return new Response(calls.length === 1
       ? JSON.stringify({ access_token: 'mock-token', expires_in: 3600 })
-      : JSON.stringify({ value: [{ id: 'immutable-id', conversationId: 'conversation' }], '@odata.deltaLink': 'https://graph.microsoft.com/v1.0/users/cs%40example.com/mailFolders/inbox/messages/delta?$deltatoken=abc' }),
+      : JSON.stringify({ value: [{ id: 'immutable-id', internetMessageId: '<mail@example.com>' }] }),
       { status: 200, headers: { 'Content-Type': 'application/json' } });
   };
   const client = new GraphClient(config, http as typeof fetch);
-  const page = await client.getDeltaPage('inbox');
+  const page = await client.getDeltaPage('mercy@example.com', 'inbox');
   assert.equal(page.value[0].id, 'immutable-id');
+  assert.match(calls[1].url, /users\/mercy%40example\.com\/mailFolders\/inbox\/messages\/delta/);
+  assert.match(calls[1].url, /internetMessageId/);
   assert.equal(new Headers(calls[1].init?.headers).get('Prefer'), 'IdType="ImmutableId"');
   assert.equal(new Headers(calls[1].init?.headers).get('Authorization'), 'Bearer mock-token');
 });
 
-test('rejects delta links outside the configured Graph mailbox', async () => {
+test('rejects mailboxes outside the allowlist before requesting a token', async () => {
   const client = new GraphClient(config, (async () => { throw new Error('must not fetch'); }) as typeof fetch);
-  await assert.rejects(client.getDeltaPage('inbox', 'https://example.net/steal'), /Invalid Graph delta link/);
+  await assert.rejects(client.getDeltaPage('outsider@example.com', 'inbox'), /allowlist/);
+  await assert.rejects(client.getMessageHeaders('outsider@example.com', 'abc'), /allowlist/);
+});
+
+test('rejects delta links for another mailbox, folder, host or path', async () => {
+  const client = new GraphClient(config, (async () => { throw new Error('must not fetch'); }) as typeof fetch);
+  const links = [
+    'https://example.net/steal',
+    'https://graph.microsoft.com/v1.0/users/joyce%40example.com/mailFolders/inbox/messages/delta',
+    'https://graph.microsoft.com/v1.0/users/mercy%40example.com/mailFolders/sentitems/messages/delta',
+    'https://graph.microsoft.com/v1.0/users/mercy%40example.com/mailFolders/inbox/messages/delta/extra',
+  ];
+  for (const link of links) {
+    await assert.rejects(client.getDeltaPage('mercy@example.com', 'inbox', link), /Invalid Graph delta link/);
+  }
+});
+
+test('fetches only reply-linking headers and never the message body', async () => {
+  const calls: string[] = [];
+  const http = async (input: string | URL | Request) => {
+    calls.push(String(input));
+    return new Response(calls.length === 1
+      ? JSON.stringify({ access_token: 'mock-token', expires_in: 3600 })
+      : JSON.stringify({ id: 'abc', internetMessageHeaders: [{ name: 'In-Reply-To', value: '<parent@example.com>' }] }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } });
+  };
+  const client = new GraphClient(config, http as typeof fetch);
+  const message = await client.getMessageHeaders('joyce@example.com', 'abc');
+  assert.equal(message.internetMessageHeaders?.[0].value, '<parent@example.com>');
+  assert.match(calls[1], /\$select=id,internetMessageId,internetMessageHeaders/);
+  assert.doesNotMatch(calls[1], /body|attachments/i);
+});
+
+test('rejects duplicate or malformed mailbox configuration', () => {
+  assert.throws(() => new GraphClient({ ...config, mailboxes: ['mercy@example.com', 'MERCY@example.com'] }), /allowlist/);
+  assert.throws(() => new GraphClient({ ...config, mailboxes: ['not-an-email'] }), /allowlist/);
 });
