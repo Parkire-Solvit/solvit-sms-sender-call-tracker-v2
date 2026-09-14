@@ -44,6 +44,21 @@ test('rejects delta links for another mailbox, folder, host or path', async () =
   }
 });
 
+test('accepts Graph canonical parenthesized folder continuation for the same mailbox', async () => {
+  const calls: string[] = [];
+  const http = async (input: string | URL | Request) => {
+    calls.push(String(input));
+    return new Response(JSON.stringify(calls.length === 1
+      ? { access_token: 'mock-token', expires_in: 3600 }
+      : { value: [], '@odata.deltaLink': String(input) }), { status: 200 });
+  };
+  const client = new GraphClient(config, http as typeof fetch);
+  const link = "https://graph.microsoft.com/v1.0/users/mercy@example.com/mailfolders('inbox')/messages/delta?$skiptoken=opaque";
+  await client.getDeltaPage('mercy@example.com', 'inbox', link);
+  assert.equal(calls[1], link);
+  await assert.rejects(client.getDeltaPage('joyce@example.com', 'inbox', link), /Invalid Graph delta link/);
+});
+
 test('fetches only reply-linking headers and never the message body', async () => {
   const calls: string[] = [];
   const http = async (input: string | URL | Request) => {
