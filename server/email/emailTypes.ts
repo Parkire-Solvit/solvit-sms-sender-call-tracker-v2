@@ -16,6 +16,7 @@ export interface EmailSlaSettings {
   resolutionMinutes: number;
   resolutionWarningMinutes: number;
   resolutionUrgentMinutes: number;
+  holidayDates: string[];
 }
 
 export interface EmailSlaState {

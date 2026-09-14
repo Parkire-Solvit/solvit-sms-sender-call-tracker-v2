@@ -5,6 +5,7 @@ import { emailIdentity, isAddressedToGroup, replyMatchesKnownMessage } from './m
 import { chooseEmailOwner } from './emailAssignmentService';
 import { dueEmailAlerts, recordFirstResponse, startEmailSla, validateEmailSlaSettings } from './emailSlaService';
 import type { EmailAlertType, EmailSlaSettings, EmailSlaState } from './emailTypes';
+import { emailWorkingMinutesBetween, isEmailWorkingTime } from '../../shared/emailBusinessHours';
 
 type Client = pg.PoolClient;
 type SqlRow = Record<string, any>;
@@ -44,6 +45,7 @@ export async function getEmailSettings(): Promise<EmailSlaSettings> {
     resolutionMinutes: row.resolution_minutes,
     resolutionWarningMinutes: row.resolution_warning_minutes,
     resolutionUrgentMinutes: row.resolution_urgent_minutes,
+    holidayDates: row.holiday_dates,
   };
   validateEmailSlaSettings(settings);
   return settings;
@@ -54,9 +56,10 @@ export async function setEmailSettings(settings: EmailSlaSettings): Promise<void
   await getPostgresPool().query(
     `UPDATE email_sla_settings SET response_minutes=$1, response_warning_minutes=$2,
      response_urgent_minutes=$3, resolution_minutes=$4, resolution_warning_minutes=$5,
-     resolution_urgent_minutes=$6, updated_at=now() WHERE id=1`,
+     resolution_urgent_minutes=$6, holiday_dates=$7::jsonb, updated_at=now() WHERE id=1`,
     [settings.responseMinutes, settings.responseWarningMinutes, settings.responseUrgentMinutes,
-      settings.resolutionMinutes, settings.resolutionWarningMinutes, settings.resolutionUrgentMinutes],
+      settings.resolutionMinutes, settings.resolutionWarningMinutes, settings.resolutionUrgentMinutes,
+      JSON.stringify(settings.holidayDates)],
   );
 }
 
@@ -140,12 +143,12 @@ export async function storeInbound(
     const assignment = await assignOwner(client, groupAddress, message);
     const thread = await client.query<SqlRow>(
       `INSERT INTO email_threads (mailbox,graph_conversation_id,root_internet_message_id,subject,customer_email,
-       assigned_member_id,assignment_method,received_at,response_due_at,resolution_due_at,status)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+       assigned_member_id,assignment_method,received_at,response_due_at,resolution_due_at,status,sla_settings_snapshot)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb)
        ON CONFLICT (root_internet_message_id) DO NOTHING RETURNING id`,
       [groupAddress, message.conversationId || null, internetId, message.subject || '', sender,
         assignment.memberId, assignment.method, sla.receivedAt, sla.responseDueAt, sla.resolutionDueAt,
-        assignment.memberId ? 'AWAITING_RESPONSE' : 'UNASSIGNED'],
+        assignment.memberId ? 'AWAITING_RESPONSE' : 'UNASSIGNED', JSON.stringify(settings)],
     );
     const threadId = Number(thread.rows[0]?.id || (await client.query<SqlRow>(
       'SELECT id FROM email_threads WHERE root_internet_message_id=$1', [internetId])).rows[0]?.id);
@@ -158,9 +161,13 @@ export async function storeInbound(
         JSON.stringify(recipients(message)), receivedAt],
     );
     if (thread.rows[0] && assignment.memberId) {
-      await client.query(
+      const history = await client.query<SqlRow>(
         `INSERT INTO email_assignment_history (email_thread_id,new_member_id,method,changed_by)
-         VALUES ($1,$2,$3,'system')`, [threadId, assignment.memberId, assignment.method],
+         VALUES ($1,$2,$3,'system') RETURNING id`, [threadId, assignment.memberId, assignment.method],
+      );
+      await client.query(
+        `INSERT INTO email_assignment_notifications (email_thread_id,member_id,assignment_history_id)
+         VALUES ($1,$2,$3)`, [threadId, assignment.memberId, history.rows[0].id],
       );
     }
     return threadId;
@@ -253,7 +260,7 @@ export async function listEmailThreads(filter: string, ownerEmail?: string): Pro
   return (await getPostgresPool().query<SqlRow>(
     `SELECT t.id,t.subject,t.customer_email,t.received_at,t.first_response_at,t.resolved_at,
       t.response_due_at,t.resolution_due_at,t.status,t.response_breached,t.resolution_breached,
-      t.assignment_method,m.email AS owner_email,m.display_name AS owner_name
+      t.assignment_method,t.sla_settings_snapshot,m.email AS owner_email,m.display_name AS owner_name
      FROM email_threads t LEFT JOIN email_team_members m ON m.id=t.assigned_member_id
      ${conditions.length ? `WHERE ${conditions.join(' AND ')}` : ''}
      ORDER BY t.received_at DESC LIMIT 200`, params,
@@ -275,10 +282,16 @@ export async function assignEmailThread(threadId: number, memberId: number): Pro
        status=CASE WHEN status='UNASSIGNED' THEN 'AWAITING_RESPONSE' ELSE status END,
        updated_at=now() WHERE id=$1`, [threadId, memberId],
     );
-    await client.query(
+    const history = await client.query<SqlRow>(
       `INSERT INTO email_assignment_history (email_thread_id,previous_member_id,new_member_id,method,changed_by)
-       VALUES ($1,$2,$3,'MANUAL','admin')`, [threadId, row.assigned_member_id, memberId],
+       VALUES ($1,$2,$3,'MANUAL','admin') RETURNING id`, [threadId, row.assigned_member_id, memberId],
     );
+    if (Number(row.assigned_member_id) !== memberId) {
+      await client.query(
+        `INSERT INTO email_assignment_notifications (email_thread_id,member_id,assignment_history_id)
+         VALUES ($1,$2,$3)`, [threadId, memberId, history.rows[0].id],
+      );
+    }
     return true;
   });
 }
@@ -305,7 +318,9 @@ export async function emitDueAlerts(settings: EmailSlaSettings): Promise<number>
       resolvedAt: row.resolved_at ? new Date(row.resolved_at) : null,
       responseBreached: row.response_breached, resolutionBreached: row.resolution_breached,
     };
-    const due = dueEmailAlerts(state, settings, new Date(), new Set<EmailAlertType>(), row.status === 'UNASSIGNED');
+    const snapshot: EmailSlaSettings | null = row.sla_settings_snapshot;
+    const due = dueEmailAlerts(state, snapshot || settings, new Date(), new Set<EmailAlertType>(),
+      row.status === 'UNASSIGNED', !snapshot);
     for (const alert of due) {
       const result = await getPostgresPool().query(
         `INSERT INTO email_alerts (email_thread_id,alert_type) VALUES ($1,$2)
@@ -363,17 +378,14 @@ export async function emailHealth(): Promise<SqlRow[]> {
 }
 
 export async function emailSummary(ownerEmail?: string): Promise<SqlRow> {
+  const settings = await getEmailSettings();
+  const now = new Date();
   const row = (await getPostgresPool().query<SqlRow>(
     `SELECT COUNT(*)::int AS total_received,
       COUNT(*) FILTER (WHERE status='UNASSIGNED')::int AS unassigned,
       COUNT(*) FILTER (WHERE status='AWAITING_RESPONSE')::int AS awaiting_response,
       COUNT(*) FILTER (WHERE status='IN_PROGRESS')::int AS in_progress,
       COUNT(*) FILTER (WHERE status='RESOLVED' AND resolved_at::date=current_date)::int AS resolved_today,
-      COUNT(*) FILTER (WHERE (first_response_at IS NULL AND
-        now() >= response_due_at - ((s.response_minutes-s.response_warning_minutes)*interval '1 minute')
-        AND response_due_at > now()) OR (resolved_at IS NULL AND
-        now() >= resolution_due_at - ((s.resolution_minutes-s.resolution_warning_minutes)*interval '1 minute')
-        AND resolution_due_at > now()))::int AS near_sla,
       COUNT(*) FILTER (WHERE response_breached OR resolution_breached OR
         (first_response_at IS NULL AND response_due_at <= now()) OR
         (resolved_at IS NULL AND resolution_due_at <= now()))::int AS breached,
@@ -386,5 +398,56 @@ export async function emailSummary(ownerEmail?: string): Promise<SqlRow> {
      WHERE s.id=1 AND t.received_at > now()-interval '30 days'
      ${ownerEmail ? 'AND m.email=$1' : ''}`, ownerEmail ? [ownerEmail.toLowerCase()] : [],
   )).rows[0];
+  row.near_sla = 0;
+  {
+    const open = (await getPostgresPool().query<SqlRow>(
+      `SELECT t.first_response_at,t.resolved_at,t.response_due_at,t.resolution_due_at,t.sla_settings_snapshot
+       FROM email_threads t LEFT JOIN email_team_members m ON m.id=t.assigned_member_id
+       WHERE t.received_at > now()-interval '30 days' AND (t.first_response_at IS NULL OR t.resolved_at IS NULL)
+       ${ownerEmail ? 'AND m.email=$1' : ''}`,
+      ownerEmail ? [ownerEmail.toLowerCase()] : [],
+    )).rows;
+    row.near_sla = open.filter((thread) => {
+      const responseDue = new Date(thread.response_due_at);
+      const resolutionDue = new Date(thread.resolution_due_at);
+      const snapshot: EmailSlaSettings | null = thread.sla_settings_snapshot;
+      if (!isEmailWorkingTime(now, snapshot?.holidayDates || settings.holidayDates)) return false;
+      if (!snapshot) {
+        return (!thread.first_response_at && responseDue > now &&
+          responseDue.getTime() - now.getTime() <=
+            (settings.responseMinutes - settings.responseWarningMinutes) * 60_000) ||
+          (!thread.resolved_at && resolutionDue > now &&
+            resolutionDue.getTime() - now.getTime() <=
+              (settings.resolutionMinutes - settings.resolutionWarningMinutes) * 60_000);
+      }
+      return (!thread.first_response_at && responseDue > now &&
+        emailWorkingMinutesBetween(now, responseDue, snapshot.holidayDates) <=
+          snapshot.responseMinutes - snapshot.responseWarningMinutes) ||
+        (!thread.resolved_at && resolutionDue > now &&
+          emailWorkingMinutesBetween(now, resolutionDue, snapshot.holidayDates) <=
+          snapshot.resolutionMinutes - snapshot.resolutionWarningMinutes);
+    }).length;
+  }
   return row;
+}
+
+export async function listAssignmentNotifications(ownerEmail: string): Promise<SqlRow[]> {
+  return (await getPostgresPool().query<SqlRow>(
+    `SELECT n.id,n.email_thread_id,n.created_at,t.subject,t.customer_email,h.method
+     FROM email_assignment_notifications n
+     JOIN email_team_members m ON m.id=n.member_id
+     JOIN email_threads t ON t.id=n.email_thread_id
+     JOIN email_assignment_history h ON h.id=n.assignment_history_id
+     WHERE m.email=$1 AND n.seen_at IS NULL AND t.assigned_member_id=n.member_id
+     ORDER BY n.created_at DESC LIMIT 50`, [ownerEmail.toLowerCase()],
+  )).rows;
+}
+
+export async function markAssignmentNotificationSeen(id: number, ownerEmail: string): Promise<boolean> {
+  const result = await getPostgresPool().query(
+    `UPDATE email_assignment_notifications n SET seen_at=now()
+     FROM email_team_members m WHERE n.id=$1 AND n.member_id=m.id AND m.email=$2 AND n.seen_at IS NULL`,
+    [id, ownerEmail.toLowerCase()],
+  );
+  return Boolean(result.rowCount);
 }

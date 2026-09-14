@@ -95,6 +95,8 @@ export default function App() {
   const [selectedAgentId, setSelectedAgentId] = useState<string>('');
   const [selectedTag, setSelectedTag] = useState<string>('');
   const [isAdminAuthenticated, setIsAdminAuthenticated] = useState(false);
+  const [memberEmail, setMemberEmail] = useState<string | null>(null);
+  const [emailLoginAvailable, setEmailLoginAvailable] = useState(false);
   const [loginForm, setLoginForm] = useState({ username: '', password: '' });
   const [loginError, setLoginError] = useState('');
   
@@ -106,6 +108,14 @@ export default function App() {
   useEffect(() => {
     fetch('/api/session').then((res) => res.json()).then((session) => {
       setIsAdminAuthenticated(session.role === 'admin');
+      setMemberEmail(session.role === 'cs_member' ? session.email : null);
+      setEmailLoginAvailable(Boolean(session.emailLoginAvailable));
+      if (session.role === 'cs_member') setActivePage('email');
+      if (new URLSearchParams(window.location.search).has('emailAuthError')) {
+        setLoginError('Microsoft sign-in failed or this account is not approved for the CS pilot.');
+        window.history.replaceState({}, '', window.location.pathname);
+      }
+      if (new URLSearchParams(window.location.search).has('emailAuth')) window.history.replaceState({}, '', window.location.pathname);
     }).catch(() => setIsAdminAuthenticated(false));
   }, []);
 
@@ -149,6 +159,8 @@ export default function App() {
   const handleLogout = () => {
     void fetch('/api/logout', { method: 'POST' });
     setIsAdminAuthenticated(false);
+    setMemberEmail(null);
+    setActivePage('dashboard');
     localStorage.removeItem('solvit_admin_token');
     localStorage.removeItem('nellions_admin_token');
   };
@@ -218,8 +230,9 @@ export default function App() {
           
           <div className="flex flex-wrap items-center gap-2.5">
             {/* Page Tabs: Dashboard / Insurance Callbacks */}
-            {isAdminAuthenticated && (
+            {(isAdminAuthenticated || memberEmail) && (
               <div className="flex items-center gap-1 bg-slate-100 rounded-xl p-1 mr-1">
+                {isAdminAuthenticated && <>
                 <button
                   id="nav-tab-dashboard"
                   onClick={() => setActivePage('dashboard')}
@@ -242,6 +255,7 @@ export default function App() {
                   <Car className="w-3.5 h-3.5" />
                   <span>Insurance Callbacks</span>
                 </button>
+                </>}
                 <button
                   id="nav-tab-email-sla"
                   onClick={() => setActivePage('email')}
@@ -272,7 +286,7 @@ export default function App() {
               </button>
             )}
 
-            {isAdminAuthenticated && (
+            {(isAdminAuthenticated || memberEmail) && (
               <button
                 id="btn-admin-logout"
                 onClick={handleLogout}
@@ -288,7 +302,7 @@ export default function App() {
       </nav>
 
       {/* Main View Area */}
-      {!isAdminAuthenticated ? (
+      {!isAdminAuthenticated && !memberEmail ? (
         <div className="max-w-md mx-auto mt-20 px-6">
           <motion.div 
             initial={{ opacity: 0, y: 20 }}
@@ -345,10 +359,11 @@ export default function App() {
                 <ArrowRight className="w-4 h-4" />
               </button>
             </form>
+            {emailLoginAvailable && <a href="/api/email-auth/start" className="mt-4 block w-full text-center px-4 py-3 rounded-xl border border-slate-300 text-sm font-semibold text-slate-800 hover:bg-slate-50">CS team: sign in with Microsoft</a>}
           </motion.div>
         </div>
       ) : activePage === 'email' ? (
-        <EmailSlaSection />
+        <EmailSlaSection employeeEmail={memberEmail || undefined} />
       ) : activePage === 'callbacks' ? (
         <InsuranceCallbackSection
           allAgents={complianceStats?.allAgents || stats?.allAgents || []}

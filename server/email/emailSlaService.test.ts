@@ -10,6 +10,7 @@ const settings: EmailSlaSettings = {
   resolutionMinutes: 120,
   resolutionWarningMinutes: 90,
   resolutionUrgentMinutes: 105,
+  holidayDates: [],
 };
 const received = new Date('2026-09-14T06:00:00.000Z');
 const at = (minutes: number) => new Date(received.getTime() + minutes * 60_000);
@@ -54,4 +55,19 @@ test('resolution warnings and breach use configured thresholds', () => {
 test('a resolved thread stops future warnings', () => {
   const state = resolveEmailSla(recordFirstResponse(startEmailSla(received, settings), at(10)), at(20));
   assert.deepEqual(dueEmailAlerts(state, settings, at(200), new Set()), []);
+});
+
+test('Friday afternoon deadlines resume Monday morning', () => {
+  const friday = new Date('2026-09-18T13:50:00.000Z'); // 4:50 PM Nairobi
+  const state = startEmailSla(friday, settings);
+  assert.equal(state.responseDueAt.toISOString(), '2026-09-21T05:20:00.000Z');
+  assert.equal(state.resolutionDueAt.toISOString(), '2026-09-21T06:50:00.000Z');
+});
+
+test('a configured holiday pauses both deadlines and alerts', () => {
+  const holidaySettings = { ...settings, holidayDates: ['2026-09-21'] };
+  const friday = new Date('2026-09-18T13:50:00.000Z');
+  const state = startEmailSla(friday, holidaySettings);
+  assert.equal(state.responseDueAt.toISOString(), '2026-09-22T05:20:00.000Z');
+  assert.deepEqual(dueEmailAlerts(state, holidaySettings, new Date('2026-09-21T06:00:00.000Z'), new Set()), []);
 });

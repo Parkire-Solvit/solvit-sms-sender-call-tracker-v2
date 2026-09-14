@@ -1,10 +1,12 @@
 import express from "express";
 import { createServer as createViteServer } from "vite";
 import path from "path";
-import { initDatabase, getDb } from "./db";
+import { initDatabase, getDb, getPostgresPool } from "./db";
 import { getSystemSettings, updateSystemSettings, getSettingsChangeLogs } from "./settingsManager";
 import { evaluateCompliance, RawEvent, RawAgent } from "./complianceEngine";
 import { clearAdminSession, credentialsMatch, isAdminRequest, requireAdmin, setAdminSession } from './server/auth/adminSession';
+import { clearEmailMemberSession, emailMember } from './server/auth/emailMemberSession';
+import { beginMicrosoftEmailLogin, completeMicrosoftEmailLogin, microsoftEmailLoginAvailable } from './server/auth/microsoftEmailLogin';
 import { createEmailRouter } from './server/email/emailRoutes';
 import { configuredEmailRuntime, startEmailPolling } from './server/email/emailSyncService';
 import {
@@ -52,11 +54,19 @@ async function startServer() {
 
   const emailRuntime = configuredEmailRuntime();
   if (emailRuntime) {
-    const migration = await db.queryOne('SELECT version FROM schema_migrations WHERE version = 9');
-    if (!migration) throw new Error('Email SLA requires database migration 009 before it can be enabled');
+    const migration = await db.queryOne('SELECT version FROM schema_migrations WHERE version = 12');
+    if (!migration) throw new Error('Email SLA requires database migration 012 before it can be enabled');
     startEmailPolling(emailRuntime);
   }
   app.use('/api/email', createEmailRouter(emailRuntime));
+  app.get('/api/email-auth/start', (req, res) => {
+    if (!emailRuntime) return res.status(503).send('Email SLA is not enabled');
+    beginMicrosoftEmailLogin(req, res);
+  });
+  app.get('/api/email-auth/callback', (req, res) => {
+    if (!emailRuntime) return res.redirect('/?emailAuthError=disabled');
+    void completeMicrosoftEmailLogin(req, res);
+  });
 
   // --- API Routes ---
 
@@ -93,11 +103,22 @@ async function startServer() {
     }
   });
 
-  app.get('/api/session', (req, res) => {
+  app.get('/api/session', async (req, res) => {
     const admin = isAdminRequest(req);
-    res.json({ authenticated: admin, role: admin ? 'admin' : null });
+    if (admin) return res.json({ authenticated: true, role: 'admin', emailLoginAvailable: Boolean(emailRuntime) && microsoftEmailLoginAvailable() });
+    const email = emailMember(req);
+    if (emailRuntime && email && emailRuntime.mailboxes.includes(email)) {
+      try {
+        const member = await getPostgresPool().query('SELECT 1 FROM email_team_members WHERE email=$1 AND is_monitored=true', [email]);
+        if (member.rowCount) return res.json({ authenticated: true, role: 'cs_member', email, emailLoginAvailable: true });
+      } catch (error) {
+        console.error('[EMAIL] Could not verify CS member session:', (error as Error).message);
+        return res.status(503).json({ error: 'Session verification unavailable' });
+      }
+    }
+    res.json({ authenticated: false, role: null, emailLoginAvailable: Boolean(emailRuntime) && microsoftEmailLoginAvailable() });
   });
-  app.post('/api/logout', (req, res) => { clearAdminSession(req, res); res.json({ success: true }); });
+  app.post('/api/logout', (req, res) => { clearAdminSession(req, res); clearEmailMemberSession(req, res); res.json({ success: true }); });
 
   // Log Installation / Heartbeat
   app.post("/api/log-agent", async (req, res) => {

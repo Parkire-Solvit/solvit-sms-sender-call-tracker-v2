@@ -46,6 +46,14 @@ Link the `sms-sender` service to the `solvit-db` PostgreSQL database so Render s
 
 Migrations acquire a PostgreSQL transaction and record each applied file in `schema_migrations`. The first migration creates the canonical tables and preserves a legacy `working_hours_json` value by renaming it to `working_hours_schedule` when encountered.
 
+### CS Email SLA pilot
+
+The Email SLA tab uses the seven-mailbox Exchange application RBAC scope and the matching `MICROSOFT_MONITORED_MAILBOXES` allowlist. Do not add `jmining@solvit.co.ke`. Before enabling Email SLA, run migrations through version 012 using the Render pre-deploy command. Set `EMAIL_SLA_ENABLED=true`, `EMAIL_SLA_START_AT`, the Microsoft tenant/client/secret values, `MICROSOFT_CS_GROUP_ADDRESS`, and the explicit monitored mailbox list. For CS staff sign-in, also set `SESSION_SECRET` to a random value of at least 32 characters and `MICROSOFT_REDIRECT_URI` to the exact Web redirect registered in the Entra application, for example `https://sms-sender-7pbe.onrender.com/api/email-auth/callback`.
+
+Admins continue using the main portal password. CS staff use Microsoft sign-in on the same portal; their Email SLA API access is restricted to their own approved mailbox. New messages are assigned to a sole direct CS recipient, then a configured rule, then round-robin among available members. Admins can reassign and adjust availability/rotation in Email SLA settings. Staff see their own awaiting-response queue and in-app notices for new or reassigned messages; they reply in Outlook. Notices are visible only while the portal is open and are not email, SMS, or Teams push notifications.
+
+Email SLA time is Monday-Friday, 8 AM-5 PM Africa/Nairobi. Admins must enter Kenyan public holiday dates in Email SLA settings; an empty list does **not** exclude holidays. The calendar and thresholds are snapshotted for newly captured emails, so existing deadlines are not rewritten by later edits. Validate one member's sign-in, assignment notice, Outlook reply sync, and another member's denied access before widening the pilot.
+
 ## Commands
 
 ```bash

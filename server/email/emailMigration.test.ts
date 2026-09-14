@@ -45,5 +45,19 @@ test('numeric migration sequence survives the two legacy 004 files and repairs S
     assert.equal(columns.rows.length, 1);
     const applied009 = await db.query<{ version: number }>('SELECT version FROM schema_migrations WHERE version=9');
     assert.equal(applied009.rows.length, 1);
+    const applied011 = await db.query<{ version: number }>('SELECT version FROM schema_migrations WHERE version=11');
+    assert.equal(applied011.rows.length, 1);
+    const applied012 = await db.query<{ version: number }>('SELECT version FROM schema_migrations WHERE version=12');
+    assert.equal(applied012.rows.length, 1);
+    const holidays = await db.query<{ holiday_dates: string[] }>('SELECT holiday_dates FROM email_sla_settings WHERE id=1');
+    assert.deepEqual(holidays.rows[0].holiday_dates, []);
+    const snapshotColumn = await db.query<{ column_name: string }>(
+      "SELECT column_name FROM information_schema.columns WHERE table_name='email_threads' AND column_name='sla_settings_snapshot'",
+    );
+    assert.equal(snapshotColumn.rows.length, 1);
+    const notificationTable = await db.query<{ tablename: string }>(
+      "SELECT tablename FROM pg_tables WHERE schemaname='public' AND tablename='email_assignment_notifications'",
+    );
+    assert.equal(notificationTable.rows.length, 1);
   } finally { await db.close(); }
 });

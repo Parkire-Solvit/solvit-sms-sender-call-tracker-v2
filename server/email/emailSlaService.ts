@@ -1,13 +1,13 @@
 import type { EmailAlertType, EmailSlaSettings, EmailSlaState } from './emailTypes';
-
-const minuteMs = 60_000;
+import { addEmailWorkingMinutes, emailWorkingMinutesBetween, isEmailWorkingTime, validEmailHolidayDate } from '../../shared/emailBusinessHours';
 
 function validDate(value: Date, label: string): void {
   if (!(value instanceof Date) || Number.isNaN(value.getTime())) throw new Error(`${label} must be a valid date`);
 }
 
 export function validateEmailSlaSettings(settings: EmailSlaSettings): void {
-  const values = Object.values(settings);
+  const values = [settings.responseMinutes, settings.responseWarningMinutes, settings.responseUrgentMinutes,
+    settings.resolutionMinutes, settings.resolutionWarningMinutes, settings.resolutionUrgentMinutes];
   if (values.some((value) => !Number.isInteger(value) || value < 0)) {
     throw new Error('Email SLA settings must be non-negative whole minutes');
   }
@@ -19,6 +19,11 @@ export function validateEmailSlaSettings(settings: EmailSlaSettings): void {
         settings.resolutionUrgentMinutes < settings.resolutionMinutes)) {
     throw new Error('Resolution warning, urgent and due times must be in increasing order');
   }
+  if (!Array.isArray(settings.holidayDates) || settings.holidayDates.length > 366 ||
+      settings.holidayDates.some((date) => typeof date !== 'string' || !validEmailHolidayDate(date)) ||
+      new Set(settings.holidayDates).size !== settings.holidayDates.length) {
+    throw new Error('Holiday dates must be unique YYYY-MM-DD Nairobi dates');
+  }
 }
 
 export function startEmailSla(receivedAt: Date, settings: EmailSlaSettings): EmailSlaState {
@@ -26,8 +31,8 @@ export function startEmailSla(receivedAt: Date, settings: EmailSlaSettings): Ema
   validateEmailSlaSettings(settings);
   return {
     receivedAt: new Date(receivedAt),
-    responseDueAt: new Date(receivedAt.getTime() + settings.responseMinutes * minuteMs),
-    resolutionDueAt: new Date(receivedAt.getTime() + settings.resolutionMinutes * minuteMs),
+    responseDueAt: addEmailWorkingMinutes(receivedAt, settings.responseMinutes, settings.holidayDates),
+    resolutionDueAt: addEmailWorkingMinutes(receivedAt, settings.resolutionMinutes, settings.holidayDates),
     firstResponseAt: null,
     resolvedAt: null,
     responseBreached: false,
@@ -62,23 +67,29 @@ export function dueEmailAlerts(
   now: Date,
   alreadyEmitted: ReadonlySet<EmailAlertType>,
   unassigned = false,
+  legacyWallClock = false,
 ): EmailAlertType[] {
   validDate(now, 'now');
   validateEmailSlaSettings(settings);
-  const elapsed = (now.getTime() - state.receivedAt.getTime()) / minuteMs;
+  // Alerts wait until the next open period. Stored due dates remain authoritative,
+  // including for pre-calendar conversations whose deadlines are not rewritten.
+  if (!isEmailWorkingTime(now, settings.holidayDates)) return [];
+  const elapsed = (now.getTime() - state.receivedAt.getTime()) / 60_000;
+  const responseRemaining = emailWorkingMinutesBetween(now, state.responseDueAt, settings.holidayDates);
+  const resolutionRemaining = emailWorkingMinutesBetween(now, state.resolutionDueAt, settings.holidayDates);
   const due: EmailAlertType[] = [];
   if (unassigned) due.push('EMAIL_UNASSIGNED');
   if (!state.firstResponseAt) {
-    if (elapsed >= settings.responseWarningMinutes) due.push('RESPONSE_WARNING');
-    if (elapsed >= settings.responseUrgentMinutes) due.push('RESPONSE_URGENT');
-    if (elapsed >= settings.responseMinutes) due.push('RESPONSE_BREACH');
+    if (legacyWallClock ? elapsed >= settings.responseWarningMinutes : responseRemaining <= settings.responseMinutes - settings.responseWarningMinutes) due.push('RESPONSE_WARNING');
+    if (legacyWallClock ? elapsed >= settings.responseUrgentMinutes : responseRemaining <= settings.responseMinutes - settings.responseUrgentMinutes) due.push('RESPONSE_URGENT');
+    if (now >= state.responseDueAt) due.push('RESPONSE_BREACH');
   } else if (state.responseBreached) {
     due.push('RESPONSE_BREACH');
   }
   if (!state.resolvedAt) {
-    if (elapsed >= settings.resolutionWarningMinutes) due.push('RESOLUTION_WARNING');
-    if (elapsed >= settings.resolutionUrgentMinutes) due.push('RESOLUTION_URGENT');
-    if (elapsed >= settings.resolutionMinutes) due.push('RESOLUTION_BREACH');
+    if (legacyWallClock ? elapsed >= settings.resolutionWarningMinutes : resolutionRemaining <= settings.resolutionMinutes - settings.resolutionWarningMinutes) due.push('RESOLUTION_WARNING');
+    if (legacyWallClock ? elapsed >= settings.resolutionUrgentMinutes : resolutionRemaining <= settings.resolutionMinutes - settings.resolutionUrgentMinutes) due.push('RESOLUTION_URGENT');
+    if (now >= state.resolutionDueAt) due.push('RESOLUTION_BREACH');
   } else if (state.resolutionBreached) {
     due.push('RESOLUTION_BREACH');
   }
