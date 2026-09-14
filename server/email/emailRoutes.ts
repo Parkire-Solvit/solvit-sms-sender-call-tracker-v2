@@ -1,6 +1,5 @@
 import { Router, type RequestHandler } from 'express';
 import { requireAdmin } from '../auth/adminSession';
-import { emailActor, requireEmailActor } from '../auth/emailUserSession';
 import type { EmailRuntimeConfig } from './emailSyncService';
 import { getEmailSyncHealth, runEmailSync } from './emailSyncService';
 import {
@@ -19,44 +18,34 @@ function positiveId(value: string): number | null {
 
 export function createEmailRouter(config: EmailRuntimeConfig | null): Router {
   const router = Router();
-  const allowed = config?.mailboxes || [];
-  router.use(requireEmailActor(allowed));
-  router.get('/status', safe(async (request, response) => {
-    response.json({ enabled: Boolean(config), sync: config && emailActor(request, allowed)?.role === 'admin' ? await getEmailSyncHealth() : [] });
+  router.use(requireAdmin);
+  router.get('/status', safe(async (_request, response) => {
+    response.json({ enabled: Boolean(config), sync: config ? await getEmailSyncHealth() : [] });
   }));
   router.use((_, response, next) => {
     if (!config) return response.status(503).json({ error: 'Email SLA is not configured' });
     next();
   });
 
-  router.get('/summary', safe(async (request, response) => {
-    const actor = emailActor(request, allowed)!;
-    response.json(await emailSummary(actor.role === 'employee' ? actor.email : undefined));
-  }));
+  router.get('/summary', safe(async (_request, response) => response.json(await emailSummary())));
   router.get('/threads', safe(async (request, response) => {
     const filter = typeof request.query.filter === 'string' ? request.query.filter : 'all';
     const validFilters = new Set(['all', 'unassigned', 'awaiting', 'in-progress', 'resolved', 'breached']);
     if (!validFilters.has(filter)) return response.status(400).json({ error: 'Invalid thread filter' });
-    const actor = emailActor(request, allowed)!;
-    const owner = actor.role === 'employee' ? actor.email! : (typeof request.query.owner === 'string' ? request.query.owner.trim() : '');
+    const owner = typeof request.query.owner === 'string' ? request.query.owner.trim() : '';
     if (owner && (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(owner) || !config!.mailboxes.includes(owner.toLowerCase()))) {
       return response.status(400).json({ error: 'Invalid owner' });
     }
     response.json(await listEmailThreads(filter, owner || undefined));
   }));
-  router.get('/alerts', safe(async (request, response) => {
-    const actor = emailActor(request, allowed)!;
-    response.json(await listEmailAlerts(actor.role === 'employee' ? actor.email : undefined));
-  }));
+  router.get('/alerts', safe(async (_request, response) => response.json(await listEmailAlerts())));
   router.get('/settings', safe(async (_request, response) => response.json(await getEmailSettings())));
   router.post('/alerts/:id/acknowledge', safe(async (request, response) => {
     const id = positiveId(request.params.id);
     if (!id) return response.status(400).json({ error: 'Invalid alert ID' });
-    const actor = emailActor(request, allowed)!;
-    const updated = await acknowledgeEmailAlert(id, actor.role === 'employee' ? actor.email : undefined);
+    const updated = await acknowledgeEmailAlert(id);
     response.status(updated ? 200 : 404).json(updated ? { success: true } : { error: 'Alert not found' });
   }));
-  router.use(requireAdmin);
   router.get('/team', safe(async (_request, response) => response.json(await listEmailTeam())));
   router.patch('/team/:id', safe(async (request, response) => {
     const id = positiveId(request.params.id);

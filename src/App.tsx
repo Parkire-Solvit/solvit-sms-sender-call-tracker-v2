@@ -95,8 +95,6 @@ export default function App() {
   const [selectedAgentId, setSelectedAgentId] = useState<string>('');
   const [selectedTag, setSelectedTag] = useState<string>('');
   const [isAdminAuthenticated, setIsAdminAuthenticated] = useState(false);
-  const [employeeEmail, setEmployeeEmail] = useState<string | null>(null);
-  const [employeeLoginEnabled, setEmployeeLoginEnabled] = useState(false);
   const [loginForm, setLoginForm] = useState({ username: '', password: '' });
   const [loginError, setLoginError] = useState('');
   
@@ -108,9 +106,7 @@ export default function App() {
   useEffect(() => {
     fetch('/api/session').then((res) => res.json()).then((session) => {
       setIsAdminAuthenticated(session.role === 'admin');
-      setEmployeeEmail(session.role === 'employee' ? session.email : null);
     }).catch(() => setIsAdminAuthenticated(false));
-    fetch('/api/email-auth/config').then((res) => res.json()).then((data) => setEmployeeLoginEnabled(Boolean(data.enabled))).catch(() => undefined);
   }, []);
 
   // Fetch Database engine status
@@ -152,9 +148,7 @@ export default function App() {
 
   const handleLogout = () => {
     void fetch('/api/logout', { method: 'POST' });
-    void fetch('/api/email-auth/logout', { method: 'POST' });
     setIsAdminAuthenticated(false);
-    setEmployeeEmail(null);
     localStorage.removeItem('solvit_admin_token');
     localStorage.removeItem('nellions_admin_token');
   };
@@ -264,7 +258,6 @@ export default function App() {
               <SearchContactBar onSelectPhone={(phone) => setInspectedPhone(phone)} />
             )}
 
-            {employeeEmail && !isAdminAuthenticated && <span className="text-xs text-slate-600">{employeeEmail}</span>}
 
             {/* Master Settings Button (Admin Only) */}
             {isAdminAuthenticated && (
@@ -279,7 +272,7 @@ export default function App() {
               </button>
             )}
 
-            {(isAdminAuthenticated || employeeEmail) && (
+            {isAdminAuthenticated && (
               <button
                 id="btn-admin-logout"
                 onClick={handleLogout}
@@ -295,7 +288,7 @@ export default function App() {
       </nav>
 
       {/* Main View Area */}
-      {!isAdminAuthenticated && !employeeEmail ? (
+      {!isAdminAuthenticated ? (
         <div className="max-w-md mx-auto mt-20 px-6">
           <motion.div 
             initial={{ opacity: 0, y: 20 }}
@@ -352,11 +345,8 @@ export default function App() {
                 <ArrowRight className="w-4 h-4" />
               </button>
             </form>
-            {employeeLoginEnabled && <a href="/api/email-auth/start" className="mt-4 block text-center w-full py-3 border rounded-xl text-sm font-bold text-slate-800 hover:bg-slate-50">CS team: sign in with Microsoft</a>}
           </motion.div>
         </div>
-      ) : employeeEmail && !isAdminAuthenticated ? (
-        <EmailSlaSection employeeEmail={employeeEmail} />
       ) : activePage === 'email' ? (
         <EmailSlaSection />
       ) : activePage === 'callbacks' ? (
