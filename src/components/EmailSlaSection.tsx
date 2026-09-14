@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { AlertTriangle, CheckCircle2, Clock3, Mail, RefreshCw, Settings2 } from 'lucide-react';
+import { AlertTriangle, Mail, RefreshCw, Settings2 } from 'lucide-react';
 
 type Thread = {
   id: number; subject: string; customer_email: string; received_at: string;
@@ -51,7 +51,6 @@ export function EmailSlaSection({ employeeEmail }: { employeeEmail?: string }) {
   const [alerts, setAlerts] = useState<Alert[]>([]);
   const [summary, setSummary] = useState<Summary | null>(null);
   const [settings, setSettings] = useState<Settings | null>(null);
-  const [health, setHealth] = useState<Array<{ mailbox: string; folder: string; last_successful_sync_at: string | null; last_error_code: string | null }>>([]);
   const [filter, setFilter] = useState('all');
   const [owner, setOwner] = useState('');
   const [error, setError] = useState('');
@@ -61,9 +60,8 @@ export function EmailSlaSection({ employeeEmail }: { employeeEmail?: string }) {
 
   const refresh = useCallback(async () => {
     try {
-      const status = await api<{ enabled: boolean; sync: typeof health }>('/api/email/status');
+      const status = await api<{ enabled: boolean }>('/api/email/status');
       setEnabled(status.enabled);
-      setHealth(status.sync);
       if (!status.enabled) return;
       const query = new URLSearchParams({ filter, ...(owner ? { owner } : {}) });
       const [nextThreads, nextMembers, nextAlerts, nextSummary, nextSettings] = await Promise.all([
@@ -140,7 +138,6 @@ export function EmailSlaSection({ employeeEmail }: { employeeEmail?: string }) {
           {!threads.length && <tr><td colSpan={isEmployee ? 6 : 7} className="text-center py-8 text-slate-500">No email conversations match this filter.</td></tr>}
         </tbody></table></div>
       </section>
-      {!isEmployee && <section className="p-4 rounded-xl border bg-white"><h3 className="font-semibold text-sm flex items-center gap-2"><Clock3 className="w-4 h-4" /> Sync health</h3><p className="text-xs text-slate-500 mt-1">Inbox and Sent Items checks for the monitored mailboxes; the CS folder is optional.</p><div className="mt-3 grid md:grid-cols-2 gap-1">{health.map((item) => { const optional = item.last_error_code === 'OPTIONAL_FOLDER_NOT_PRESENT'; return <p key={`${item.mailbox}-${item.folder}`} className="text-xs flex items-center gap-2">{optional ? <Clock3 className="w-3 h-3 text-slate-400" /> : item.last_error_code ? <AlertTriangle className="w-3 h-3 text-red-600" /> : <CheckCircle2 className="w-3 h-3 text-emerald-600" />}{item.mailbox} / {item.folder}: {optional ? 'not present (optional)' : item.last_successful_sync_at ? new Date(item.last_successful_sync_at).toLocaleString() : 'never'}{item.last_error_code && !optional ? ` — ${item.last_error_code}` : ''}</p>; })}</div></section>}
     </>}
   </main>;
 }
