@@ -5,6 +5,17 @@ import cors from "cors";
 import { initDatabase, getDb } from "./db";
 import { getSystemSettings, updateSystemSettings, getSettingsChangeLogs } from "./settingsManager";
 import { evaluateCompliance, RawEvent, RawAgent } from "./complianceEngine";
+import {
+  getCallbackSettings,
+  updateCallbackSettings,
+  importCallbackJobs,
+  getCallbackJobs,
+  updateCallbackJobStatus,
+  logCallbackOutcome,
+  getCallbackJobLogs,
+  closeMaturedCallbackJobs,
+  getMaxAttemptsReport,
+} from "./insuranceCallbacks";
 
 // SSE Clients for real-time agent name push
 const agentClients = new Map<number, any>();
@@ -356,10 +367,33 @@ function computeActivitySummary(events: any[], totalAgents: number = 0) {
   let total_calls_not_picked = 0;
   let total_calls_missed = 0;
 
+  const lastLegByPhone = new Map<string, { status: string; timestamp: number }>();
+  const CORRELATION_WINDOW_MS = 30 * 60 * 1000;
+
   for (const e of events) {
     const type = (e.type || "").toUpperCase();
     const status = (e.status || "").toUpperCase();
     const duration = Number(e.duration) || 0;
+    const phone = e.target_phone;
+    const ts = new Date(e.timestamp).getTime();
+
+    if (type === "CALL" && (status === "INCOMING" || status === "OUTGOING")) {
+      lastLegByPhone.set(phone, { status, timestamp: ts });
+    }
+
+    if (type === "CALL" && status === "CONNECTED") {
+      const leg = lastLegByPhone.get(phone);
+      const wasIncoming = leg && leg.status === "INCOMING" && (ts - leg.timestamp) <= CORRELATION_WINDOW_MS;
+      if (wasIncoming) {
+        total_calls_incoming_connected += 1;
+      } else {
+        total_calls_made += 1;
+        total_calls_outgoing_connected += 1;
+      }
+      total_calls_connected += 1;
+      lastLegByPhone.delete(phone);
+      continue;
+    }
 
     if (type === "SMS") {
       total_sms += 1;
@@ -369,14 +403,6 @@ function computeActivitySummary(events: any[], totalAgents: number = 0) {
         total_calls_incoming += 1;
       } else if (status === "INCOMING") {
         total_calls_incoming += 1;
-        if (duration > 0) {
-          total_calls_incoming_connected += 1;
-          total_calls_connected += 1;
-        }
-      } else if (status === "CONNECTED") {
-        total_calls_made += 1;
-        total_calls_outgoing_connected += 1;
-        total_calls_connected += 1;
       } else if (["NOT_PICKED", "FAILED", "BUSY", "NO_ANSWER"].includes(status)) {
         total_calls_made += 1;
         total_calls_not_picked += 1;
@@ -841,6 +867,217 @@ function computeActivitySummary(events: any[], totalAgents: number = 0) {
     }
   });
 
+  // ==========================================
+  // CALLBACKS EXTENSION ENDPOINTS
+  // ==========================================
+
+  // GET /api/callback-settings
+  app.get("/api/callback-settings", async (req, res) => {
+    try {
+      const settings = await getCallbackSettings(db);
+      res.json(settings);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // POST /api/callback-settings
+  app.post("/api/callback-settings", async (req, res) => {
+    try {
+      const updated = await updateCallbackSettings(db, req.body);
+      res.json(updated);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // POST /api/callback-jobs/import
+  app.post("/api/callback-jobs/import", async (req, res) => {
+    try {
+      const { file_name, imported_by, rows } = req.body;
+      if (!Array.isArray(rows)) {
+        return res.status(400).json({ error: "Invalid rows payload. Expected an array of rows." });
+      }
+      const summary = await importCallbackJobs(db, {
+        file_name: file_name || "import.xlsx",
+        imported_by: imported_by || "Admin",
+        rows,
+      });
+      res.json(summary);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // GET /api/callback-jobs
+  app.get("/api/callback-jobs", async (req, res) => {
+    try {
+      const { status, channel_partner, assigned_agent_id, search } = req.query;
+      const jobs = await getCallbackJobs(db, {
+        status: status as string,
+        channel_partner: channel_partner as string,
+        assigned_agent_id: assigned_agent_id as string,
+        search: search as string,
+      });
+      res.json(jobs);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // PATCH /api/callback-jobs/:id/status
+  app.patch("/api/callback-jobs/:id/status", async (req, res) => {
+    try {
+      const id = parseInt(req.params.id, 10);
+      const { status } = req.body;
+      if (!status || !["GREEN", "AMBER", "RED"].includes(status.toUpperCase())) {
+        return res.status(400).json({ error: "Invalid status. Must be 'GREEN', 'AMBER', or 'RED'." });
+      }
+      const updatedJob = await updateCallbackJobStatus(db, id, status.toUpperCase() as any);
+      if (!updatedJob) {
+        return res.status(404).json({ error: "Callback job not found." });
+      }
+      res.json(updatedJob);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // POST /api/callback-jobs/:id/outcome and POST /api/callback-jobs/:id/log
+  const handleCallbackOutcomeLog = async (req: express.Request, res: express.Response) => {
+    try {
+      const id = parseInt(req.params.id, 10);
+      const { outcome, comment, logged_by } = req.body;
+
+      if (!outcome) {
+        return res.status(400).json({ error: "Outcome is required." });
+      }
+      if (!comment || !String(comment).trim()) {
+        return res.status(400).json({ error: "Comment is required." });
+      }
+
+      const updatedJob = await logCallbackOutcome(db, id, outcome, comment, logged_by || "Agent");
+      res.json(updatedJob);
+    } catch (err: any) {
+      console.error("[API] Error logging callback outcome:", err);
+      if (err.message && (err.message.includes("Invalid outcome") || err.message.includes("Comment is required"))) {
+        return res.status(400).json({ error: err.message });
+      }
+      if (err.message && err.message.includes("not found")) {
+        return res.status(404).json({ error: err.message });
+      }
+      res.status(500).json({ error: err.message || "Failed to log outcome" });
+    }
+  };
+
+  app.post("/api/callback-jobs/:id/outcome", handleCallbackOutcomeLog);
+  app.post("/api/callback-jobs/:id/log", handleCallbackOutcomeLog);
+
+  // GET /api/callback-jobs/:id/logs
+  app.get("/api/callback-jobs/:id/logs", async (req, res) => {
+    try {
+      const id = Number(req.params.id);
+      const logs = await getCallbackJobLogs(db, id);
+      res.json(logs);
+    } catch (err) {
+      console.error("[API] Error fetching callback job logs:", err);
+      res.status(500).json({ error: "Failed to fetch history" });
+    }
+  });
+
+  // GET /api/callback-jobs/max-attempts-report
+  app.get("/api/callback-jobs/max-attempts-report", async (req, res) => {
+    try {
+      const report = await getMaxAttemptsReport(db);
+      res.json(report);
+    } catch (err) {
+      console.error("[API] Error fetching max-attempts report:", err);
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // GET /api/callback-jobs/max-attempts-report/csv
+  app.get("/api/callback-jobs/max-attempts-report/csv", async (req, res) => {
+    try {
+      const report = await getMaxAttemptsReport(db);
+
+      // Find max attempts count across records to generate dynamic headers
+      let maxAttemptsSeen = 1;
+      for (const group of report) {
+        for (const rec of group.records) {
+          if (rec.attempts.length > maxAttemptsSeen) {
+            maxAttemptsSeen = rec.attempts.length;
+          }
+        }
+      }
+
+      const headers = [
+        "Channel Partner",
+        "Vehicle Registration",
+        "Client Name",
+        "Client Phone",
+        "Initiated Date",
+        "Closed At",
+        "Total Contact Attempts",
+      ];
+
+      for (let i = 1; i <= maxAttemptsSeen; i++) {
+        headers.push(`Attempt ${i} Outcome`);
+        headers.push(`Attempt ${i} Comment`);
+        headers.push(`Attempt ${i} Logged By`);
+        headers.push(`Attempt ${i} Date/Time`);
+      }
+
+      const escapeCsv = (val: any) => {
+        if (val === null || val === undefined) return '""';
+        const str = String(val).replace(/"/g, '""');
+        return `"${str}"`;
+      };
+
+      const csvLines: string[] = [headers.map(escapeCsv).join(",")];
+
+      for (const group of report) {
+        for (const rec of group.records) {
+          const row: any[] = [
+            group.channel_partner,
+            rec.vehicle_reg_raw,
+            rec.client_name || "",
+            rec.client_phone_raw,
+            rec.initiated_date || "",
+            rec.closed_at || "",
+            rec.attempts.length,
+          ];
+
+          for (let i = 0; i < maxAttemptsSeen; i++) {
+            const att = rec.attempts[i];
+            if (att) {
+              row.push(att.outcome);
+              row.push(att.comment);
+              row.push(att.logged_by);
+              row.push(att.created_at);
+            } else {
+              row.push("");
+              row.push("");
+              row.push("");
+              row.push("");
+            }
+          }
+
+          csvLines.push(row.map(escapeCsv).join(","));
+        }
+      }
+
+      const csvContent = csvLines.join("\r\n");
+      const filename = `max_attempts_report_${new Date().toISOString().split("T")[0]}.csv`;
+
+      res.setHeader("Content-Type", "text/csv; charset=utf-8");
+      res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+      res.send(csvContent);
+    } catch (err) {
+      console.error("[API] Error generating max-attempts CSV:", err);
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
   // Vite middleware for development
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
@@ -859,6 +1096,15 @@ function computeActivitySummary(events: any[], totalAgents: number = 0) {
   app.listen(PORT, "0.0.0.0", () => {
     console.log(`Solvit server running on http://localhost:${PORT}`);
   });
+
+  // Recurring sweep: close matured callback records within a minute
+  setInterval(async () => {
+    try {
+      await closeMaturedCallbackJobs(db);
+    } catch (err) {
+      console.error("[Background] Error closing matured callback jobs:", err);
+    }
+  }, 60 * 1000);
 }
 
 startServer();

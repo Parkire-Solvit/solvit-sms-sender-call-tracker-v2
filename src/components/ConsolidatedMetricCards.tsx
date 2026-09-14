@@ -118,6 +118,7 @@ export const ConsolidatedMetricCards: React.FC<ConsolidatedMetricCardsProps> = (
   const incomingTotal = headlineStats?.incoming_callback_total || 0;
   const incomingMet = headlineStats?.incoming_callback_met || 0;
   const incomingOpen = headlineStats?.open_incoming_count || 0;
+  const incomingBreached = headlineStats?.breached_incoming_count || 0;
   const incomingPct = headlineStats?.incoming_callback_compliance_pct;
   const hasIncomingObligations = incomingTotal > 0 || incomingOpen > 0;
   const incomingTheme = getComplianceTheme(incomingPct, hasIncomingObligations);
@@ -128,6 +129,7 @@ export const ConsolidatedMetricCards: React.FC<ConsolidatedMetricCardsProps> = (
   const outgoingTotal = headlineStats?.outgoing_reconnect_total || 0;
   const outgoingMet = headlineStats?.outgoing_reconnect_met || 0;
   const outgoingOpen = headlineStats?.open_outgoing_count || 0;
+  const outgoingBreached = headlineStats?.breached_outgoing_count || 0;
   const outgoingPct = headlineStats?.outgoing_reconnect_compliance_pct;
   const hasOutgoingObligations = outgoingTotal > 0 || outgoingOpen > 0;
   const outgoingTheme = getComplianceTheme(outgoingPct, hasOutgoingObligations);
@@ -141,6 +143,7 @@ export const ConsolidatedMetricCards: React.FC<ConsolidatedMetricCardsProps> = (
   const smsTotal = headlineStats?.sms_followup_total || 0;
   const smsMet = headlineStats?.sms_followup_met || 0;
   const smsOpen = headlineStats?.open_sms_count || 0;
+  const smsBreached = headlineStats?.breached_sms_count || 0;
   const smsPct = headlineStats?.sms_followup_compliance_pct;
   const hasSmsObligations = smsTotal > 0 || smsOpen > 0;
   const smsTheme = getComplianceTheme(smsPct, hasSmsObligations);
@@ -193,6 +196,15 @@ export const ConsolidatedMetricCards: React.FC<ConsolidatedMetricCardsProps> = (
               )}
               {incomingOpen} Open
             </span>
+            {incomingBreached > 0 && (
+              <span
+                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-bold border bg-red-100 text-red-800 border-red-200"
+                title={`${incomingBreached} breached incoming callback obligations`}
+              >
+                <AlertCircle className="w-3 h-3 text-red-600" />
+                {incomingBreached} Breached
+              </span>
+            )}
           </div>
 
           {/* LAYER 1 (DOMINANT): Compliance Verdict */}
@@ -324,6 +336,15 @@ export const ConsolidatedMetricCards: React.FC<ConsolidatedMetricCardsProps> = (
               )}
               {outgoingOpen} Open
             </span>
+            {outgoingBreached > 0 && (
+              <span
+                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-bold border bg-red-100 text-red-800 border-red-200"
+                title={`${outgoingBreached} breached reconnection obligations`}
+              >
+                <AlertCircle className="w-3 h-3 text-red-600" />
+                {outgoingBreached} Breached
+              </span>
+            )}
           </div>
 
           {/* LAYER 1 (DOMINANT): Compliance Verdict */}
@@ -455,6 +476,15 @@ export const ConsolidatedMetricCards: React.FC<ConsolidatedMetricCardsProps> = (
               )}
               {smsOpen} Open
             </span>
+            {smsBreached > 0 && (
+              <span
+                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-bold border bg-red-100 text-red-800 border-red-200"
+                title={`${smsBreached} breached SMS follow-up obligations`}
+              >
+                <AlertCircle className="w-3 h-3 text-red-600" />
+                {smsBreached} Breached
+              </span>
+            )}
           </div>
 
           {/* LAYER 1 (DOMINANT): Compliance Verdict */}
