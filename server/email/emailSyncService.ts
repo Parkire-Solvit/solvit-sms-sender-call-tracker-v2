@@ -3,7 +3,7 @@ import { GraphClient, type GraphMessage } from './graphClient';
 import { emailIdentity, isAddressedToGroup } from './messageIdentity';
 import {
   emailHealth, emitDueAlerts, ensureEmailTeam, getDeltaLink, getEmailSettings,
-  recordSyncFailure, saveDeltaLink, storeInbound, storeOutbound,
+  recordOptionalFolderAbsent, recordSyncFailure, saveDeltaLink, storeInbound, storeOutbound,
 } from './emailRepository';
 
 export interface EmailRuntimeConfig {
@@ -89,8 +89,8 @@ export async function runEmailSync(config: EmailRuntimeConfig): Promise<{ proces
       try {
         const folders = await config.graph.getMailFolders(mailbox);
         const team = folders.find((folder) => folder.displayName.trim().toLowerCase() === teamFolderName);
-        if (!team) throw new Error(`CS folder "${teamFolderName}" was not found`);
-        processed += await syncFolder(config, mailbox, team.id, 'inbox');
+        if (team) processed += await syncFolder(config, mailbox, team.id, 'inbox');
+        else await recordOptionalFolderAbsent(mailbox);
       } catch (error) {
         const code = error instanceof Error ? error.message : 'Unknown sync error';
         await recordSyncFailure(mailbox, 'team', code).catch(() => undefined);

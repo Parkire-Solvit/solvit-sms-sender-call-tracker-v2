@@ -75,6 +75,14 @@ test('fetches only reply-linking headers and never the message body', async () =
   assert.doesNotMatch(calls[1], /body|attachments/i);
 });
 
+test('accepts messages with no Internet headers', async () => {
+  const http = async (_input: string | URL | Request) => new Response(JSON.stringify(
+    String(_input).includes('/token') ? { access_token: 'mock-token', expires_in: 3600 } : { id: 'automated-message' },
+  ), { status: 200 });
+  const client = new GraphClient(config, http as typeof fetch);
+  assert.deepEqual((await client.getMessageHeaders('mercy@example.com', 'automated-message')).internetMessageHeaders, []);
+});
+
 test('rejects duplicate or malformed mailbox configuration', () => {
   assert.throws(() => new GraphClient({ ...config, mailboxes: ['mercy@example.com', 'MERCY@example.com'] }), /allowlist/);
   assert.throws(() => new GraphClient({ ...config, mailboxes: ['not-an-email'] }), /allowlist/);

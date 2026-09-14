@@ -230,6 +230,14 @@ export async function recordSyncFailure(mailbox: string, folder: string, code: s
   );
 }
 
+export async function recordOptionalFolderAbsent(mailbox: string): Promise<void> {
+  await getPostgresPool().query(
+    `INSERT INTO email_sync_state (mailbox,folder,last_error_code,updated_at)
+     VALUES ($1,'team','OPTIONAL_FOLDER_NOT_PRESENT',now()) ON CONFLICT (mailbox,folder) DO UPDATE SET
+     last_error_code='OPTIONAL_FOLDER_NOT_PRESENT',updated_at=now()`, [mailbox],
+  );
+}
+
 export async function listEmailThreads(filter: string, ownerEmail?: string): Promise<SqlRow[]> {
   const conditions: string[] = [];
   const params: unknown[] = [];

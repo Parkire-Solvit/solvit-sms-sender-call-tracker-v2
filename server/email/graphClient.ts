@@ -129,9 +129,12 @@ export class GraphClient {
     const path = `${this.mailboxPath(mailbox)}/messages/${encodeURIComponent(messageId)}`;
     const url = `${graphOrigin}${path}?$select=id,internetMessageId,internetMessageHeaders`;
     const message = await this.getJson<GraphMessage>(url);
-    if (!message.id || !Array.isArray(message.internetMessageHeaders)) {
+    if (!message.id) {
       throw new Error('Invalid Graph message headers response');
     }
-    return message;
+    // Graph can omit this optional property when a message has no stored
+    // Internet headers (for example, some automated or sent messages).
+    return { ...message, internetMessageHeaders: Array.isArray(message.internetMessageHeaders)
+      ? message.internetMessageHeaders : [] };
   }
 }
