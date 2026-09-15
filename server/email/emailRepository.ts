@@ -129,8 +129,25 @@ export async function storeInbound(
   if (!internetId || !sender || Number.isNaN(receivedAt.getTime()) || receivedAt < monitoringStart) return null;
   const sla = startEmailSla(receivedAt, settings);
   return transaction(async (client) => {
-    const existing = await client.query<SqlRow>('SELECT email_thread_id FROM email_messages WHERE internet_message_id=$1', [internetId]);
-    if (existing.rows[0]) return null;
+    const existing = await client.query<SqlRow>(
+      `SELECT m.email_thread_id, member.email AS assigned_email
+       FROM email_messages m
+       JOIN email_threads thread ON thread.id=m.email_thread_id
+       LEFT JOIN email_team_members member ON member.id=thread.assigned_member_id
+       WHERE m.internet_message_id=$1
+       LIMIT 1`,
+      [internetId],
+    );
+    if (existing.rows[0]) {
+      const threadId = Number(existing.rows[0].email_thread_id);
+      // A message sent to the CS group can exist in every member's mailbox.
+      // Keep the Outlook deep link for the assigned member's own copy so they
+      // can open it without needing access to another person's mailbox.
+      if (message.webLink && address(existing.rows[0].assigned_email) === address(sourceMailbox)) {
+        await client.query('UPDATE email_threads SET outlook_web_link=$2 WHERE id=$1', [threadId, message.webLink]);
+      }
+      return null;
+    }
     const identity = emailIdentity(message);
     const referenced = [identity.inReplyTo, ...identity.references].filter((value): value is string => Boolean(value));
     if (referenced.length) {
