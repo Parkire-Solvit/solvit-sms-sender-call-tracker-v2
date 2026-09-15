@@ -49,12 +49,10 @@ export const DEFAULT_SETTINGS: SystemSettings = {
   reconnection_window_minutes: 1440,
   sms_followup_enabled: true,
   sms_deadline_minutes: 30,
+  sms_template: '',
   working_hours_schedule: DEFAULT_WORKING_HOURS,
   clock_mode: 'working_hours',
   min_connection_duration: 0,
-  daily_summary_enabled: false,
-  daily_summary_recipients: [],
-  daily_summary_last_sent_date: null,
 };
 
 export type ObligationType = 
