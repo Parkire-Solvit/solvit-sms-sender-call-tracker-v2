@@ -19,15 +19,10 @@ export interface SystemSettings {
   reconnection_window_minutes: number; // default 1440 (24h)
   sms_followup_enabled: boolean; // default true
   sms_deadline_minutes: number; // default 30
+  sms_template: string;
   working_hours_schedule: WorkingHoursSchedule;
   clock_mode: 'working_hours' | 'continuous_24_7'; // default working_hours
   min_connection_duration: number; // in seconds, default 0
-  daily_summary_enabled: boolean; // default false
-  daily_summary_recipients: string[]; // default []
-  daily_summary_last_sent_date: string | null; // internal, YYYY-MM-DD, not user-editable
-  gmail_user?: string | null;
-  gmail_app_password?: string | null;
-  gmail_app_password_configured?: boolean;
 }
 
 export interface SettingsChangeLog {
