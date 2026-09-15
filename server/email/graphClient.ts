@@ -1,5 +1,6 @@
 // Microsoft Graph transport only. No mailbox may be accessed unless it is
-// explicitly listed in configuration. This module never fetches mail bodies.
+// explicitly listed in configuration. Only Graph's short bodyPreview is used
+// transiently for approved CS-name routing; complete bodies are never fetched.
 export interface GraphMessage {
   id: string;
   conversationId?: string;
@@ -8,6 +9,8 @@ export interface GraphMessage {
   from?: { emailAddress?: { address?: string } };
   toRecipients?: Array<{ emailAddress?: { address?: string } }>;
   ccRecipients?: Array<{ emailAddress?: { address?: string } }>;
+  bodyPreview?: string;
+  webLink?: string;
   receivedDateTime?: string;
   sentDateTime?: string;
   internetMessageHeaders?: Array<{ name: string; value: string }>;
@@ -104,7 +107,7 @@ export class GraphClient {
     if (!folder || folder.includes('/')) throw new Error('Invalid Graph folder ID');
     const path = `${this.mailboxPath(mailbox)}/mailFolders/${encodeURIComponent(folder)}/messages/delta`;
     const initialUrl = `${graphOrigin}${path}` +
-      '?$select=id,conversationId,internetMessageId,subject,from,toRecipients,ccRecipients,receivedDateTime,sentDateTime';
+      '?$select=id,conversationId,internetMessageId,subject,from,toRecipients,ccRecipients,bodyPreview,webLink,receivedDateTime,sentDateTime';
     const url = deltaLink || initialUrl;
     const parsed = new URL(url);
     // Graph may rewrite a continuation from /mailFolders/{id} to

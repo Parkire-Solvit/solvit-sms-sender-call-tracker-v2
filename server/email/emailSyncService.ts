@@ -81,7 +81,9 @@ async function syncFolder(config: EmailRuntimeConfig, mailbox: string, folder: s
       const eventAt = new Date((direction === 'inbox' ? item.receivedDateTime : item.sentDateTime) || '');
       if (Number.isNaN(eventAt.getTime()) || eventAt < config.monitoringStart) continue;
       if (direction === 'inbox') {
-        if (!isAddressedToGroup(item, config.groupAddress)) continue;
+        const addressedDirectlyToMailbox = (item.toRecipients || []).some((recipient) =>
+          recipient.emailAddress?.address?.trim().toLowerCase() === mailbox);
+        if (!isAddressedToGroup(item, config.groupAddress) && !addressedDirectlyToMailbox) continue;
         const sender = item.from?.emailAddress?.address?.trim().toLowerCase();
         if (sender && config.mailboxes.includes(sender)) continue;
         // Headers identify customer follow-ups. Only request them for messages

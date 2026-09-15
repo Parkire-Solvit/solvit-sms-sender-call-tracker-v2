@@ -1,5 +1,5 @@
 export type EmailThreadStatus = 'UNASSIGNED' | 'AWAITING_RESPONSE' | 'IN_PROGRESS' | 'RESOLVED';
-export type EmailAssignmentMethod = 'DIRECT' | 'RULE' | 'ROUND_ROBIN' | 'MANUAL';
+export type EmailAssignmentMethod = 'DIRECT' | 'NAME_MATCH' | 'RULE' | 'DEFAULT' | 'ROUND_ROBIN' | 'MANUAL';
 export type EmailAlertType =
   | 'EMAIL_UNASSIGNED'
   | 'RESPONSE_WARNING'

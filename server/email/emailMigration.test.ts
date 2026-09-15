@@ -53,6 +53,8 @@ test('numeric migration sequence survives the two legacy 004 files and repairs S
     assert.equal(applied013.rows.length, 1);
     const applied014 = await db.query<{ version: number }>('SELECT version FROM schema_migrations WHERE version=14');
     assert.equal(applied014.rows.length, 1);
+    const applied015 = await db.query<{ version: number }>('SELECT version FROM schema_migrations WHERE version=15');
+    assert.equal(applied015.rows.length, 1);
     const resolutionColumns = await db.query<{ column_name: string }>(
       "SELECT column_name FROM information_schema.columns WHERE table_name='email_threads' AND column_name IN ('resolved_by','resolution_note') ORDER BY column_name",
     );
@@ -67,6 +69,10 @@ test('numeric migration sequence survives the two legacy 004 files and repairs S
       "SELECT tablename FROM pg_tables WHERE schemaname='public' AND tablename='email_assignment_notifications'",
     );
     assert.equal(notificationTable.rows.length, 1);
+    const routingColumns = await db.query<{ column_name: string }>(
+      "SELECT column_name FROM information_schema.columns WHERE table_name='email_threads' AND column_name IN ('assignment_reason','outlook_web_link') ORDER BY column_name",
+    );
+    assert.deepEqual(routingColumns.rows.map((row) => row.column_name), ['assignment_reason', 'outlook_web_link']);
   } finally { await db.close(); }
 });
 

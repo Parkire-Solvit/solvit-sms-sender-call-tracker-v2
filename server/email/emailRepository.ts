@@ -2,7 +2,7 @@ import type pg from 'pg';
 import { getPostgresPool } from '../../db';
 import type { GraphMessage } from './graphClient';
 import { emailIdentity, isAddressedToGroup, replyMatchesKnownMessage } from './messageIdentity';
-import { chooseEmailOwner } from './emailAssignmentService';
+import { chooseEmailOwner, findNamedOwner } from './emailAssignmentService';
 import { dueEmailAlerts, recordFirstResponse, startEmailSla, validateEmailSlaSettings } from './emailSlaService';
 import type { EmailAlertType, EmailSlaSettings, EmailSlaState } from './emailTypes';
 import { emailWorkingMinutesBetween, isEmailWorkingTime } from '../../shared/emailBusinessHours';
@@ -33,6 +33,10 @@ function address(value: string | undefined): string {
 function recipients(message: GraphMessage): string[] {
   return [...(message.toRecipients || []), ...(message.ccRecipients || [])]
     .map((item) => address(item.emailAddress?.address)).filter(Boolean);
+}
+
+function toRecipients(message: GraphMessage): string[] {
+  return (message.toRecipients || []).map((item) => address(item.emailAddress?.address)).filter(Boolean);
 }
 
 export async function getEmailSettings(): Promise<EmailSlaSettings> {
@@ -76,26 +80,30 @@ export async function ensureEmailTeam(mailboxes: readonly string[]): Promise<voi
   });
 }
 
-async function assignOwner(client: Client, groupAddress: string, message: GraphMessage): Promise<{ memberId: number | null; method: string | null }> {
+async function assignOwner(client: Client, groupAddress: string, message: GraphMessage): Promise<{ memberId: number | null; method: string | null; reason: string | null }> {
   await client.query('INSERT INTO email_assignment_cursor (mailbox) VALUES ($1) ON CONFLICT DO NOTHING', [groupAddress]);
   const cursor = await client.query<SqlRow>('SELECT last_member_id FROM email_assignment_cursor WHERE mailbox=$1 FOR UPDATE', [groupAddress]);
   const members = await client.query<SqlRow>(
-    `SELECT id, email, is_available, round_robin_enabled, is_monitored FROM email_team_members ORDER BY id`,
+    `SELECT id, email, is_available, round_robin_enabled, is_monitored, routing_names FROM email_team_members ORDER BY id`,
   );
   const rules = await client.query<SqlRow>(
     `SELECT priority, match_field, match_value, assigned_member_id, enabled FROM email_assignment_rules ORDER BY priority,id`,
   );
-  const directRecipients = recipients(message).filter((email) =>
+  const directRecipients = toRecipients(message).filter((email) =>
     email !== groupAddress && members.rows.some((member) => member.email === email));
+  const normalizedMembers = members.rows.map((row) => ({
+    memberId: Number(row.id), email: row.email, available: row.is_available,
+    roundRobinEnabled: row.round_robin_enabled, monitored: row.is_monitored,
+    routingNames: Array.isArray(row.routing_names) ? row.routing_names : [],
+  }));
   const decision = chooseEmailOwner({
     senderEmail: address(message.from?.emailAddress?.address),
     recipientEmails: recipients(message),
     directOwnerEmail: directRecipients.length === 1 ? directRecipients[0] : null,
+    namedOwnerEmail: directRecipients.length ? null : findNamedOwner(message.bodyPreview, normalizedMembers),
+    defaultOwnerEmail: (process.env.MICROSOFT_CS_DEFAULT_OWNER || 'cmbugua@solvit.co.ke').trim().toLowerCase(),
     previousRoundRobinMemberId: cursor.rows[0]?.last_member_id,
-  }, members.rows.map((row) => ({
-    memberId: Number(row.id), email: row.email, available: row.is_available,
-    roundRobinEnabled: row.round_robin_enabled, monitored: row.is_monitored,
-  })), rules.rows.map((row) => ({
+  }, normalizedMembers, rules.rows.map((row) => ({
     priority: row.priority, field: row.match_field, value: row.match_value,
     memberId: Number(row.assigned_member_id), enabled: row.enabled,
   })));
@@ -113,7 +121,8 @@ export async function storeInbound(
   settings: EmailSlaSettings,
   monitoringStart: Date,
 ): Promise<number | null> {
-  if (message['@removed'] || !isAddressedToGroup(message, groupAddress)) return null;
+  const addressedToSourceMailbox = toRecipients(message).includes(sourceMailbox.trim().toLowerCase());
+  if (message['@removed'] || (!isAddressedToGroup(message, groupAddress) && !addressedToSourceMailbox)) return null;
   const internetId = emailIdentity(message).internetMessageId;
   const receivedAt = new Date(message.receivedDateTime || '');
   const sender = address(message.from?.emailAddress?.address);
@@ -144,11 +153,12 @@ export async function storeInbound(
     const assignment = await assignOwner(client, groupAddress, message);
     const thread = await client.query<SqlRow>(
       `INSERT INTO email_threads (mailbox,graph_conversation_id,root_internet_message_id,subject,customer_email,
-       assigned_member_id,assignment_method,received_at,response_due_at,resolution_due_at,status,sla_settings_snapshot)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb)
+       assigned_member_id,assignment_method,assignment_reason,outlook_web_link,received_at,response_due_at,resolution_due_at,status,sla_settings_snapshot)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14::jsonb)
        ON CONFLICT (root_internet_message_id) DO NOTHING RETURNING id`,
       [groupAddress, message.conversationId || null, internetId, message.subject || '', sender,
-        assignment.memberId, assignment.method, sla.receivedAt, sla.responseDueAt, sla.resolutionDueAt,
+        assignment.memberId, assignment.method, assignment.reason, message.webLink || null,
+        sla.receivedAt, sla.responseDueAt, sla.resolutionDueAt,
         assignment.memberId ? 'AWAITING_RESPONSE' : 'UNASSIGNED', JSON.stringify(settings)],
     );
     const threadId = Number(thread.rows[0]?.id || (await client.query<SqlRow>(
@@ -270,7 +280,7 @@ export async function listEmailThreads(filter: string, ownerEmail?: string, rece
   return (await getPostgresPool().query<SqlRow>(
     `SELECT t.id,t.subject,t.customer_email,t.received_at,t.first_response_at,t.resolved_at,
       t.response_due_at,t.resolution_due_at,t.status,t.response_breached,t.resolution_breached,
-      t.assignment_method,t.sla_settings_snapshot,t.resolved_by,t.resolution_note,
+      t.assignment_method,t.assignment_reason,t.outlook_web_link,t.sla_settings_snapshot,t.resolved_by,t.resolution_note,
       m.email AS owner_email,m.display_name AS owner_name
      FROM email_threads t LEFT JOIN email_team_members m ON m.id=t.assigned_member_id
      ${conditions.length ? `WHERE ${conditions.join(' AND ')}` : ''}
@@ -290,6 +300,7 @@ export async function assignEmailThread(threadId: number, memberId: number): Pro
     if (!row) return false;
     await client.query(
       `UPDATE email_threads SET assigned_member_id=$2,assignment_method='MANUAL',
+       assignment_reason='Manually assigned by administrator',
        status=CASE WHEN status='UNASSIGNED' THEN 'AWAITING_RESPONSE' ELSE status END,
        updated_at=now() WHERE id=$1`, [threadId, memberId],
     );
@@ -382,7 +393,7 @@ export async function acknowledgeEmailAlert(alertId: number, ownerEmail?: string
 
 export async function listEmailTeam(): Promise<SqlRow[]> {
   return (await getPostgresPool().query<SqlRow>(
-    `SELECT id,email,display_name,is_available,round_robin_enabled,is_monitored
+    `SELECT id,email,display_name,is_available,round_robin_enabled,is_monitored,routing_names
      FROM email_team_members ORDER BY display_name`,
   )).rows;
 }

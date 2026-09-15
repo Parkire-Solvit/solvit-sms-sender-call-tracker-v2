@@ -9,6 +9,7 @@ type Thread = {
   response_breached: boolean; resolution_breached: boolean;
   owner_email: string | null; owner_name: string | null;
   assignment_method: string | null;
+  assignment_reason: string | null; outlook_web_link: string | null;
   resolved_by: string | null; resolution_note: string | null;
   sla_settings_snapshot: Settings | null;
 };
@@ -193,12 +194,12 @@ export function EmailSlaSection({ employeeEmail }: { employeeEmail?: string }) {
         <div className="overflow-x-auto"><table className="w-full text-sm"><thead><tr className="text-left text-slate-500 border-b"><th className="py-2">Received</th><th>Customer / subject</th><th>Owner</th><th>Response</th><th>Resolution</th><th>Status</th><th>Actions</th></tr></thead><tbody>
           {threads.map((thread) => <tr key={thread.id} className="border-b align-top">
             <td className="py-3 whitespace-nowrap">{new Date(thread.received_at).toLocaleString('en-KE', { timeZone: 'Africa/Nairobi' })}</td>
-            <td className="max-w-xs"><p className="font-medium truncate">{thread.subject || '(no subject)'}</p><p className="text-xs text-slate-500 truncate">{thread.customer_email}</p></td>
+            <td className="max-w-xs"><p className="font-medium truncate">{thread.subject || '(no subject)'}</p><p className="text-xs text-slate-500 truncate">{thread.customer_email}</p>{thread.assignment_reason && <p className="text-xs text-slate-400 truncate" title={thread.assignment_reason}>{thread.assignment_reason}</p>}</td>
             <td>{thread.owner_name || 'Unassigned'}</td>
             <td className={thread.response_breached || (!thread.first_response_at && new Date(thread.response_due_at).getTime() <= now) ? 'text-red-700 font-semibold' : ''}>{emailDeadlineLabel(thread.response_due_at, Boolean(thread.first_response_at), now, thread.sla_settings_snapshot)}</td>
             <td className={thread.resolution_breached || (!thread.resolved_at && new Date(thread.resolution_due_at).getTime() <= now) ? 'text-red-700 font-semibold' : ''}>{emailDeadlineLabel(thread.resolution_due_at, Boolean(thread.resolved_at), now, thread.sla_settings_snapshot)}</td>
             <td>{thread.status.replaceAll('_', ' ')}{thread.resolved_at && <p className="mt-1 text-xs text-slate-500">By {thread.resolved_by || 'unrecorded'} · {new Date(thread.resolved_at).toLocaleString('en-KE', { timeZone: 'Africa/Nairobi' })}</p>}{thread.resolution_note && <p className="text-xs text-slate-500">{thread.resolution_note}</p>}</td>
-            <td className="min-w-44">{!isEmployee && thread.status !== 'RESOLVED' && <select aria-label={`Assign thread ${thread.id}`} value="" disabled={busy} onChange={(event) => void action(`/api/email/threads/${thread.id}/assign`, { memberId: Number(event.target.value) })} className="border rounded px-1 py-1 text-xs"><option value="">Assign / reassign</option>{members.filter((member) => member.is_monitored).map((member) => <option key={member.id} value={member.id}>{member.display_name}</option>)}</select>}
+            <td className="min-w-44">{thread.outlook_web_link && <a href={thread.outlook_web_link} target="_blank" rel="noopener noreferrer" className="mr-2 text-xs font-semibold text-blue-700 whitespace-nowrap">Open in Outlook</a>}{!isEmployee && thread.status !== 'RESOLVED' && <select aria-label={`Assign thread ${thread.id}`} value="" disabled={busy} onChange={(event) => void action(`/api/email/threads/${thread.id}/assign`, { memberId: Number(event.target.value) })} className="border rounded px-1 py-1 text-xs"><option value="">Assign / reassign</option>{members.filter((member) => member.is_monitored).map((member) => <option key={member.id} value={member.id}>{member.display_name}</option>)}</select>}
               {thread.status !== 'RESOLVED' && (!isEmployee || thread.status === 'IN_PROGRESS') && <button disabled={busy} onClick={() => { setError(''); setResolveTarget(thread); setResolutionNote(''); }} className="ml-1 text-xs text-emerald-700 whitespace-nowrap">Mark resolved</button>}</td>
           </tr>)}
           {!threads.length && <tr><td colSpan={7} className="text-center py-8 text-slate-500">No email conversations match this filter.</td></tr>}
