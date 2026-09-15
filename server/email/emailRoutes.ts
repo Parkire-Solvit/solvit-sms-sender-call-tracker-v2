@@ -19,6 +19,13 @@ function positiveId(value: string): number | null {
   return Number.isSafeInteger(number) && number > 0 ? number : null;
 }
 
+function validCalendarDate(value: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const [year, month, day] = value.split('-').map(Number);
+  const parsed = new Date(Date.UTC(year, month - 1, day));
+  return parsed.getUTCFullYear() === year && parsed.getUTCMonth() === month - 1 && parsed.getUTCDate() === day;
+}
+
 export function createEmailRouter(config: EmailRuntimeConfig | null): Router {
   const router = Router();
   router.use(safe(async (request, response, next) => {
@@ -47,7 +54,11 @@ export function createEmailRouter(config: EmailRuntimeConfig | null): Router {
     if (owner && (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(owner) || !config!.mailboxes.includes(owner.toLowerCase()))) {
       return response.status(400).json({ error: 'Invalid owner' });
     }
-    response.json(await listEmailThreads(filter, owner || undefined));
+    const receivedDate = typeof request.query.date === 'string' ? request.query.date.trim() : '';
+    if (receivedDate && !validCalendarDate(receivedDate)) {
+      return response.status(400).json({ error: 'Invalid received date' });
+    }
+    response.json(await listEmailThreads(filter, owner || undefined, receivedDate || undefined));
   }));
   router.get('/alerts', safe(async (_request, response) => response.json(await listEmailAlerts(response.locals.emailOwner || undefined))));
   router.get('/assignment-notifications', safe(async (_request, response) => {

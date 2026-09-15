@@ -57,6 +57,7 @@ export function EmailSlaSection({ employeeEmail }: { employeeEmail?: string }) {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [filter, setFilter] = useState(isEmployee ? 'awaiting' : 'all');
   const [owner, setOwner] = useState('');
+  const [receivedDate, setReceivedDate] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
@@ -69,7 +70,11 @@ export function EmailSlaSection({ employeeEmail }: { employeeEmail?: string }) {
       const status = await api<{ enabled: boolean }>('/api/email/status');
       setEnabled(status.enabled);
       if (!status.enabled) return;
-      const query = new URLSearchParams({ filter, ...(owner ? { owner } : {}) });
+      const query = new URLSearchParams({
+        filter,
+        ...(owner ? { owner } : {}),
+        ...(receivedDate ? { date: receivedDate } : {}),
+      });
       const [nextThreads, nextMembers, nextAlerts, nextSummary, nextSettings, nextNotices] = await Promise.all([
         api<Thread[]>(`/api/email/threads?${query}`), isEmployee ? Promise.resolve([] as TeamMember[]) : api<TeamMember[]>('/api/email/team'),
         api<Alert[]>('/api/email/alerts'), api<Summary>('/api/email/summary'), api<Settings>('/api/email/settings'),
@@ -79,7 +84,7 @@ export function EmailSlaSection({ employeeEmail }: { employeeEmail?: string }) {
       setSummary(nextSummary); setSettings(nextSettings); setAssignmentNotices(nextNotices);
       setError('');
     } catch (cause) { setError((cause as Error).message); }
-  }, [filter, owner, isEmployee]);
+  }, [filter, owner, receivedDate, isEmployee]);
 
   useEffect(() => {
     void refresh();
@@ -180,9 +185,10 @@ export function EmailSlaSection({ employeeEmail }: { employeeEmail?: string }) {
             <label className="flex items-center gap-1"><input type="checkbox" checked={member.round_robin_enabled} disabled={busy} onChange={(event) => void updateMember(member, 'roundRobinEnabled', event.target.checked)} />Rotation</label></span>
         </div>)}</div>
       </section>}
-      <section className="p-4 rounded-xl border bg-white"><div className="flex flex-wrap items-center justify-between gap-3 mb-4"><h3 className="font-semibold">CS emails</h3><div className="flex gap-2">
+      <section className="p-4 rounded-xl border bg-white"><div className="flex flex-wrap items-center justify-between gap-3 mb-4"><h3 className="font-semibold">CS emails</h3><div className="flex flex-wrap gap-2">
         <select aria-label="Email status filter" value={filter} onChange={(event) => setFilter(event.target.value)} className="border rounded-lg px-2 py-1.5 text-sm">{filters.filter(([value]) => !isEmployee || value !== 'unassigned').map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select>
         {!isEmployee && <select aria-label="Email owner filter" value={owner} onChange={(event) => setOwner(event.target.value)} className="border rounded-lg px-2 py-1.5 text-sm"><option value="">All owners</option>{members.map((member) => <option key={member.id} value={member.email}>{member.display_name}</option>)}</select>}
+        <input aria-label="Email received date filter" title="Filter by received date" type="date" value={receivedDate} onChange={(event) => setReceivedDate(event.target.value)} className="border rounded-lg px-2 py-1.5 text-sm" />
       </div></div>
         <div className="overflow-x-auto"><table className="w-full text-sm"><thead><tr className="text-left text-slate-500 border-b"><th className="py-2">Received</th><th>Customer / subject</th><th>Owner</th><th>Response</th><th>Resolution</th><th>Status</th><th>Actions</th></tr></thead><tbody>
           {threads.map((thread) => <tr key={thread.id} className="border-b align-top">
