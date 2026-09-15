@@ -107,7 +107,7 @@ export const AgentPerformanceNarrative: React.FC<AgentPerformanceNarrativeProps>
                   <span
                     className={`inline-flex items-center px-2.5 py-0.5 rounded-md font-mono font-bold text-xs border ${theme.badge}`}
                   >
-                    {hasPct ? `${agent.combined_compliance_pct!.toFixed(1)}% Compliance` : 'No Activity'}
+                    {(agent.carried_over_count || 0) === 0 ? 'All Completed' : `${agent.carried_over_count} Carried Over`}
                   </span>
                 </div>
                 <p className="text-sm text-slate-700 leading-relaxed font-normal">

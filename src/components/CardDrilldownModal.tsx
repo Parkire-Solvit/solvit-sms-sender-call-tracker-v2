@@ -11,13 +11,9 @@ import {
   Search, 
   Filter, 
   User, 
-  Phone, 
-  ArrowRight,
-  ExternalLink,
-  ShieldCheck,
-  Calendar,
-  Layers,
-  FileSpreadsheet
+  ExternalLink, 
+  Layers, 
+  FileSpreadsheet 
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { 
@@ -25,8 +21,7 @@ import {
   AgentComplianceSummary, 
   TurnaroundTimeReport, 
   SystemSettings, 
-  HeadlineComplianceStats,
-  TagGroupCompliance 
+  HeadlineComplianceStats 
 } from '../types/compliance';
 
 export type DrilldownCardType = 'MISSED_INCOMING_CALLBACK' | 'OUTGOING_RECONNECTION' | 'SMS_FOLLOWUP';
@@ -49,12 +44,10 @@ interface CardDrilldownModalProps {
   agents: AgentComplianceSummary[];
   turnaroundReport?: TurnaroundTimeReport;
   settings?: SystemSettings;
-  allObligations?: Obligation[];
-  allEvents?: any[];
-  startDate: string;
-  endDate: string;
+  allObligations: Obligation[];
+  rawEvents?: any[];
   onInspectContact: (phone: string) => void;
-  onSelectAgent?: (agentId: number) => void;
+  onInspectAgent: (agentId: number) => void;
 }
 
 export const CardDrilldownModal: React.FC<CardDrilldownModalProps> = ({
@@ -63,21 +56,21 @@ export const CardDrilldownModal: React.FC<CardDrilldownModalProps> = ({
   cardType,
   headlineStats,
   summary,
-  agents = [],
+  agents,
   turnaroundReport,
   settings,
-  allObligations = [],
-  allEvents = [],
-  startDate,
-  endDate,
+  allObligations,
+  rawEvents = [],
   onInspectContact,
-  onSelectAgent,
+  onInspectAgent,
 }) => {
   const [activeTab, setActiveTab] = useState<'agents' | 'obligations' | 'events'>('agents');
-  const [agentSearch, setAgentSearch] = useState<string>('');
   const [selectedTagFilter, setSelectedTagFilter] = useState<string>('ALL');
   const [obligationStatusFilter, setObligationStatusFilter] = useState<string>('ALL');
+  const [agentSearch, setAgentSearch] = useState<string>('');
   const [recordSearch, setRecordSearch] = useState<string>('');
+
+  if (!isOpen || !cardType) return null;
 
   const formatMinutes = (minutes: number | null | undefined) => {
     if (minutes === null || minutes === undefined || isNaN(minutes)) return 'N/A';
@@ -90,85 +83,33 @@ export const CardDrilldownModal: React.FC<CardDrilldownModalProps> = ({
     return `${Math.round(minutes)}m`;
   };
 
-  const getComplianceBadge = (pct: number | null | undefined, countTotal: number) => {
-    if (countTotal === 0 || pct === null || pct === undefined) {
-      return (
-        <span className="inline-flex items-center px-2 py-0.5 rounded-md text-xs font-medium bg-slate-100 text-slate-600 border border-slate-200">
-          No obligations
-        </span>
-      );
-    }
-    let color = 'bg-emerald-50 text-emerald-700 border-emerald-200';
-    if (pct < 75) color = 'bg-rose-50 text-rose-700 border-rose-200';
-    else if (pct < 90) color = 'bg-amber-50 text-amber-700 border-amber-200';
-
-    return (
-      <span className={`inline-flex items-center px-2 py-0.5 rounded-md font-mono font-bold text-xs border ${color}`}>
-        {pct.toFixed(1)}%
-      </span>
-    );
-  };
-
   // Card Meta Configurations
-  const meta = cardType ? {
+  const meta = {
     MISSED_INCOMING_CALLBACK: {
-      title: 'Incoming Calls & Callback Compliance Drilldown',
+      title: 'Incoming Calls Drilldown',
       subtitle: 'Raw agent activity and individual obligation audit for missed incoming calls',
       icon: PhoneIncoming,
       iconColor: 'text-indigo-600 bg-indigo-50 border-indigo-200',
-      slaMinutes: settings?.callback_window_minutes ?? 30,
-      slaLabel: `${settings?.callback_window_minutes ?? 30} Minutes SLA`,
-      compliancePct: headlineStats?.incoming_callback_compliance_pct,
-      metCount: headlineStats?.incoming_callback_met || 0,
-      totalCount: headlineStats?.incoming_callback_total || 0,
-      openCount: headlineStats?.open_incoming_count || 0,
+      slaLabel: `${settings?.callback_window_minutes || 30}m SLA`,
       tatMetric: turnaroundReport?.company_wide?.overall_callback_turnaround || turnaroundReport?.company_wide?.missed_to_connection,
-      vol1Label: 'Total Received',
-      vol1Val: summary.total_calls_incoming || 0,
-      vol2Label: 'Answered (Connected)',
-      vol2Val: summary.total_calls_incoming_connected || 0,
-      vol3Label: 'Missed Calls (Triggers)',
-      vol3Val: summary.total_calls_missed || 0,
     },
     OUTGOING_RECONNECTION: {
-      title: 'Outgoing Calls & Reconnection Drilldown',
-      subtitle: 'Raw agent dialling activity and reconnection obligation audit for unconnected calls',
+      title: 'Outgoing Calls Drilldown',
+      subtitle: 'Raw agent dialling activity and reconnection turnaround for unconnected calls',
       icon: PhoneCall,
       iconColor: 'text-blue-600 bg-blue-50 border-blue-200',
-      slaMinutes: settings?.reconnection_window_minutes ?? 1440,
-      slaLabel: `${(settings?.reconnection_window_minutes ?? 1440) >= 60 ? `${Math.round((settings?.reconnection_window_minutes ?? 1440) / 60)} Hours` : `${settings?.reconnection_window_minutes} Minutes`} SLA`,
-      compliancePct: headlineStats?.outgoing_reconnect_compliance_pct,
-      metCount: headlineStats?.outgoing_reconnect_met || 0,
-      totalCount: headlineStats?.outgoing_reconnect_total || 0,
-      openCount: headlineStats?.open_outgoing_count || 0,
+      slaLabel: null,
       tatMetric: turnaroundReport?.company_wide?.failed_outgoing_to_connection || turnaroundReport?.company_wide?.overall_connection_turnaround,
-      vol1Label: 'Total Dialled',
-      vol1Val: summary.total_calls_made || 0,
-      vol2Label: 'Connected Out',
-      vol2Val: summary.total_calls_outgoing_connected || 0,
-      vol3Label: 'Unconnected / Missed',
-      vol3Val: summary.total_calls_not_picked || 0,
     },
     SMS_FOLLOWUP: {
-      title: 'SMS Follow-Up Compliance & Dispatch Drilldown',
+      title: 'SMS Follow-Up Drilldown',
       subtitle: 'Audit of outgoing missed calls vs total follow-up SMS messages dispatched per agent',
       icon: MessageSquare,
       iconColor: 'text-purple-600 bg-purple-50 border-purple-200',
-      slaMinutes: settings?.sms_deadline_minutes ?? 30,
-      slaLabel: `${settings?.sms_deadline_minutes ?? 30} Minutes SLA`,
-      compliancePct: headlineStats?.sms_followup_compliance_pct,
-      metCount: headlineStats?.sms_followup_met || 0,
-      totalCount: headlineStats?.sms_followup_total || 0,
-      openCount: headlineStats?.open_sms_count || 0,
+      slaLabel: 'Within the Day',
       tatMetric: turnaroundReport?.company_wide?.failed_outgoing_to_sms,
-      vol1Label: 'Outgoing Missed Calls (Triggers)',
-      vol1Val: summary.total_calls_not_picked || 0,
-      vol2Label: 'Total SMS Sent',
-      vol2Val: summary.total_sms || (headlineStats?.sms_followup_met || 0),
-      vol3Label: 'Open Follow-ups',
-      vol3Val: headlineStats?.open_sms_count || 0,
     }
-  }[cardType] : null;
+  }[cardType];
 
   // Available unique tags for filtering
   const allTags = Array.from(new Set(agents.map(a => a.tag).filter(Boolean)));
@@ -198,38 +139,41 @@ export const CardDrilldownModal: React.FC<CardDrilldownModalProps> = ({
     return relevantObligations.filter(obl => {
       if (obligationStatusFilter !== 'ALL' && obl.status !== obligationStatusFilter) return false;
       if (recordSearch.trim()) {
-        const q = recordSearch.toLowerCase();
-        const matchesPhone = obl.target_phone.toLowerCase().includes(q);
-        const matchesAgent = obl.originating_agent_name.toLowerCase().includes(q) || (obl.resolving_agent_name || '').toLowerCase().includes(q);
-        if (!matchesPhone && !matchesAgent) return false;
+        const query = recordSearch.toLowerCase();
+        const matchesPhone = obl.target_phone.toLowerCase().includes(query);
+        const matchesAgent = obl.originating_agent_name.toLowerCase().includes(query);
+        const matchesResolver = (obl.resolving_agent_name || '').toLowerCase().includes(query);
+        const matchesId = obl.id.toLowerCase().includes(query);
+        if (!matchesPhone && !matchesAgent && !matchesResolver && !matchesId) return false;
       }
       return true;
     });
   }, [relevantObligations, obligationStatusFilter, recordSearch]);
 
   // Filtered Raw Events
-  const relevantEvents = useMemo(() => {
-    if (!cardType) return [];
-    if (cardType === 'MISSED_INCOMING_CALLBACK') {
-      return allEvents.filter(e => e.type === 'CALL' && (e.status === 'MISSED' || e.status === 'INCOMING' || e.status === 'INCOMING_NOT_PICKED'));
-    }
-    if (cardType === 'OUTGOING_RECONNECTION') {
-      return allEvents.filter(e => e.type === 'CALL' && (e.status === 'OUTGOING' || e.status === 'CONNECTED' || e.status === 'FAILED' || e.status === 'BUSY' || e.status === 'NO_ANSWER' || e.status === 'NOT_PICKED'));
-    }
-    return allEvents.filter(e => e.type === 'SMS' || (e.type === 'CALL' && (e.status === 'FAILED' || e.status === 'BUSY' || e.status === 'NO_ANSWER' || e.status === 'NOT_PICKED')));
-  }, [allEvents, cardType]);
-
   const filteredEvents = useMemo(() => {
-    if (!recordSearch.trim()) return relevantEvents;
-    const q = recordSearch.toLowerCase();
-    return relevantEvents.filter(e => 
-      (e.target_phone || '').toLowerCase().includes(q) ||
-      (e.agent_name || '').toLowerCase().includes(q) ||
-      (e.status || '').toLowerCase().includes(q)
-    );
-  }, [relevantEvents, recordSearch]);
+    return rawEvents.filter(ev => {
+      if (cardType === 'MISSED_INCOMING_CALLBACK') {
+        if (ev.type !== 'CALL') return false;
+        if (ev.status !== 'MISSED' && ev.status !== 'INCOMING_NOT_PICKED' && ev.direction !== 'INCOMING') return false;
+      } else if (cardType === 'OUTGOING_RECONNECTION') {
+        if (ev.type !== 'CALL' || ev.direction !== 'OUTGOING') return false;
+      } else if (cardType === 'SMS_FOLLOWUP') {
+        if (ev.type !== 'SMS' && !(ev.type === 'CALL' && (ev.status === 'MISSED' || ev.status === 'NO_ANSWER' || ev.status === 'FAILED'))) {
+          return false;
+        }
+      }
+      if (recordSearch.trim()) {
+        const query = recordSearch.toLowerCase();
+        const matchesPhone = (ev.target_phone || '').toLowerCase().includes(query);
+        const matchesAgent = (ev.agent_name || '').toLowerCase().includes(query);
+        if (!matchesPhone && !matchesAgent) return false;
+      }
+      return true;
+    });
+  }, [rawEvents, cardType, recordSearch]);
 
-  // Export current drilldown view to Excel
+  // Export Drilldown Data to Excel
   const handleExportDrilldown = () => {
     const wb = XLSX.utils.book_new();
 
@@ -243,10 +187,10 @@ export const CardDrilldownModal: React.FC<CardDrilldownModalProps> = ({
           'Phone': a.phone_number || '',
           'Calls Received': a.calls_incoming,
           'Calls Answered': a.calls_incoming_connected,
-          'Missed Calls': a.calls_missed,
-          'Callback Met in SLA': a.incoming_callback_met,
-          'Total Evaluated': a.incoming_callback_total,
-          'Callback Compliance %': a.incoming_callback_compliance_pct !== null ? `${a.incoming_callback_compliance_pct}%` : 'N/A',
+          'Returned Within SLA': a.incoming_returned_within_sla_count ?? a.incoming_callback_met,
+          'Returned Outside SLA': a.incoming_returned_outside_sla_count ?? 0,
+          'Not Returned': a.incoming_not_returned_count ?? (a.carried_over_incoming_count || 0),
+          'Open Obligations': a.open_obligations_count,
           'Avg Callback TAT (min)': agentTat?.overall_callback_turnaround?.mean ?? 'N/A',
           'Median TAT (min)': agentTat?.overall_callback_turnaround?.median ?? 'N/A',
         };
@@ -258,10 +202,7 @@ export const CardDrilldownModal: React.FC<CardDrilldownModalProps> = ({
           'Phone': a.phone_number || '',
           'Calls Dialled': a.calls_made,
           'Connected Out': a.calls_outgoing_connected,
-          'Unconnected / Missed': a.calls_not_picked,
-          'Reconnected in SLA': a.outgoing_reconnect_met,
-          'Total Evaluated': a.outgoing_reconnect_total,
-          'Reconnection Compliance %': a.outgoing_reconnect_compliance_pct !== null ? `${a.outgoing_reconnect_compliance_pct}%` : 'N/A',
+          'Not Connected': Math.max(0, a.calls_made - a.calls_outgoing_connected),
           'Avg Reconnect TAT (min)': agentTat?.failed_outgoing_to_connection?.mean ?? 'N/A',
           'Median TAT (min)': agentTat?.failed_outgoing_to_connection?.median ?? 'N/A',
         };
@@ -270,11 +211,11 @@ export const CardDrilldownModal: React.FC<CardDrilldownModalProps> = ({
         'Agent Name': a.agent_name,
         'Department Tag': a.tag,
         'Phone': a.phone_number || '',
-        'Outgoing Missed Calls': a.calls_not_picked,
+        'Eligible Missed Calls': a.calls_not_picked,
         'Total SMS Sent': a.sms_count,
-        'SMS Met in SLA': a.sms_followup_met,
-        'Total Evaluated': a.sms_followup_total,
-        'SMS Compliance %': a.sms_followup_compliance_pct !== null ? `${a.sms_followup_compliance_pct}%` : 'N/A',
+        'Returned within period': a.sms_followup_met,
+        'Carried over to next period': a.carried_over_sms_count || 0,
+        'Open Obligations': a.open_obligations_count,
         'Avg Time to SMS (min)': agentTat?.failed_outgoing_to_sms?.mean ?? 'N/A',
         'Median TAT (min)': agentTat?.failed_outgoing_to_sms?.median ?? 'N/A',
       };
@@ -282,52 +223,51 @@ export const CardDrilldownModal: React.FC<CardDrilldownModalProps> = ({
     const wsAgents = XLSX.utils.json_to_sheet(agentData);
     XLSX.utils.book_append_sheet(wb, wsAgents, 'Agent Breakdown');
 
-    // Obligations Sheet
-    const oblData = filteredObligations.map(obl => ({
-      'Obligation ID': obl.id,
-      'Target Phone': obl.target_phone,
-      'Originating Agent': obl.originating_agent_name,
-      'Department Tag': obl.originating_agent_tag,
-      'Trigger Time (Nairobi)': obl.trigger_local_timestamp,
-      'SLA Deadline (Nairobi)': obl.deadline_local_timestamp,
-      'Status': obl.status,
-      'Turnaround Minutes': obl.turnaround_minutes ?? 'N/A',
-      'Resolving Agent': obl.resolving_agent_name || 'N/A',
-      'Resolution Time': obl.resolution_local_timestamp || 'N/A',
-    }));
-    const wsObl = XLSX.utils.json_to_sheet(oblData);
-    XLSX.utils.book_append_sheet(wb, wsObl, 'Obligations Audit');
+    // Obligations Sheet (if card has obligations)
+    if (cardType !== 'OUTGOING_RECONNECTION') {
+      const oblData = filteredObligations.map(obl => ({
+        'Obligation ID': obl.id,
+        'Target Phone': obl.target_phone,
+        'Originating Agent': obl.originating_agent_name,
+        'Department Tag': obl.originating_agent_tag,
+        'Trigger Time (Nairobi)': obl.trigger_local_timestamp,
+        'Deadline (Nairobi)': obl.deadline_local_timestamp,
+        'Status': obl.status,
+        'Turnaround Minutes': obl.turnaround_minutes ?? 'N/A',
+        'Resolving Agent': obl.resolving_agent_name || 'N/A',
+        'Resolution Time': obl.resolution_local_timestamp || 'N/A',
+      }));
+      const wsObl = XLSX.utils.json_to_sheet(oblData);
+      XLSX.utils.book_append_sheet(wb, wsObl, 'Obligations Audit');
+    }
 
-    XLSX.writeFile(wb, `Solvit_${cardType}_Drilldown_${startDate}_to_${endDate}.xlsx`);
+    XLSX.writeFile(wb, `${cardType}_drilldown_audit.xlsx`);
   };
-
-  if (!isOpen || !cardType || !meta) return null;
 
   const IconComponent = meta.icon;
 
   return (
-    <div className="fixed inset-0 z-50 overflow-y-auto bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-3 sm:p-5">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-xs p-3 sm:p-6 overflow-y-auto">
       <div 
-        id="card-drilldown-modal-container"
-        className="bg-white rounded-2xl max-w-6xl w-full max-h-[92vh] shadow-2xl border border-slate-200 flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-200"
+        id="modal-card-drilldown-container"
+        className="relative w-full max-w-6xl bg-white rounded-2xl shadow-2xl border border-slate-200 overflow-hidden flex flex-col max-h-[92vh] animate-in fade-in zoom-in-95 duration-200"
       >
-        {/* Modal Header */}
-        <div className="p-5 sm:p-6 border-b border-slate-100 bg-gradient-to-r from-slate-50 via-white to-slate-50 flex items-start justify-between gap-4">
-          <div className="flex items-center gap-3.5">
-            <div className={`w-11 h-11 rounded-2xl flex items-center justify-center border shadow-xs ${meta.iconColor}`}>
-              <IconComponent className="w-6 h-6" />
+        {/* Modal Top Header */}
+        <div className="p-4 sm:p-5 border-b border-slate-100 flex items-center justify-between bg-white">
+          <div className="flex items-center gap-3">
+            <div className={`w-10 h-10 rounded-xl flex items-center justify-center border ${meta.iconColor}`}>
+              <IconComponent className="w-5 h-5" />
             </div>
             <div>
-              <div className="flex items-center gap-2.5 flex-wrap">
-                <h2 className="text-lg font-bold text-slate-900 leading-tight">
+              <div className="flex items-center gap-2">
+                <h2 className="text-base sm:text-lg font-bold text-slate-900 leading-snug">
                   {meta.title}
                 </h2>
-                <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-slate-100 text-slate-700 border border-slate-200">
-                  {startDate === endDate ? startDate : `${startDate} to ${endDate}`}
-                </span>
-                <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-amber-100 text-amber-800 border border-amber-200">
-                  {meta.slaLabel}
-                </span>
+                {meta.slaLabel && (
+                  <span className="px-2 py-0.5 rounded-full text-[11px] font-bold bg-indigo-50 text-indigo-700 border border-indigo-200">
+                    {meta.slaLabel}
+                  </span>
+                )}
               </div>
               <p className="text-xs text-slate-500 mt-1">
                 {meta.subtitle}
@@ -356,68 +296,105 @@ export const CardDrilldownModal: React.FC<CardDrilldownModalProps> = ({
           </div>
         </div>
 
-        {/* Top Summary Banner */}
-        <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6 gap-3 p-4 sm:p-5 bg-slate-50/70 border-b border-slate-100">
-          {/* Primary Compliance KPI */}
-          <div className="bg-white p-3 rounded-xl border border-slate-200/90 shadow-xs col-span-2 sm:col-span-2">
-            <div className="flex items-center justify-between text-xs text-slate-500 mb-1 font-medium">
-              <span>Overall Compliance Rate</span>
-              <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" />
+        {/* Top Summary Banner: Plain-Count Reporting */}
+        {cardType === 'MISSED_INCOMING_CALLBACK' && (
+          <div className="grid grid-cols-2 sm:grid-cols-6 gap-3 p-4 sm:p-5 bg-slate-50/70 border-b border-slate-100">
+            <div className="bg-white p-3 rounded-xl border border-slate-200/90 shadow-xs">
+              <div className="text-[11px] font-semibold text-slate-500 truncate mb-1">Received</div>
+              <div className="text-xl font-bold font-mono text-slate-900">{summary.total_calls_incoming || 0}</div>
             </div>
-            <div className="flex items-baseline gap-2">
-              <span className="text-2xl sm:text-3xl font-extrabold font-mono text-slate-900">
-                {meta.compliancePct !== null && meta.compliancePct !== undefined ? `${meta.compliancePct}%` : 'N/A'}
-              </span>
-              <span className="text-xs text-slate-500 font-semibold">
-                ({meta.metCount} of {meta.totalCount} in SLA)
-              </span>
+            <div className="bg-white p-3 rounded-xl border border-slate-200/90 shadow-xs">
+              <div className="text-[11px] font-semibold text-slate-500 truncate mb-1">Answered</div>
+              <div className="text-xl font-bold font-mono text-emerald-600">{summary.total_calls_incoming_connected || 0}</div>
+            </div>
+            <div className="bg-white p-3 rounded-xl border border-slate-200/90 shadow-xs">
+              <div className="text-[11px] font-semibold text-slate-500 truncate mb-1">Within SLA</div>
+              <div className="text-xl font-bold font-mono text-emerald-700">{headlineStats?.incoming_returned_within_sla_count ?? 0}</div>
+            </div>
+            <div className="bg-white p-3 rounded-xl border border-slate-200/90 shadow-xs">
+              <div className="text-[11px] font-semibold text-slate-500 truncate mb-1">Outside SLA</div>
+              <div className="text-xl font-bold font-mono text-amber-700">{headlineStats?.incoming_returned_outside_sla_count ?? 0}</div>
+            </div>
+            <div className={`p-3 rounded-xl border shadow-xs ${(headlineStats?.incoming_not_returned_count || 0) > 0 ? 'bg-rose-50/70 border-rose-200' : 'bg-white border-slate-200/90'}`}>
+              <div className={`text-[11px] font-semibold truncate mb-1 ${(headlineStats?.incoming_not_returned_count || 0) > 0 ? 'text-rose-600' : 'text-slate-500'}`}>Not Returned</div>
+              <div className={`text-xl font-bold font-mono ${(headlineStats?.incoming_not_returned_count || 0) > 0 ? 'text-rose-700' : 'text-slate-700'}`}>
+                {headlineStats?.incoming_not_returned_count ?? 0}
+              </div>
+            </div>
+            <div className="bg-white p-3 rounded-xl border border-slate-200/90 shadow-xs col-span-2 sm:col-span-1">
+              <div className="flex items-center justify-between text-[11px] font-semibold text-slate-500 mb-1">
+                <span>Avg Callback TAT</span>
+                <Clock className="w-3 h-3 text-slate-400" />
+              </div>
+              <div className="text-lg font-bold font-mono text-slate-900">{formatMinutes(meta.tatMetric?.mean)}</div>
+              <div className="text-[10px] text-slate-400">Med: {formatMinutes(meta.tatMetric?.median)}</div>
             </div>
           </div>
+        )}
 
-          {/* Volume 1 */}
-          <div className="bg-white p-3 rounded-xl border border-slate-200/90 shadow-xs">
-            <div className="text-[11px] font-semibold text-slate-500 truncate mb-1">
-              {meta.vol1Label}
+        {cardType === 'OUTGOING_RECONNECTION' && (
+          <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 p-4 sm:p-5 bg-slate-50/70 border-b border-slate-100">
+            <div className="bg-white p-3 rounded-xl border border-slate-200/90 shadow-xs">
+              <div className="text-[11px] font-semibold text-slate-500 truncate mb-1">Dialled</div>
+              <div className="text-xl font-bold font-mono text-slate-900">{summary.total_calls_made || 0}</div>
             </div>
-            <div className="text-xl font-bold font-mono text-slate-900">
-              {meta.vol1Val}
+            <div className="bg-white p-3 rounded-xl border border-slate-200/90 shadow-xs">
+              <div className="text-[11px] font-semibold text-slate-500 truncate mb-1">Connected</div>
+              <div className="text-xl font-bold font-mono text-emerald-600">{summary.total_calls_outgoing_connected || 0}</div>
+            </div>
+            <div className="bg-white p-3 rounded-xl border border-slate-200/90 shadow-xs">
+              <div className="text-[11px] font-semibold text-slate-500 truncate mb-1">Not Connected</div>
+              <div className="text-xl font-bold font-mono text-amber-700">
+                {Math.max(0, (summary.total_calls_made || 0) - (summary.total_calls_outgoing_connected || 0))}
+              </div>
+            </div>
+            <div className="bg-white p-3 rounded-xl border border-slate-200/90 shadow-xs">
+              <div className="text-[11px] font-semibold text-slate-500 truncate mb-1">Avg Tries / Unconnected</div>
+              <div className="text-xl font-bold font-mono text-blue-700">
+                {headlineStats?.avg_tries_per_unconnected_number ?? 0}
+              </div>
+            </div>
+            <div className="bg-white p-3 rounded-xl border border-slate-200/90 shadow-xs col-span-2 sm:col-span-1">
+              <div className="flex items-center justify-between text-[11px] font-semibold text-slate-500 mb-1">
+                <span>Avg Reconnect TAT</span>
+                <Clock className="w-3 h-3 text-slate-400" />
+              </div>
+              <div className="text-lg font-bold font-mono text-slate-900">{formatMinutes(meta.tatMetric?.mean)}</div>
+              <div className="text-[10px] text-slate-400">Med: {formatMinutes(meta.tatMetric?.median)}</div>
             </div>
           </div>
+        )}
 
-          {/* Volume 2 */}
-          <div className="bg-white p-3 rounded-xl border border-slate-200/90 shadow-xs">
-            <div className="text-[11px] font-semibold text-slate-500 truncate mb-1">
-              {meta.vol2Label}
+        {cardType === 'SMS_FOLLOWUP' && (
+          <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 p-4 sm:p-5 bg-slate-50/70 border-b border-slate-100">
+            <div className="bg-white p-3 rounded-xl border border-slate-200/90 shadow-xs">
+              <div className="text-[11px] font-semibold text-slate-500 truncate mb-1">Eligible</div>
+              <div className="text-xl font-bold font-mono text-slate-900">{headlineStats?.sms_followup_total ?? (summary.total_calls_not_picked || 0)}</div>
             </div>
-            <div className="text-xl font-bold font-mono text-emerald-600">
-              {meta.vol2Val}
+            <div className="bg-white p-3 rounded-xl border border-slate-200/90 shadow-xs">
+              <div className="text-[11px] font-semibold text-slate-500 truncate mb-1">Sent</div>
+              <div className="text-xl font-bold font-mono text-purple-600">{summary.total_sms || (headlineStats?.sms_followup_met || 0)}</div>
             </div>
-          </div>
-
-          {/* Volume 3 / Triggers */}
-          <div className="bg-white p-3 rounded-xl border border-slate-200/90 shadow-xs">
-            <div className="text-[11px] font-semibold text-slate-500 truncate mb-1">
-              {meta.vol3Label}
+            <div className="bg-white p-3 rounded-xl border border-slate-200/90 shadow-xs">
+              <div className="text-[11px] font-semibold text-slate-500 truncate mb-1">Returned within period</div>
+              <div className="text-xl font-bold font-mono text-purple-700">{headlineStats?.sms_followup_met || 0}</div>
             </div>
-            <div className="text-xl font-bold font-mono text-amber-600">
-              {meta.vol3Val}
+            <div className={`p-3 rounded-xl border shadow-xs ${(headlineStats?.carried_over_sms_count || 0) > 0 ? 'bg-rose-50/70 border-rose-200' : 'bg-white border-slate-200/90'}`}>
+              <div className={`text-[11px] font-semibold truncate mb-1 ${(headlineStats?.carried_over_sms_count || 0) > 0 ? 'text-rose-600' : 'text-slate-500'}`}>Carried over to next period</div>
+              <div className={`text-xl font-bold font-mono ${(headlineStats?.carried_over_sms_count || 0) > 0 ? 'text-rose-700' : 'text-slate-700'}`}>
+                {headlineStats?.carried_over_sms_count || 0}
+              </div>
             </div>
-          </div>
-
-          {/* Speed / Turnaround */}
-          <div className="bg-white p-3 rounded-xl border border-slate-200/90 shadow-xs">
-            <div className="flex items-center justify-between text-[11px] font-semibold text-slate-500 mb-1">
-              <span>Avg Speed (TAT)</span>
-              <Clock className="w-3 h-3 text-slate-400" />
-            </div>
-            <div className="text-lg font-bold font-mono text-slate-900">
-              {formatMinutes(meta.tatMetric?.mean)}
-            </div>
-            <div className="text-[10px] text-slate-400">
-              Med: {formatMinutes(meta.tatMetric?.median)}
+            <div className="bg-white p-3 rounded-xl border border-slate-200/90 shadow-xs col-span-2 sm:col-span-1">
+              <div className="flex items-center justify-between text-[11px] font-semibold text-slate-500 mb-1">
+                <span>Avg Time to SMS</span>
+                <Clock className="w-3 h-3 text-slate-400" />
+              </div>
+              <div className="text-lg font-bold font-mono text-slate-900">{formatMinutes(meta.tatMetric?.mean)}</div>
+              <div className="text-[10px] text-slate-400">Med: {formatMinutes(meta.tatMetric?.median)}</div>
             </div>
           </div>
-        </div>
+        )}
 
         {/* View Selection & Search Bar */}
         <div className="p-4 border-b border-slate-100 flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-white">
@@ -435,18 +412,20 @@ export const CardDrilldownModal: React.FC<CardDrilldownModalProps> = ({
               <User className="w-3.5 h-3.5" />
               <span>Agent Breakdown ({filteredAgents.length})</span>
             </button>
-            <button
-              id="tab-drilldown-obligations"
-              onClick={() => setActiveTab('obligations')}
-              className={`px-3.5 py-1.5 rounded-lg transition-all flex items-center gap-1.5 ${
-                activeTab === 'obligations'
-                  ? 'bg-white text-slate-900 shadow-xs font-bold'
-                  : 'text-slate-500 hover:text-slate-800'
-              }`}
-            >
-              <Layers className="w-3.5 h-3.5" />
-              <span>Obligations Log ({relevantObligations.length})</span>
-            </button>
+            {cardType !== 'OUTGOING_RECONNECTION' && (
+              <button
+                id="tab-drilldown-obligations"
+                onClick={() => setActiveTab('obligations')}
+                className={`px-3.5 py-1.5 rounded-lg transition-all flex items-center gap-1.5 ${
+                  activeTab === 'obligations'
+                    ? 'bg-white text-slate-900 shadow-xs font-bold'
+                    : 'text-slate-500 hover:text-slate-800'
+                }`}
+              >
+                <Layers className="w-3.5 h-3.5" />
+                <span>Obligations Log ({relevantObligations.length})</span>
+              </button>
+            )}
             <button
               id="tab-drilldown-events"
               onClick={() => setActiveTab('events')}
@@ -456,50 +435,55 @@ export const CardDrilldownModal: React.FC<CardDrilldownModalProps> = ({
                   : 'text-slate-500 hover:text-slate-800'
               }`}
             >
-              <Calendar className="w-3.5 h-3.5" />
-              <span>Raw Events ({relevantEvents.length})</span>
+              <Clock className="w-3.5 h-3.5" />
+              <span>Raw Events Stream</span>
             </button>
           </div>
 
-          {/* Contextual Filters */}
-          <div className="flex items-center gap-2 flex-wrap">
+          {/* Filtering Controls */}
+          <div className="flex items-center gap-2">
             {activeTab === 'agents' ? (
               <>
                 <div className="relative">
                   <Search className="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
                   <input
-                    id="input-drilldown-search-agents"
+                    id="input-drilldown-search-agent"
                     type="text"
-                    placeholder="Search agent name / phone..."
+                    placeholder="Search agent name..."
                     value={agentSearch}
                     onChange={(e) => setAgentSearch(e.target.value)}
-                    className="pl-8 pr-3 py-1.5 text-xs bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:ring-2 focus:ring-amber-500 outline-none w-48 sm:w-56"
+                    className="pl-8 pr-3 py-1.5 text-xs bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:ring-2 focus:ring-indigo-500 outline-none w-48 sm:w-56"
                   />
                 </div>
 
-                <select
-                  id="select-drilldown-tag-filter"
-                  value={selectedTagFilter}
-                  onChange={(e) => setSelectedTagFilter(e.target.value)}
-                  className="px-2.5 py-1.5 text-xs font-medium text-slate-700 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-amber-500 outline-none"
-                >
-                  <option value="ALL">All Departments</option>
-                  {allTags.map(tag => (
-                    <option key={tag} value={tag}>{tag}</option>
-                  ))}
-                </select>
+                {allTags.length > 0 && (
+                  <div className="flex items-center gap-1">
+                    <Filter className="w-3.5 h-3.5 text-slate-400" />
+                    <select
+                      id="select-drilldown-tag-filter"
+                      value={selectedTagFilter}
+                      onChange={(e) => setSelectedTagFilter(e.target.value)}
+                      className="px-2.5 py-1.5 text-xs font-medium text-slate-700 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none"
+                    >
+                      <option value="ALL">All Departments</option>
+                      {allTags.map(tag => (
+                        <option key={tag} value={tag}>{tag}</option>
+                      ))}
+                    </select>
+                  </div>
+                )}
               </>
             ) : activeTab === 'obligations' ? (
               <>
                 <div className="relative">
                   <Search className="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
                   <input
-                    id="input-drilldown-search-obligations"
+                    id="input-drilldown-search-records"
                     type="text"
                     placeholder="Search phone or agent..."
                     value={recordSearch}
                     onChange={(e) => setRecordSearch(e.target.value)}
-                    className="pl-8 pr-3 py-1.5 text-xs bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:ring-2 focus:ring-amber-500 outline-none w-48 sm:w-56"
+                    className="pl-8 pr-3 py-1.5 text-xs bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:ring-2 focus:ring-indigo-500 outline-none w-48 sm:w-56"
                   />
                 </div>
 
@@ -507,11 +491,11 @@ export const CardDrilldownModal: React.FC<CardDrilldownModalProps> = ({
                   id="select-drilldown-status-filter"
                   value={obligationStatusFilter}
                   onChange={(e) => setObligationStatusFilter(e.target.value)}
-                  className="px-2.5 py-1.5 text-xs font-medium text-slate-700 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-amber-500 outline-none"
+                  className="px-2.5 py-1.5 text-xs font-medium text-slate-700 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none"
                 >
                   <option value="ALL">All Statuses</option>
-                  <option value="MET">MET (In SLA)</option>
-                  <option value="BREACHED">BREACHED</option>
+                  <option value="MET">MET</option>
+                  <option value="CARRIED_OVER">CARRIED OVER</option>
                   <option value="OPEN">OPEN</option>
                 </select>
               </>
@@ -524,7 +508,7 @@ export const CardDrilldownModal: React.FC<CardDrilldownModalProps> = ({
                   placeholder="Filter events..."
                   value={recordSearch}
                   onChange={(e) => setRecordSearch(e.target.value)}
-                  className="pl-8 pr-3 py-1.5 text-xs bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:ring-2 focus:ring-amber-500 outline-none w-48 sm:w-56"
+                  className="pl-8 pr-3 py-1.5 text-xs bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:ring-2 focus:ring-indigo-500 outline-none w-48 sm:w-56"
                 />
               </div>
             )}
@@ -545,35 +529,31 @@ export const CardDrilldownModal: React.FC<CardDrilldownModalProps> = ({
                         <>
                           <th className="py-3 px-3 text-center">Received</th>
                           <th className="py-3 px-3 text-center">Answered</th>
-                          <th className="py-3 px-3 text-center">Missed</th>
-                          <th className="py-3 px-3 text-center">In SLA</th>
-                          <th className="py-3 px-3 text-center">Evaluated</th>
-                          <th className="py-3 px-3 text-center">Compliance</th>
+                          <th className="py-3 px-3 text-center">Within SLA</th>
+                          <th className="py-3 px-3 text-center">Outside SLA</th>
+                          <th className="py-3 px-3 text-center">Not Returned</th>
                           <th className="py-3 px-3 text-center">Avg TAT</th>
+                          <th className="py-3 px-3 text-center">Open</th>
                         </>
                       )}
                       {cardType === 'OUTGOING_RECONNECTION' && (
                         <>
                           <th className="py-3 px-3 text-center">Dialled</th>
                           <th className="py-3 px-3 text-center">Connected</th>
-                          <th className="py-3 px-3 text-center">Unconnected</th>
-                          <th className="py-3 px-3 text-center">In SLA</th>
-                          <th className="py-3 px-3 text-center">Evaluated</th>
-                          <th className="py-3 px-3 text-center">Compliance</th>
+                          <th className="py-3 px-3 text-center">Not Connected</th>
                           <th className="py-3 px-3 text-center">Avg TAT</th>
                         </>
                       )}
                       {cardType === 'SMS_FOLLOWUP' && (
                         <>
-                          <th className="py-3 px-3 text-center bg-purple-50/40">Outgoing Missed</th>
-                          <th className="py-3 px-3 text-center">Total SMS Sent</th>
-                          <th className="py-3 px-3 text-center">In SLA Dispatched</th>
-                          <th className="py-3 px-3 text-center">Evaluated</th>
-                          <th className="py-3 px-3 text-center">SMS Compliance</th>
+                          <th className="py-3 px-3 text-center">Eligible</th>
+                          <th className="py-3 px-3 text-center">Sent</th>
+                          <th className="py-3 px-3 text-center">Returned within period</th>
+                          <th className="py-3 px-3 text-center">Carried over to next period</th>
                           <th className="py-3 px-3 text-center">Time to SMS</th>
+                          <th className="py-3 px-3 text-center">Open</th>
                         </>
                       )}
-                      <th className="py-3 px-3 text-center">Open</th>
                       <th className="py-3 px-4 text-right">Actions</th>
                     </tr>
                   </thead>
@@ -588,28 +568,16 @@ export const CardDrilldownModal: React.FC<CardDrilldownModalProps> = ({
                       filteredAgents.map(agent => {
                         const agentTat = turnaroundReport?.by_agent?.[agent.agent_id];
 
-                        let compliancePct: number | null = null;
-                        let metCount = 0;
-                        let totalCount = 0;
                         let tatMean: number | null = null;
                         let tatMedian: number | null = null;
 
                         if (cardType === 'MISSED_INCOMING_CALLBACK') {
-                          compliancePct = agent.incoming_callback_compliance_pct;
-                          metCount = agent.incoming_callback_met;
-                          totalCount = agent.incoming_callback_total;
                           tatMean = agentTat?.overall_callback_turnaround?.mean ?? agentTat?.missed_to_connection?.mean ?? null;
                           tatMedian = agentTat?.overall_callback_turnaround?.median ?? agentTat?.missed_to_connection?.median ?? null;
                         } else if (cardType === 'OUTGOING_RECONNECTION') {
-                          compliancePct = agent.outgoing_reconnect_compliance_pct;
-                          metCount = agent.outgoing_reconnect_met;
-                          totalCount = agent.outgoing_reconnect_total;
                           tatMean = agentTat?.failed_outgoing_to_connection?.mean ?? agentTat?.overall_connection_turnaround?.mean ?? null;
                           tatMedian = agentTat?.failed_outgoing_to_connection?.median ?? agentTat?.overall_connection_turnaround?.median ?? null;
                         } else {
-                          compliancePct = agent.sms_followup_compliance_pct;
-                          metCount = agent.sms_followup_met;
-                          totalCount = agent.sms_followup_total;
                           tatMean = agentTat?.failed_outgoing_to_sms?.mean ?? null;
                           tatMedian = agentTat?.failed_outgoing_to_sms?.median ?? null;
                         }
@@ -644,17 +612,14 @@ export const CardDrilldownModal: React.FC<CardDrilldownModalProps> = ({
                                 <td className="py-3 px-3 text-center font-mono font-semibold text-emerald-600">
                                   {agent.calls_incoming_connected}
                                 </td>
-                                <td className="py-3 px-3 text-center font-mono font-semibold text-rose-600">
-                                  {agent.calls_missed}
-                                </td>
                                 <td className="py-3 px-3 text-center font-mono font-semibold text-emerald-700">
-                                  {metCount}
+                                  {agent.incoming_returned_within_sla_count ?? agent.incoming_callback_met}
                                 </td>
-                                <td className="py-3 px-3 text-center font-mono text-slate-600">
-                                  {totalCount}
+                                <td className="py-3 px-3 text-center font-mono font-semibold text-amber-700">
+                                  {agent.incoming_returned_outside_sla_count ?? 0}
                                 </td>
-                                <td className="py-3 px-3 text-center">
-                                  {getComplianceBadge(compliancePct, totalCount)}
+                                <td className="py-3 px-3 text-center font-mono font-semibold text-rose-600">
+                                  {agent.incoming_not_returned_count ?? (agent.carried_over_incoming_count || 0)}
                                 </td>
                                 <td className="py-3 px-3 text-center font-mono text-slate-700">
                                   {formatMinutes(tatMean)}
@@ -663,6 +628,9 @@ export const CardDrilldownModal: React.FC<CardDrilldownModalProps> = ({
                                       Med: {formatMinutes(tatMedian)}
                                     </span>
                                   )}
+                                </td>
+                                <td className="py-3 px-3 text-center font-mono font-bold text-amber-700">
+                                  {agentOpenCount}
                                 </td>
                               </>
                             )}
@@ -676,17 +644,8 @@ export const CardDrilldownModal: React.FC<CardDrilldownModalProps> = ({
                                 <td className="py-3 px-3 text-center font-mono font-semibold text-emerald-600">
                                   {agent.calls_outgoing_connected}
                                 </td>
-                                <td className="py-3 px-3 text-center font-mono font-semibold text-amber-600">
-                                  {agent.calls_not_picked}
-                                </td>
-                                <td className="py-3 px-3 text-center font-mono font-semibold text-emerald-700">
-                                  {metCount}
-                                </td>
-                                <td className="py-3 px-3 text-center font-mono text-slate-600">
-                                  {totalCount}
-                                </td>
-                                <td className="py-3 px-3 text-center">
-                                  {getComplianceBadge(compliancePct, totalCount)}
+                                <td className="py-3 px-3 text-center font-mono font-semibold text-amber-700">
+                                  {Math.max(0, agent.calls_made - agent.calls_outgoing_connected)}
                                 </td>
                                 <td className="py-3 px-3 text-center font-mono text-slate-700">
                                   {formatMinutes(tatMean)}
@@ -702,20 +661,17 @@ export const CardDrilldownModal: React.FC<CardDrilldownModalProps> = ({
                             {/* SMS FOLLOW-UP METRICS */}
                             {cardType === 'SMS_FOLLOWUP' && (
                               <>
-                                <td className="py-3 px-3 text-center font-mono font-bold text-amber-700 bg-purple-50/20">
+                                <td className="py-3 px-3 text-center font-mono font-bold text-amber-700">
                                   {agent.calls_not_picked}
                                 </td>
                                 <td className="py-3 px-3 text-center font-mono font-semibold text-purple-700">
                                   {agent.sms_count}
                                 </td>
-                                <td className="py-3 px-3 text-center font-mono font-semibold text-emerald-700">
-                                  {metCount}
+                                <td className="py-3 px-3 text-center font-mono font-semibold text-purple-700">
+                                  {agent.sms_followup_met}
                                 </td>
-                                <td className="py-3 px-3 text-center font-mono text-slate-600">
-                                  {totalCount}
-                                </td>
-                                <td className="py-3 px-3 text-center">
-                                  {getComplianceBadge(compliancePct, totalCount)}
+                                <td className="py-3 px-3 text-center font-mono font-semibold text-rose-600">
+                                  {agent.carried_over_sms_count || 0}
                                 </td>
                                 <td className="py-3 px-3 text-center font-mono text-slate-700">
                                   {formatMinutes(tatMean)}
@@ -725,34 +681,21 @@ export const CardDrilldownModal: React.FC<CardDrilldownModalProps> = ({
                                     </span>
                                   )}
                                 </td>
+                                <td className="py-3 px-3 text-center font-mono font-bold text-amber-700">
+                                  {agentOpenCount}
+                                </td>
                               </>
                             )}
 
-                            <td className="py-3 px-3 text-center">
-                              {agentOpenCount > 0 ? (
-                                <span className="inline-flex items-center gap-0.5 px-2 py-0.5 rounded-full text-[11px] font-bold bg-amber-100 text-amber-800 border border-amber-200">
-                                  <AlertCircle className="w-3 h-3 text-amber-600" />
-                                  {agentOpenCount}
-                                </span>
-                              ) : (
-                                <span className="text-slate-400 font-mono text-xs">0</span>
-                              )}
-                            </td>
-
                             <td className="py-3 px-4 text-right">
-                              {onSelectAgent && (
-                                <button
-                                  id={`btn-drilldown-agent-${agent.agent_id}`}
-                                  onClick={() => {
-                                    onSelectAgent(agent.agent_id);
-                                    onClose();
-                                  }}
-                                  className="inline-flex items-center gap-1 text-[11px] font-semibold text-amber-700 hover:text-amber-800 bg-amber-50 hover:bg-amber-100 px-2.5 py-1 rounded-lg border border-amber-200 transition-colors"
-                                >
-                                  <span>Filter Agent</span>
-                                  <ArrowRight className="w-3 h-3" />
-                                </button>
-                              )}
+                              <button
+                                id={`btn-inspect-agent-${agent.agent_id}`}
+                                onClick={() => onInspectAgent(agent.agent_id)}
+                                className="inline-flex items-center gap-1 text-[11px] font-semibold text-slate-700 hover:text-slate-900 bg-slate-100 hover:bg-slate-200 px-2.5 py-1 rounded-lg transition-colors"
+                              >
+                                <span>Audit Records</span>
+                                <ExternalLink className="w-3 h-3 text-slate-500" />
+                              </button>
                             </td>
                           </tr>
                         );
@@ -774,7 +717,7 @@ export const CardDrilldownModal: React.FC<CardDrilldownModalProps> = ({
                       <th className="py-3 px-4">Target Phone</th>
                       <th className="py-3 px-3">Agent</th>
                       <th className="py-3 px-3">Trigger Time</th>
-                      <th className="py-3 px-3">SLA Deadline</th>
+                      <th className="py-3 px-3">Deadline</th>
                       <th className="py-3 px-3 text-center">Status</th>
                       <th className="py-3 px-3 text-center">Turnaround</th>
                       <th className="py-3 px-3">Resolved By</th>
@@ -803,11 +746,11 @@ export const CardDrilldownModal: React.FC<CardDrilldownModalProps> = ({
                               MET
                             </span>
                           );
-                        } else if (obl.status === 'BREACHED') {
+                        } else if (obl.status === 'CARRIED_OVER') {
                           statusBadge = (
                             <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md font-bold text-[11px] bg-rose-50 text-rose-700 border border-rose-200">
                               <AlertOctagon className="w-3 h-3" />
-                              BREACHED
+                              CARRIED OVER
                             </span>
                           );
                         }

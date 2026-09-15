@@ -91,6 +91,19 @@ export const ContactHistoryModal: React.FC<ContactHistoryModalProps> = ({
     return `${m}m ${s}s`;
   };
 
+  const getStatusLabel = (status: string) => {
+    switch (status) {
+      case 'CARRIED_OVER':
+        return 'Carried Over';
+      case 'MET':
+        return 'Met';
+      case 'OPEN':
+        return 'Open';
+      default:
+        return status;
+    }
+  };
+
   return (
     <div id="contact-history-backdrop" className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-sm p-4 overflow-y-auto">
       <div id="contact-history-modal" className="bg-white rounded-2xl shadow-2xl border border-slate-200 w-full max-w-4xl max-h-[92vh] flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-200">
@@ -164,7 +177,7 @@ export const ContactHistoryModal: React.FC<ContactHistoryModalProps> = ({
                       {data.obligations_summary.filter(o => o.status === 'MET').length} Met
                     </span>
                     <span className="px-2 py-0.5 rounded text-xs font-bold bg-rose-100 text-rose-800">
-                      {data.obligations_summary.filter(o => o.status === 'BREACHED').length} Breached
+                      {data.obligations_summary.filter(o => o.status === 'CARRIED_OVER').length} Carried Over
                     </span>
                     <span className="px-2 py-0.5 rounded text-xs font-bold bg-amber-100 text-amber-800">
                       {data.obligations_summary.filter(o => o.status === 'OPEN').length} Open
@@ -174,11 +187,10 @@ export const ContactHistoryModal: React.FC<ContactHistoryModalProps> = ({
 
                 <div className="p-3.5 rounded-xl border border-slate-200 bg-slate-50/50">
                   <span className="text-[10px] uppercase font-bold tracking-wider text-slate-400 block">
-                    Active Compliance Windows
+                    Active Target
                   </span>
-                  <div className="text-[11px] text-slate-600 mt-1 space-y-0.5">
-                    <div>Missed: <strong>{data.settings?.callback_window_minutes || 30}m</strong></div>
-                    <div>Reconnect: <strong>{Math.round((data.settings?.reconnection_window_minutes || 1440)/60)}h</strong></div>
+                  <div className="text-[11px] text-slate-600 mt-1 font-medium">
+                    Response target: within the working day.
                   </div>
                 </div>
               </div>
@@ -197,7 +209,7 @@ export const ContactHistoryModal: React.FC<ContactHistoryModalProps> = ({
                         className={`p-3 rounded-lg border text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-2 ${
                           obl.status === 'MET'
                             ? 'bg-emerald-50/60 border-emerald-200 text-emerald-900'
-                            : obl.status === 'BREACHED'
+                            : obl.status === 'CARRIED_OVER'
                             ? 'bg-rose-50/60 border-rose-200 text-rose-900'
                             : 'bg-amber-50/60 border-amber-200 text-amber-900'
                         }`}
@@ -219,9 +231,9 @@ export const ContactHistoryModal: React.FC<ContactHistoryModalProps> = ({
                           )}
                           <span className={`px-2.5 py-1 rounded-full text-xs font-bold ${
                             obl.status === 'MET' ? 'bg-emerald-200 text-emerald-900' :
-                            obl.status === 'BREACHED' ? 'bg-rose-200 text-rose-900' : 'bg-amber-200 text-amber-900'
+                            obl.status === 'CARRIED_OVER' ? 'bg-rose-200 text-rose-900' : 'bg-amber-200 text-amber-900'
                           }`}>
-                            {obl.status}
+                            {getStatusLabel(obl.status)}
                           </span>
                         </div>
                       </div>

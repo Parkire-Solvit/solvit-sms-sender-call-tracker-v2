@@ -47,7 +47,7 @@ export const TurnaroundMetricsSection: React.FC<TurnaroundMetricsSectionProps> =
         return (
           <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-200">
             <CheckCircle2 className="w-3 h-3 text-emerald-600" />
-            Optimal (&le; 50%)
+            Optimal (≤ 50%)
           </span>
         );
       case 'WARNING':
@@ -57,11 +57,11 @@ export const TurnaroundMetricsSection: React.FC<TurnaroundMetricsSectionProps> =
             Warning (50-100%)
           </span>
         );
-      case 'BREACHED':
+      case 'CARRIED_OVER':
         return (
           <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-rose-100 text-rose-800 border border-rose-200">
             <AlertOctagon className="w-3 h-3 text-rose-600" />
-            Breached (&gt; 100%)
+            Carried Over (&gt; 100%)
           </span>
         );
       default:
@@ -106,7 +106,7 @@ export const TurnaroundMetricsSection: React.FC<TurnaroundMetricsSectionProps> =
     },
     {
       id: 'metric-missed-first-attempt',
-      title: 'Missed Incoming &rarr; 1st Callback Attempt',
+      title: 'Missed Incoming → 1st Callback Attempt',
       desc: 'Speed to first attempted callback return on incoming missed calls',
       data: currentMetrics.missed_to_first_attempt,
       icon: PhoneCall,
@@ -114,7 +114,7 @@ export const TurnaroundMetricsSection: React.FC<TurnaroundMetricsSectionProps> =
     },
     {
       id: 'metric-missed-connection',
-      title: 'Missed Incoming &rarr; Connected Call',
+      title: 'Missed Incoming → Connected Call',
       desc: 'Total elapsed time until successful client connection',
       data: currentMetrics.missed_to_connection,
       icon: CheckCircle2,
@@ -122,7 +122,7 @@ export const TurnaroundMetricsSection: React.FC<TurnaroundMetricsSectionProps> =
     },
     {
       id: 'metric-failed-next-attempt',
-      title: 'Unconnected Outgoing &rarr; Next Attempt',
+      title: 'Unconnected Outgoing → Next Attempt',
       desc: 'Time before second outgoing attempt was made',
       data: currentMetrics.failed_outgoing_to_next_attempt,
       icon: TrendingUp,
@@ -130,7 +130,7 @@ export const TurnaroundMetricsSection: React.FC<TurnaroundMetricsSectionProps> =
     },
     {
       id: 'metric-failed-reconnect',
-      title: 'Unconnected Outgoing &rarr; Reconnection',
+      title: 'Unconnected Outgoing → Reconnection',
       desc: 'Total time to successfully reconnect customer',
       data: currentMetrics.failed_outgoing_to_connection,
       icon: PhoneCall,
@@ -138,7 +138,7 @@ export const TurnaroundMetricsSection: React.FC<TurnaroundMetricsSectionProps> =
     },
     {
       id: 'metric-failed-sms',
-      title: 'Unconnected Outgoing &rarr; SMS Sent',
+      title: 'Unconnected Outgoing → SMS Sent',
       desc: 'Speed of sending SMS follow-up after call failed',
       data: currentMetrics.failed_outgoing_to_sms,
       icon: MessageSquare,
@@ -247,7 +247,7 @@ export const TurnaroundMetricsSection: React.FC<TurnaroundMetricsSectionProps> =
       <div className="flex items-center justify-between text-xs text-slate-500 px-1">
         <span className="font-semibold text-slate-700">{contextTitle}</span>
         <span className="text-[11px] text-slate-400">
-          Threshold rule status: &le; 50% optimal (green), 50-100% warning (amber), &gt; 100% breached (red)
+          Threshold rule status: ≤ 50% optimal (green), 50-100% warning (amber), &gt; 100% breached (red)
         </span>
       </div>
 

@@ -8,6 +8,7 @@ import {
   TurnaroundMetricsGroup,
   TurnaroundTimeReport,
   AgentComplianceSummary,
+  HeadlineComplianceStats,
   TagGroupCompliance,
   ContactThreadObligationSummary,
 } from './src/types/compliance';
@@ -35,7 +36,6 @@ export interface RawAgent {
   tag?: string;
   installed_at?: string;
   last_active_at?: string;
-  archived_at?: string | null;
 }
 
 // Convert a UTC Date to Nairobi Local Date Components
@@ -233,6 +233,25 @@ export function calculateDeadlineTimestamp(
   return cursor;
 }
 
+// Calculate deadline as end of current or next working day
+export function calculateEndOfWorkingDayDeadline(
+  triggerDate: Date,
+  schedule: WorkingHoursSchedule
+): Date {
+  const cursor = isWithinWorkingHours(triggerDate, schedule)
+    ? new Date(triggerDate.getTime())
+    : getNextOpeningTime(triggerDate, schedule);
+
+  const info = getNairobiDate(cursor);
+  const dayConfig = schedule[info.dayName];
+  if (dayConfig && dayConfig.enabled) {
+    const closeMins = parseTimeToMinutes(dayConfig.close);
+    const diffMinutes = closeMins - info.totalMinutes;
+    return new Date(cursor.getTime() + diffMinutes * 60 * 1000 - info.seconds * 1000);
+  }
+  return cursor;
+}
+
 // Format UTC Date to readable Nairobi string
 export function toNairobiTimeString(date: Date): string {
   const d = new Date(date.getTime() + NAIROBI_OFFSET_MS);
@@ -268,9 +287,9 @@ export function calculateMeanMedian(
     median = Math.round(((sorted[mid - 1] + sorted[mid]) / 2) * 10) / 10;
   }
 
-  let status: 'OPTIMAL' | 'WARNING' | 'BREACHED' | 'NO_DATA' = 'OPTIMAL';
+  let status: 'OPTIMAL' | 'WARNING' | 'CARRIED_OVER' | 'NO_DATA' = 'OPTIMAL';
   if (median > threshold) {
-    status = 'BREACHED';
+    status = 'CARRIED_OVER';
   } else if (median > threshold * 0.75) {
     status = 'WARNING';
   }
@@ -284,9 +303,28 @@ export function calculateMeanMedian(
   };
 }
 
+// Calculate average tries per unconnected number across all outgoing call events
+export function calculateAverageTriesPerUnconnectedNumber(
+  events: RawEvent[],
+  minConnectionDuration: number = 0
+): number {
+  const attemptsByPhone = new Map<string, { total: number; everConnected: boolean }>();
+  for (const ev of events) {
+    if (ev.type !== 'CALL' || ev.status === 'INCOMING' || ev.status === 'MISSED') continue;
+    const entry = attemptsByPhone.get(ev.target_phone) || { total: 0, everConnected: false };
+    entry.total += 1;
+    if (isCallConnected(ev, minConnectionDuration)) entry.everConnected = true;
+    attemptsByPhone.set(ev.target_phone, entry);
+  }
+  const neverConnected = [...attemptsByPhone.values()].filter((e) => !e.everConnected);
+  if (neverConnected.length === 0) return 0;
+  const totalAttempts = neverConnected.reduce((sum, e) => sum + e.total, 0);
+  return Math.round((totalAttempts / neverConnected.length) * 10) / 10;
+}
+
 /**
  * CORE COMPLIANCE ENGINE
- * Evaluates all contact threads against the 3 obligations using dynamic system settings.
+ * Evaluates all contact threads against obligations using dynamic system settings.
  */
 export function evaluateCompliance(
   events: RawEvent[],
@@ -314,7 +352,7 @@ export function evaluateCompliance(
   }
 
   const allObligations: Obligation[] = [];
-  const complianceLabels = new Map<number, { effect: 'CREATED_OBLIGATION' | 'CLEARED_OBLIGATION' | 'BREACHED_OBLIGATION'; note?: string }>();
+  const complianceLabels = new Map<number, { effect: 'CREATED_OBLIGATION' | 'CLEARED_OBLIGATION' | 'CARRIED_OVER_OBLIGATION'; note?: string }>();
 
   // Turnaround collection arrays
   const ttMissedToFirstAttempt: { mins: number; tag: string; agent_id: number }[] = [];
@@ -326,7 +364,7 @@ export function evaluateCompliance(
   // Evaluate each phone thread
   threadsByPhone.forEach((threadEvents, phone) => {
     let openIncomingObligation: Obligation | null = null;
-    let openOutgoingObligation: Obligation | null = null;
+    let firstFailedOutgoingAttempt: { trigger_timestamp: string; agent_id: number | null; tag: string } | null = null;
     let openSmsObligation: Obligation | null = null;
 
     for (let i = 0; i < threadEvents.length; i++) {
@@ -339,7 +377,7 @@ export function evaluateCompliance(
       const isConnected = isCallConnected(ev, settings.min_connection_duration);
 
       // --- 1. RESOLUTION CHECKS FOR ANY OPEN OBLIGATIONS ---
-      // A connected call (any agent) satisfies both Obligation A and Obligation B!
+      // A connected call (any agent) satisfies Obligation A and records outgoing reconnection TAT!
       if (isConnected) {
         if (openIncomingObligation) {
           const turnaround = calculateElapsedMinutes(
@@ -351,7 +389,7 @@ export function evaluateCompliance(
           const deadline = new Date(openIncomingObligation.deadline_timestamp);
           const isMet = evTime <= deadline;
 
-          openIncomingObligation.status = isMet ? 'MET' : 'BREACHED';
+          openIncomingObligation.status = isMet ? 'MET' : 'CARRIED_OVER';
           openIncomingObligation.resolution_timestamp = evTime.toISOString();
           openIncomingObligation.resolution_local_timestamp = toNairobiTimeString(evTime);
           openIncomingObligation.resolving_agent_id = ev.agent_id;
@@ -363,7 +401,7 @@ export function evaluateCompliance(
             openIncomingObligation.attributed_agent_name = undefined;
             complianceLabels.set(ev.id, { effect: 'CLEARED_OBLIGATION', note: 'Connected Missed Callback' });
           } else {
-            // Breached because it connected after window
+            // Carried over because it connected after deadline
             openIncomingObligation.attributed_agent_id = openIncomingObligation.originating_agent_id;
             openIncomingObligation.attributed_agent_name = openIncomingObligation.originating_agent_name;
           }
@@ -378,42 +416,19 @@ export function evaluateCompliance(
           openIncomingObligation = null;
         }
 
-        if (openOutgoingObligation) {
+        if (firstFailedOutgoingAttempt) {
           const turnaround = calculateElapsedMinutes(
-            new Date(openOutgoingObligation.trigger_timestamp),
+            new Date(firstFailedOutgoingAttempt.trigger_timestamp),
             evTime,
             settings.working_hours_schedule,
             settings.clock_mode
           );
-          const deadline = new Date(openOutgoingObligation.deadline_timestamp);
-          const isMet = evTime <= deadline;
-
-          openOutgoingObligation.status = isMet ? 'MET' : 'BREACHED';
-          openOutgoingObligation.resolution_timestamp = evTime.toISOString();
-          openOutgoingObligation.resolution_local_timestamp = toNairobiTimeString(evTime);
-          openOutgoingObligation.resolving_agent_id = ev.agent_id;
-          openOutgoingObligation.resolving_agent_name = agentName;
-          openOutgoingObligation.turnaround_minutes = turnaround;
-
-          if (isMet) {
-            openOutgoingObligation.attributed_agent_id = null;
-            openOutgoingObligation.attributed_agent_name = undefined;
-            if (!complianceLabels.has(ev.id)) {
-              complianceLabels.set(ev.id, { effect: 'CLEARED_OBLIGATION', note: 'Connected Reconnection' });
-            }
-          } else {
-            openOutgoingObligation.attributed_agent_id = openOutgoingObligation.originating_agent_id;
-            openOutgoingObligation.attributed_agent_name = openOutgoingObligation.originating_agent_name;
-          }
-
           ttFailedOutToConnection.push({
             mins: turnaround,
-            tag: openOutgoingObligation.originating_agent_tag,
-            agent_id: openOutgoingObligation.originating_agent_id || 0,
+            tag: firstFailedOutgoingAttempt.tag,
+            agent_id: firstFailedOutgoingAttempt.agent_id || 0,
           });
-
-          allObligations.push(openOutgoingObligation);
-          openOutgoingObligation = null;
+          firstFailedOutgoingAttempt = null;
         }
       }
 
@@ -432,17 +447,17 @@ export function evaluateCompliance(
             agent_id: openIncomingObligation.originating_agent_id || 0,
           });
         }
-        if (openOutgoingObligation && !openOutgoingObligation.resolution_timestamp) {
+        if (firstFailedOutgoingAttempt) {
           const attemptTurnaround = calculateElapsedMinutes(
-            new Date(openOutgoingObligation.trigger_timestamp),
+            new Date(firstFailedOutgoingAttempt.trigger_timestamp),
             evTime,
             settings.working_hours_schedule,
             settings.clock_mode
           );
           ttFailedOutToNextAttempt.push({
             mins: attemptTurnaround,
-            tag: openOutgoingObligation.originating_agent_tag,
-            agent_id: openOutgoingObligation.originating_agent_id || 0,
+            tag: firstFailedOutgoingAttempt.tag,
+            agent_id: firstFailedOutgoingAttempt.agent_id || 0,
           });
         }
       }
@@ -458,7 +473,7 @@ export function evaluateCompliance(
         const deadline = new Date(openSmsObligation.deadline_timestamp);
         const isMet = evTime <= deadline;
 
-        openSmsObligation.status = isMet ? 'MET' : 'BREACHED';
+        openSmsObligation.status = isMet ? 'MET' : 'CARRIED_OVER';
         openSmsObligation.resolution_timestamp = evTime.toISOString();
         openSmsObligation.resolution_local_timestamp = toNairobiTimeString(evTime);
         openSmsObligation.resolving_agent_id = ev.agent_id;
@@ -518,7 +533,7 @@ export function evaluateCompliance(
         }
       }
 
-      // Obligation B & C: Unconnected Outgoing Call
+      // Unconnected Outgoing Call
       // (An outgoing call that is NOT immediately followed by a connection within 120 seconds or is explicitly failed)
       const isFailedOutgoing =
         ev.type === 'CALL' &&
@@ -528,43 +543,19 @@ export function evaluateCompliance(
           (ev.status === 'OUTGOING' && !isConnected));
 
       if (isFailedOutgoing) {
-        complianceLabels.set(ev.id, { effect: 'CREATED_OBLIGATION', note: 'Unconnected Outgoing Call' });
-
-        // Obligation B: Outgoing Reconnection (Deduplicated)
-        if (!openOutgoingObligation) {
-          const deadlineB = calculateDeadlineTimestamp(
-            evTime,
-            settings.reconnection_window_minutes,
-            settings.working_hours_schedule,
-            settings.clock_mode
-          );
-
-          openOutgoingObligation = {
-            id: `OBL-B-${ev.id}`,
-            target_phone: phone,
-            obligation_type: 'OUTGOING_RECONNECTION',
-            trigger_event_id: ev.id,
+        if (!firstFailedOutgoingAttempt) {
+          firstFailedOutgoingAttempt = {
             trigger_timestamp: evTime.toISOString(),
-            trigger_local_timestamp: toNairobiTimeString(evTime),
-            originating_agent_id: ev.agent_id,
-            originating_agent_name: agentName,
-            originating_agent_tag: agentTag,
-            deadline_timestamp: deadlineB.toISOString(),
-            deadline_local_timestamp: toNairobiTimeString(deadlineB),
-            status: 'OPEN',
-            threshold_minutes: settings.reconnection_window_minutes,
-            owed_action: settings.sms_followup_enabled ? 'CALLBACK_AND_SMS' : 'CALLBACK',
-            sms_sent: false,
+            agent_id: ev.agent_id,
+            tag: agentTag,
           };
         }
 
-        // Obligation C: SMS Follow-up (Applies ONLY to outgoing calls, if enabled)
-        if (settings.sms_followup_enabled && !openSmsObligation) {
-          const deadlineC = calculateDeadlineTimestamp(
+        // Obligation C: SMS Follow-up (Always created for unconnected outgoing calls)
+        if (!openSmsObligation) {
+          const deadlineC = calculateEndOfWorkingDayDeadline(
             evTime,
-            settings.sms_deadline_minutes,
-            settings.working_hours_schedule,
-            settings.clock_mode
+            settings.working_hours_schedule
           );
 
           openSmsObligation = {
@@ -589,12 +580,12 @@ export function evaluateCompliance(
     }
 
     // --- 3. EVALUATE LEFTOVER OPEN OBLIGATIONS AGAINST CURRENT CLOCK ---
-    [openIncomingObligation, openOutgoingObligation, openSmsObligation].forEach((obl) => {
+    [openIncomingObligation, openSmsObligation].forEach((obl) => {
       if (!obl) return;
       const deadline = new Date(obl.deadline_timestamp);
       if (evalNow > deadline) {
         // Window expired without connection / SMS
-        obl.status = 'BREACHED';
+        obl.status = 'CARRIED_OVER';
         obl.attributed_agent_id = obl.originating_agent_id;
         obl.attributed_agent_name = obl.originating_agent_name;
         obl.remaining_minutes = 0;
@@ -674,23 +665,20 @@ export function evaluateCompliance(
       phone_number: agent.phone_number,
       installed_at: agent.installed_at,
       last_active_at: agent.last_active_at,
-      archived_at: agent.archived_at,
 
       incoming_callback_met: 0,
       incoming_callback_total: 0,
-      incoming_callback_compliance_pct: null,
-
-      outgoing_reconnect_met: 0,
-      outgoing_reconnect_total: 0,
-      outgoing_reconnect_compliance_pct: null,
+      carried_over_incoming_count: 0,
+      incoming_returned_within_sla_count: 0,
+      incoming_returned_outside_sla_count: 0,
+      incoming_not_returned_count: 0,
+      incoming_returned_total_count: 0,
 
       sms_followup_met: 0,
       sms_followup_total: 0,
-      sms_followup_compliance_pct: null,
+      carried_over_sms_count: 0,
 
-      combined_compliance_pct: null,
       open_obligations_count: 0,
-      breaches_attributed_count: 0,
 
       calls_made: 0,
       calls_incoming: 0,
@@ -711,146 +699,134 @@ export function evaluateCompliance(
 
       if (obl.status === 'OPEN') {
         summary.open_obligations_count += 1;
-      } else if (obl.status === 'BREACHED') {
-        summary.breaches_attributed_count += 1;
       }
 
       if (obl.obligation_type === 'MISSED_INCOMING_CALLBACK') {
         if (obl.status !== 'OPEN') {
           summary.incoming_callback_total += 1;
-          if (obl.status === 'MET') summary.incoming_callback_met += 1;
-        }
-      } else if (obl.obligation_type === 'OUTGOING_RECONNECTION') {
-        if (obl.status !== 'OPEN') {
-          summary.outgoing_reconnect_total += 1;
-          if (obl.status === 'MET') summary.outgoing_reconnect_met += 1;
+          if (obl.status === 'MET') {
+            summary.incoming_callback_met += 1;
+            summary.incoming_returned_within_sla_count += 1;
+          } else if (obl.status === 'CARRIED_OVER') {
+            summary.carried_over_incoming_count = (summary.carried_over_incoming_count || 0) + 1;
+            if (obl.resolution_timestamp) {
+              summary.incoming_returned_outside_sla_count += 1;
+            } else {
+              summary.incoming_not_returned_count += 1;
+            }
+          }
+          summary.incoming_returned_total_count =
+            summary.incoming_returned_within_sla_count + summary.incoming_returned_outside_sla_count;
         }
       } else if (obl.obligation_type === 'SMS_FOLLOWUP') {
         if (obl.status !== 'OPEN') {
           summary.sms_followup_total += 1;
           if (obl.status === 'MET') summary.sms_followup_met += 1;
+          if (obl.status === 'CARRIED_OVER') summary.carried_over_sms_count = (summary.carried_over_sms_count || 0) + 1;
         }
       }
     }
   });
 
-  // Calculate percentages
+  // Calculate total carried over count per agent
   Object.values(agentSummaries).forEach((summary) => {
-    if (summary.incoming_callback_total > 0) {
-      summary.incoming_callback_compliance_pct = Math.round(
-        (summary.incoming_callback_met / summary.incoming_callback_total) * 100
-      );
-    }
-    if (summary.outgoing_reconnect_total > 0) {
-      summary.outgoing_reconnect_compliance_pct = Math.round(
-        (summary.outgoing_reconnect_met / summary.outgoing_reconnect_total) * 100
-      );
-    }
-    if (summary.sms_followup_total > 0) {
-      summary.sms_followup_compliance_pct = Math.round(
-        (summary.sms_followup_met / summary.sms_followup_total) * 100
-      );
-    }
-
-    const totalMet = summary.incoming_callback_met + summary.outgoing_reconnect_met + summary.sms_followup_met;
-    const totalAll = summary.incoming_callback_total + summary.outgoing_reconnect_total + summary.sms_followup_total;
-    if (totalAll > 0) {
-      summary.combined_compliance_pct = Math.round((totalMet / totalAll) * 100);
-    }
+    summary.carried_over_count = (summary.carried_over_incoming_count || 0) + (summary.carried_over_sms_count || 0);
   });
 
   // Tag group summaries
   const tagSummaries: Record<string, TagGroupCompliance> = {};
   tags.forEach((tag) => {
     const agentsInTag = Object.values(agentSummaries).filter((a) => a.tag === tag);
-    let totalMet = 0;
-    let totalEval = 0;
     let openCount = 0;
-    let breachesCount = 0;
+    let carriedOverCount = 0;
 
     agentsInTag.forEach((a) => {
-      totalMet += a.incoming_callback_met + a.outgoing_reconnect_met + a.sms_followup_met;
-      totalEval += a.incoming_callback_total + a.outgoing_reconnect_total + a.sms_followup_total;
       openCount += a.open_obligations_count;
-      breachesCount += a.breaches_attributed_count;
+      carriedOverCount += a.carried_over_count || 0;
     });
 
     tagSummaries[tag] = {
       tag,
       agent_count: agentsInTag.length,
-      compliance_pct: totalEval > 0 ? Math.round((totalMet / totalEval) * 100) : null,
       open_obligations_count: openCount,
-      breaches_count: breachesCount,
+      carried_over_count: carriedOverCount,
     };
   });
 
   // Overall Company Headline Totals
   let totalIncomingMet = 0;
   let totalIncomingFinal = 0;
-  let totalOutgoingMet = 0;
-  let totalOutgoingFinal = 0;
+  let totalIncomingReturnedWithinSla = 0;
+  let totalIncomingReturnedOutsideSla = 0;
+  let totalIncomingNotReturned = 0;
+
   let totalSmsMet = 0;
   let totalSmsFinal = 0;
   let totalOpenObligations = 0;
   let totalOpenIncoming = 0;
-  let totalOpenOutgoing = 0;
   let totalOpenSms = 0;
-  let totalBreachedIncoming = 0;
-  let totalBreachedOutgoing = 0;
-  let totalBreachedSms = 0;
+  let totalCarriedOverIncoming = 0;
+  let totalCarriedOverSms = 0;
 
   allObligations.forEach((obl) => {
     if (obl.status === 'OPEN') {
       totalOpenObligations += 1;
       if (obl.obligation_type === 'MISSED_INCOMING_CALLBACK') totalOpenIncoming += 1;
-      if (obl.obligation_type === 'OUTGOING_RECONNECTION') totalOpenOutgoing += 1;
       if (obl.obligation_type === 'SMS_FOLLOWUP') totalOpenSms += 1;
     } else {
       if (obl.obligation_type === 'MISSED_INCOMING_CALLBACK') {
         totalIncomingFinal += 1;
-        if (obl.status === 'MET') totalIncomingMet += 1;
-        if (obl.status === 'BREACHED') totalBreachedIncoming += 1;
-      } else if (obl.obligation_type === 'OUTGOING_RECONNECTION') {
-        totalOutgoingFinal += 1;
-        if (obl.status === 'MET') totalOutgoingMet += 1;
-        if (obl.status === 'BREACHED') totalBreachedOutgoing += 1;
+        if (obl.status === 'MET') {
+          totalIncomingMet += 1;
+          totalIncomingReturnedWithinSla += 1;
+        } else if (obl.status === 'CARRIED_OVER') {
+          totalCarriedOverIncoming += 1;
+          if (obl.resolution_timestamp) {
+            totalIncomingReturnedOutsideSla += 1;
+          } else {
+            totalIncomingNotReturned += 1;
+          }
+        }
       } else if (obl.obligation_type === 'SMS_FOLLOWUP') {
         totalSmsFinal += 1;
         if (obl.status === 'MET') totalSmsMet += 1;
-        if (obl.status === 'BREACHED') totalBreachedSms += 1;
+        if (obl.status === 'CARRIED_OVER') totalCarriedOverSms += 1;
       }
     }
   });
 
-  const headlineStats = {
-    incoming_callback_compliance_pct: totalIncomingFinal > 0 ? Math.round((totalIncomingMet / totalIncomingFinal) * 100) : null,
+  const avgTriesPerUnconnected = calculateAverageTriesPerUnconnectedNumber(
+    events,
+    settings.min_connection_duration
+  );
+
+  const headlineStats: HeadlineComplianceStats = {
     incoming_callback_met: totalIncomingMet,
     incoming_callback_total: totalIncomingFinal,
     open_incoming_count: totalOpenIncoming,
-    breached_incoming_count: totalBreachedIncoming,
+    carried_over_incoming_count: totalCarriedOverIncoming,
 
-    outgoing_reconnect_compliance_pct: totalOutgoingFinal > 0 ? Math.round((totalOutgoingMet / totalOutgoingFinal) * 100) : null,
-    outgoing_reconnect_met: totalOutgoingMet,
-    outgoing_reconnect_total: totalOutgoingFinal,
-    open_outgoing_count: totalOpenOutgoing,
-    breached_outgoing_count: totalBreachedOutgoing,
+    incoming_returned_within_sla_count: totalIncomingReturnedWithinSla,
+    incoming_returned_outside_sla_count: totalIncomingReturnedOutsideSla,
+    incoming_not_returned_count: totalIncomingNotReturned,
+    incoming_returned_total_count: totalIncomingReturnedWithinSla + totalIncomingReturnedOutsideSla,
 
-    sms_followup_compliance_pct: totalSmsFinal > 0 ? Math.round((totalSmsMet / totalSmsFinal) * 100) : null,
     sms_followup_met: totalSmsMet,
     sms_followup_total: totalSmsFinal,
     open_sms_count: totalOpenSms,
-    breached_sms_count: totalBreachedSms,
+    carried_over_sms_count: totalCarriedOverSms,
 
     open_obligations_count: totalOpenObligations,
+    avg_tries_per_unconnected_number: avgTriesPerUnconnected,
   };
 
-  // Actionable Callback List (All OPEN and BREACHED obligations sorted by urgency)
+  // Actionable Callback List (All OPEN and CARRIED_OVER obligations sorted by urgency)
   const actionableCallbackList = allObligations
-    .filter((obl) => obl.status === 'OPEN' || obl.status === 'BREACHED')
+    .filter((obl) => obl.status === 'OPEN' || obl.status === 'CARRIED_OVER')
     .sort((a, b) => {
-      // Prioritize BREACHED or lowest remaining minutes first
-      if (a.status === 'BREACHED' && b.status !== 'BREACHED') return -1;
-      if (a.status !== 'BREACHED' && b.status === 'BREACHED') return 1;
+      // Prioritize CARRIED_OVER or lowest remaining minutes first
+      if (a.status === 'CARRIED_OVER' && b.status !== 'CARRIED_OVER') return -1;
+      if (a.status !== 'CARRIED_OVER' && b.status === 'CARRIED_OVER') return 1;
       return (a.remaining_minutes ?? 999999) - (b.remaining_minutes ?? 999999);
     });
 
