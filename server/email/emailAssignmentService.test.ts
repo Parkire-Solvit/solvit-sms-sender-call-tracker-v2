@@ -44,6 +44,26 @@ test('named greeting is used before the default CS handler', () => {
   assert.equal(decision.method, 'NAME_MATCH');
 });
 
+test('sign-off names do not override the default CS handler', () => {
+  const namedMembers = members.map((member) => ({ ...member, routingNames: member.memberId === 2 ? ['Mercy'] : [] }));
+  const named = findNamedOwner('Hello team,\n\nKindly assist with this request.\n\nRegards,\nMercy', namedMembers);
+  const decision = chooseEmailOwner({ ...input, namedOwnerEmail: named, defaultOwnerEmail: 'a@example.com' }, namedMembers, []);
+  assert.equal(named, null);
+  assert.equal(decision.memberId, 1);
+  assert.equal(decision.method, 'DEFAULT');
+});
+
+test('a name outside the opening salutation is not treated as an assignment', () => {
+  const namedMembers = members.map((member) => ({ ...member, routingNames: member.memberId === 2 ? ['Irene'] : [] }));
+  assert.equal(findNamedOwner('Hello team,\n\nPlease ask Irene to review this later.', namedMembers), null);
+});
+
+test('common greeting variants identify the named owner', () => {
+  const namedMembers = members.map((member) => ({ ...member, routingNames: member.memberId === 2 ? ['Irene', 'Irene Odago'] : [] }));
+  assert.equal(findNamedOwner('Dear Irene Odago,\nPlease assist.', namedMembers), 'b@example.com');
+  assert.equal(findNamedOwner('Good morning Irene,\nPlease assist.', namedMembers), 'b@example.com');
+});
+
 test('generic CS mail goes to the configured default handler', () => {
   const decision = chooseEmailOwner({ ...input, defaultOwnerEmail: 'b@example.com' }, members, []);
   assert.equal(decision.memberId, 2);

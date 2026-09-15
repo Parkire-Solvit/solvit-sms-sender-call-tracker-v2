@@ -75,13 +75,21 @@ export function chooseEmailOwner(
 }
 
 export function findNamedOwner(preview: string | undefined, members: readonly EmailTeamMember[]): string | null {
-  const opening = (preview || '').slice(0, 300).toLowerCase();
-  if (!opening) return null;
+  // A person's name only routes the message when it appears in the opening
+  // salutation. Scanning the whole preview incorrectly treats signatures such
+  // as "Regards, Mercy" as instructions to assign the email to Mercy.
+  const openingLine = (preview || '')
+    .slice(0, 300)
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find(Boolean)
+    ?.toLowerCase();
+  if (!openingLine || !/^(?:hi|hello|dear|hey|good\s+(?:morning|afternoon|evening))\b/i.test(openingLine)) return null;
   const matches = members.filter((member) => member.email && [...(member.routingNames || []), member.email].some((rawName) => {
     const name = rawName.trim().toLowerCase();
     if (!name) return false;
     const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    return new RegExp(`(?:^|[^a-z])${escaped}(?:[^a-z]|$)`, 'i').test(opening);
+    return new RegExp(`(?:^|[^a-z])${escaped}(?:[^a-z]|$)`, 'i').test(openingLine);
   }));
   return matches.length === 1 ? matches[0].email!.toLowerCase() : null;
 }
