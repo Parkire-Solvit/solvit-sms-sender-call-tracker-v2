@@ -39,7 +39,6 @@ import { twMerge } from 'tailwind-merge';
 
 import { MasterSettingsModal } from './components/MasterSettingsModal';
 import { TurnaroundMetricsSection } from './components/TurnaroundMetricsSection';
-import { CallbackListSection } from './components/CallbackListSection';
 import { ContactHistoryModal } from './components/ContactHistoryModal';
 import { ComplianceAgentTable } from './components/ComplianceAgentTable';
 import { SearchContactBar } from './components/SearchContactBar';
@@ -1016,16 +1015,6 @@ function ComplianceAdminDashboard({
           selectedAgentId={selectedAgentId}
         />
       )}
-
-      {/* 3. ACTIONABLE CALLBACK & RECONNECTION OBLIGATIONS */}
-      <CallbackListSection
-        obligations={openObligations}
-        onInspectContact={(phone) => onInspectContact(phone)}
-        selectedTag={selectedTag}
-        selectedAgentId={selectedAgentId}
-        filterType={callbackListFilter}
-        onFilterChange={setCallbackListFilter}
-      />
 
       {/* Edit Agent Tag Modal */}
       {editingTag && (

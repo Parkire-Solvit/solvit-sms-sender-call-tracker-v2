@@ -6,10 +6,7 @@ import {
   Clock, 
   AlertCircle, 
   CheckCircle2, 
-  ChevronRight,
-  ShieldCheck,
-  Zap,
-  Info
+  ChevronRight
 } from 'lucide-react';
 import { 
   HeadlineComplianceStats, 
@@ -52,104 +49,54 @@ export const ConsolidatedMetricCards: React.FC<ConsolidatedMetricCardsProps> = (
     return `${Math.round(minutes)}m`;
   };
 
-  const getComplianceTheme = (pct: number | null | undefined, hasObligations: boolean) => {
-    if (!hasObligations || pct === null || pct === undefined) {
+  const getCardTheme = (carriedOverCount: number, openCount: number) => {
+    if (carriedOverCount > 0) {
       return {
-        cardBorder: 'border-slate-200 hover:border-slate-300',
-        cardBg: 'bg-white',
-        bannerBg: 'bg-slate-50',
-        primaryText: 'text-slate-600',
-        badgeBg: 'bg-slate-100 text-slate-700 border-slate-200',
-        barFill: 'bg-slate-300',
-        accentIcon: 'text-slate-400',
-        ringColor: 'focus:ring-slate-400',
+        cardBorder: 'border-rose-200/90 hover:border-rose-400',
+        cardBg: 'bg-gradient-to-b from-rose-50/20 via-white to-white',
+        primaryText: 'text-rose-700',
       };
     }
-    if (pct >= 90) {
-      return {
-        cardBorder: 'border-emerald-200/90 hover:border-emerald-400',
-        cardBg: 'bg-gradient-to-b from-emerald-50/30 via-white to-white',
-        bannerBg: 'bg-emerald-50/60',
-        primaryText: 'text-emerald-700',
-        badgeBg: 'bg-emerald-100/90 text-emerald-800 border-emerald-200',
-        barFill: 'bg-emerald-500',
-        accentIcon: 'text-emerald-600',
-        ringColor: 'focus:ring-emerald-400',
-      };
-    }
-    if (pct >= 75) {
+    if (openCount > 0) {
       return {
         cardBorder: 'border-amber-200/90 hover:border-amber-400',
-        cardBg: 'bg-gradient-to-b from-amber-50/30 via-white to-white',
-        bannerBg: 'bg-amber-50/60',
+        cardBg: 'bg-gradient-to-b from-amber-50/20 via-white to-white',
         primaryText: 'text-amber-700',
-        badgeBg: 'bg-amber-100/90 text-amber-800 border-amber-200',
-        barFill: 'bg-amber-500',
-        accentIcon: 'text-amber-600',
-        ringColor: 'focus:ring-amber-400',
       };
     }
     return {
-      cardBorder: 'border-rose-200/90 hover:border-rose-400',
-      cardBg: 'bg-gradient-to-b from-rose-50/30 via-white to-white',
-      bannerBg: 'bg-rose-50/60',
-      primaryText: 'text-rose-700',
-      badgeBg: 'bg-rose-100/90 text-rose-800 border-rose-200',
-      barFill: 'bg-rose-500',
-      accentIcon: 'text-rose-600',
-      ringColor: 'focus:ring-rose-400',
+      cardBorder: 'border-slate-200 hover:border-slate-300',
+      cardBg: 'bg-white',
+      primaryText: 'text-slate-800',
     };
   };
 
-  const getTatBadgeColor = (median: number | null | undefined, threshold: number) => {
-    if (median === null || median === undefined || isNaN(median)) {
-      return 'bg-slate-100 text-slate-600 border-slate-200';
-    }
-    if (median <= threshold * 0.5) {
-      return 'bg-emerald-100 text-emerald-800 border-emerald-200';
-    }
-    if (median <= threshold) {
-      return 'bg-amber-100 text-amber-800 border-amber-200';
-    }
-    return 'bg-rose-100 text-rose-800 border-rose-200 font-bold';
-  };
-
   // --- 1. CARD 1: INCOMING DATA ---
-  const incomingTotal = headlineStats?.incoming_callback_total || 0;
   const incomingMet = headlineStats?.incoming_callback_met || 0;
   const incomingOpen = headlineStats?.open_incoming_count || 0;
-  const incomingBreached = headlineStats?.breached_incoming_count || 0;
-  const incomingPct = headlineStats?.incoming_callback_compliance_pct;
-  const hasIncomingObligations = incomingTotal > 0 || incomingOpen > 0;
-  const incomingTheme = getComplianceTheme(incomingPct, hasIncomingObligations);
-  const incomingWindow = settings?.callback_window_minutes ?? 30;
+  const incomingCarriedOver = headlineStats?.carried_over_incoming_count || 0;
+  const incomingNotReturned = headlineStats?.incoming_not_returned_count ?? incomingCarriedOver;
+  const incomingReturnedTotal = headlineStats?.incoming_returned_total_count ?? incomingMet;
+  const incomingReturnedWithinSla = headlineStats?.incoming_returned_within_sla_count ?? incomingMet;
+  const incomingReturnedOutsideSla = headlineStats?.incoming_returned_outside_sla_count ?? 0;
+  const incomingTheme = getCardTheme(incomingNotReturned, incomingOpen);
   const incomingTAT = turnaroundGroup?.overall_callback_turnaround || turnaroundGroup?.missed_to_connection;
 
-  // --- 2. CARD 2: OUTGOING DATA ---
-  const outgoingTotal = headlineStats?.outgoing_reconnect_total || 0;
-  const outgoingMet = headlineStats?.outgoing_reconnect_met || 0;
-  const outgoingOpen = headlineStats?.open_outgoing_count || 0;
-  const outgoingBreached = headlineStats?.breached_outgoing_count || 0;
-  const outgoingPct = headlineStats?.outgoing_reconnect_compliance_pct;
-  const hasOutgoingObligations = outgoingTotal > 0 || outgoingOpen > 0;
-  const outgoingTheme = getComplianceTheme(outgoingPct, hasOutgoingObligations);
-  const reconnectionWindow = settings?.reconnection_window_minutes ?? 1440;
-  const reconnectionWindowLabel = reconnectionWindow >= 60 
-    ? `${Math.round(reconnectionWindow / 60)}h` 
-    : `${reconnectionWindow}m`;
+  // --- 2. CARD 2: OUTGOING DATA (Activity only, no compliance) ---
+  const outgoingDialled = summary?.total_calls_made || 0;
+  const outgoingConnected = summary?.total_calls_outgoing_connected || 0;
+  const outgoingNotConnected = Math.max(0, outgoingDialled - outgoingConnected);
+  const avgTriesPerUnconnected = headlineStats?.avg_tries_per_unconnected_number ?? 0;
+  const outgoingTheme = getCardTheme(0, 0);
   const outgoingTAT = turnaroundGroup?.failed_outgoing_to_connection || turnaroundGroup?.overall_connection_turnaround;
 
   // --- 3. CARD 3: SMS FOLLOW-UP DATA ---
-  const smsTotal = headlineStats?.sms_followup_total || 0;
   const smsMet = headlineStats?.sms_followup_met || 0;
   const smsOpen = headlineStats?.open_sms_count || 0;
-  const smsBreached = headlineStats?.breached_sms_count || 0;
-  const smsPct = headlineStats?.sms_followup_compliance_pct;
-  const hasSmsObligations = smsTotal > 0 || smsOpen > 0;
-  const smsTheme = getComplianceTheme(smsPct, hasSmsObligations);
-  const smsWindow = settings?.sms_deadline_minutes ?? 30;
+  const smsCarriedOver = headlineStats?.carried_over_sms_count || 0;
+  const smsTheme = getCardTheme(smsCarriedOver, smsOpen);
   const smsTAT = turnaroundGroup?.failed_outgoing_to_sms;
-  const smsCreated = smsTotal + smsOpen;
+  const smsEligible = headlineStats?.sms_followup_total ?? (summary?.total_calls_not_picked || 0);
   const smsSent = summary?.total_sms || smsMet;
 
   return (
@@ -176,95 +123,85 @@ export const ConsolidatedMetricCards: React.FC<ConsolidatedMetricCardsProps> = (
                 <h3 className="text-sm font-bold text-slate-900 leading-tight">
                   Incoming Calls
                 </h3>
-                <span className="text-[11px] text-slate-500">Callback Compliance</span>
+                <span className="text-[11px] text-slate-500">Daily Callback Tracking</span>
               </div>
             </div>
 
-            {/* Open Obligations Badge */}
-            <span 
-              className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-bold border transition-colors ${
-                incomingOpen > 0 
-                  ? 'bg-amber-100 text-amber-800 border-amber-200 animate-pulse' 
-                  : 'bg-slate-100 text-slate-700 border-slate-200'
-              }`}
-              title={`${incomingOpen} open incoming callback obligations currently pending`}
-            >
-              {incomingOpen > 0 ? (
-                <AlertCircle className="w-3 h-3 text-amber-600" />
-              ) : (
-                <CheckCircle2 className="w-3 h-3 text-emerald-600" />
-              )}
-              {incomingOpen} Open
-            </span>
-            {incomingBreached > 0 && (
-              <span
-                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-bold border bg-red-100 text-red-800 border-red-200"
-                title={`${incomingBreached} breached incoming callback obligations`}
+            {/* Badges */}
+            <div className="flex items-center gap-1.5 flex-wrap">
+              <span 
+                className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-bold border transition-colors ${
+                  incomingOpen > 0 
+                    ? 'bg-amber-100 text-amber-800 border-amber-200 animate-pulse' 
+                    : 'bg-slate-100 text-slate-700 border-slate-200'
+                }`}
+                title={`${incomingOpen} open incoming callback obligations currently pending`}
               >
-                <AlertCircle className="w-3 h-3 text-red-600" />
-                {incomingBreached} Breached
+                {incomingOpen > 0 ? (
+                  <AlertCircle className="w-3 h-3 text-amber-600" />
+                ) : (
+                  <CheckCircle2 className="w-3 h-3 text-emerald-600" />
+                )}
+                {incomingOpen} Open
               </span>
-            )}
+
+              <span 
+                className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-bold border transition-colors ${
+                  incomingNotReturned > 0 
+                    ? 'bg-rose-100 text-rose-800 border-rose-200 animate-pulse' 
+                    : 'bg-slate-100 text-slate-700 border-slate-200'
+                }`}
+                title={`${incomingNotReturned} unreturned incoming calls carried over`}
+              >
+                {incomingNotReturned > 0 ? (
+                  <AlertCircle className="w-3 h-3 text-rose-600" />
+                ) : (
+                  <CheckCircle2 className="w-3 h-3 text-slate-400" />
+                )}
+                {incomingNotReturned} Not Returned
+              </span>
+            </div>
           </div>
 
-          {/* LAYER 1 (DOMINANT): Compliance Verdict */}
-          <div className="my-3.5">
-            {hasIncomingObligations && incomingPct !== null && incomingPct !== undefined ? (
-              <div>
-                <div className="flex items-baseline gap-2">
-                  <span className={`text-4xl font-extrabold font-mono tracking-tight ${incomingTheme.primaryText}`}>
-                    {incomingPct}%
-                  </span>
-                  <span className="text-xs font-bold text-slate-600 uppercase tracking-wide">
-                    Compliance
-                  </span>
-                </div>
-                <p className="text-xs text-slate-500 mt-1 font-medium">
-                  {incomingMet} of {incomingTotal} missed calls returned in SLA
-                </p>
-              </div>
-            ) : (
-              <div>
-                <div className="text-lg sm:text-xl font-bold text-slate-600 tracking-tight">
-                  No obligations in period
-                </div>
-                <p className="text-xs text-slate-400 mt-1">
-                  0 missed calls requiring callback
-                </p>
-              </div>
-            )}
+          {/* Top Line: Raw Activity */}
+          <div className="my-2.5 grid grid-cols-3 gap-2">
+            <div className="bg-slate-50/90 rounded-xl p-2 border border-slate-100">
+              <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Received</div>
+              <div className="text-lg font-bold font-mono text-slate-900 mt-0.5">{summary?.total_calls_incoming || 0}</div>
+            </div>
+            <div className="bg-slate-50/90 rounded-xl p-2 border border-slate-100">
+              <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Answered</div>
+              <div className="text-lg font-bold font-mono text-emerald-600 mt-0.5">{summary?.total_calls_incoming_connected || 0}</div>
+            </div>
+            <div className="bg-slate-50/90 rounded-xl p-2 border border-slate-100">
+              <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Missed</div>
+              <div className="text-lg font-bold font-mono text-amber-600 mt-0.5">{summary?.total_calls_missed || 0}</div>
+            </div>
+          </div>
+
+          {/* Breakdown Block */}
+          <div className="my-2.5 grid grid-cols-2 gap-2">
+            <div className="bg-slate-50/90 rounded-xl p-2 border border-slate-100">
+              <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Total Returned</div>
+              <div className="text-lg font-bold font-mono text-indigo-700 mt-0.5">{incomingReturnedTotal}</div>
+            </div>
+            <div className="bg-slate-50/90 rounded-xl p-2 border border-slate-100">
+              <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Within SLA</div>
+              <div className="text-lg font-bold font-mono text-emerald-700 mt-0.5">{incomingReturnedWithinSla}</div>
+            </div>
+            <div className="bg-slate-50/90 rounded-xl p-2 border border-slate-100">
+              <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Outside SLA</div>
+              <div className="text-lg font-bold font-mono text-amber-700 mt-0.5">{incomingReturnedOutsideSla}</div>
+            </div>
+            <div className={`rounded-xl p-2 border ${incomingNotReturned > 0 ? 'bg-rose-50/80 border-rose-200' : 'bg-slate-50/90 border-slate-100'}`}>
+              <div className={`text-[10px] font-bold uppercase tracking-wider ${incomingNotReturned > 0 ? 'text-rose-600' : 'text-slate-500'}`}>Not Returned</div>
+              <div className={`text-lg font-bold font-mono mt-0.5 ${incomingNotReturned > 0 ? 'text-rose-700' : 'text-slate-700'}`}>{incomingNotReturned}</div>
+            </div>
           </div>
         </div>
 
-        {/* LAYER 2 (SUPPORTING): Activity Volume Breakdown */}
+        {/* Turnaround Speed & Window */}
         <div className="mt-2 pt-3 border-t border-slate-100/90 space-y-3">
-          <div className="bg-slate-50/80 rounded-xl p-2.5 border border-slate-100">
-            <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">
-              Activity Volume
-            </div>
-            <div className="grid grid-cols-3 gap-1 text-center divide-x divide-slate-200/80">
-              <div>
-                <div className="text-xs font-bold text-slate-800 font-mono">
-                  {summary.total_calls_incoming || 0}
-                </div>
-                <div className="text-[10px] text-slate-500">Received</div>
-              </div>
-              <div>
-                <div className="text-xs font-bold text-emerald-600 font-mono">
-                  {summary.total_calls_incoming_connected || 0}
-                </div>
-                <div className="text-[10px] text-slate-500">Answered</div>
-              </div>
-              <div>
-                <div className="text-xs font-bold text-rose-600 font-mono">
-                  {summary.total_calls_missed || 0}
-                </div>
-                <div className="text-[10px] text-slate-500">Missed</div>
-              </div>
-            </div>
-          </div>
-
-          {/* Secondary Metric: Turnaround Speed & Window */}
           <div className="flex items-center justify-between text-xs text-slate-600 bg-white p-2 rounded-lg border border-slate-100">
             <div className="flex items-center gap-1.5">
               <Clock className="w-3.5 h-3.5 text-slate-400" />
@@ -278,10 +215,10 @@ export const ConsolidatedMetricCards: React.FC<ConsolidatedMetricCardsProps> = (
             </div>
             <div className="flex items-center gap-1">
               <span 
-                className={`px-1.5 py-0.5 rounded text-[10px] font-semibold border ${getTatBadgeColor(incomingTAT?.median, incomingWindow)}`}
-                title={`Target callback window configured in Master Settings: ${incomingWindow} minutes`}
+                className="px-2 py-0.5 rounded text-[10px] font-semibold border bg-indigo-50 text-indigo-700 border-indigo-200"
+                title={`Target deadline: within ${settings?.callback_window_minutes || 30} minutes`}
               >
-                {incomingWindow}m SLA
+                {settings?.callback_window_minutes || 30}m SLA
               </span>
             </div>
           </div>
@@ -303,7 +240,7 @@ export const ConsolidatedMetricCards: React.FC<ConsolidatedMetricCardsProps> = (
         className={`group relative rounded-2xl border ${outgoingTheme.cardBorder} ${outgoingTheme.cardBg} p-5 shadow-xs hover:shadow-md transition-all duration-200 cursor-pointer flex flex-col justify-between`}
         role="button"
         tabIndex={0}
-        aria-label="Filter outgoing reconnection obligations"
+        aria-label="Filter outgoing dialling activity and turnaround"
       >
         <div>
           {/* Card Header */}
@@ -316,95 +253,34 @@ export const ConsolidatedMetricCards: React.FC<ConsolidatedMetricCardsProps> = (
                 <h3 className="text-sm font-bold text-slate-900 leading-tight">
                   Outgoing Calls
                 </h3>
-                <span className="text-[11px] text-slate-500">Reconnection Compliance</span>
+                <span className="text-[11px] text-slate-500">Daily Dialling Activity</span>
               </div>
             </div>
-
-            {/* Open Obligations Badge */}
-            <span 
-              className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-bold border transition-colors ${
-                outgoingOpen > 0 
-                  ? 'bg-amber-100 text-amber-800 border-amber-200 animate-pulse' 
-                  : 'bg-slate-100 text-slate-700 border-slate-200'
-              }`}
-              title={`${outgoingOpen} open reconnection obligations currently pending`}
-            >
-              {outgoingOpen > 0 ? (
-                <AlertCircle className="w-3 h-3 text-amber-600" />
-              ) : (
-                <CheckCircle2 className="w-3 h-3 text-emerald-600" />
-              )}
-              {outgoingOpen} Open
-            </span>
-            {outgoingBreached > 0 && (
-              <span
-                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-bold border bg-red-100 text-red-800 border-red-200"
-                title={`${outgoingBreached} breached reconnection obligations`}
-              >
-                <AlertCircle className="w-3 h-3 text-red-600" />
-                {outgoingBreached} Breached
-              </span>
-            )}
           </div>
 
-          {/* LAYER 1 (DOMINANT): Compliance Verdict */}
-          <div className="my-3.5">
-            {hasOutgoingObligations && outgoingPct !== null && outgoingPct !== undefined ? (
-              <div>
-                <div className="flex items-baseline gap-2">
-                  <span className={`text-4xl font-extrabold font-mono tracking-tight ${outgoingTheme.primaryText}`}>
-                    {outgoingPct}%
-                  </span>
-                  <span className="text-xs font-bold text-slate-600 uppercase tracking-wide">
-                    Compliance
-                  </span>
-                </div>
-                <p className="text-xs text-slate-500 mt-1 font-medium">
-                  {outgoingMet} of {outgoingTotal} unconnected dials reconnected in SLA
-                </p>
-              </div>
-            ) : (
-              <div>
-                <div className="text-lg sm:text-xl font-bold text-slate-600 tracking-tight">
-                  No obligations in period
-                </div>
-                <p className="text-xs text-slate-400 mt-1">
-                  0 unpicked calls requiring reconnection
-                </p>
-              </div>
-            )}
+          {/* 4 PLAIN ACTIVITY COUNTS */}
+          <div className="my-3.5 grid grid-cols-2 gap-2.5">
+            <div className="bg-slate-50/90 rounded-xl p-2.5 border border-slate-100">
+              <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Dialled</div>
+              <div className="text-xl font-bold font-mono text-slate-900 mt-0.5">{outgoingDialled}</div>
+            </div>
+            <div className="bg-slate-50/90 rounded-xl p-2.5 border border-slate-100">
+              <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Connected</div>
+              <div className="text-xl font-bold font-mono text-emerald-600 mt-0.5">{outgoingConnected}</div>
+            </div>
+            <div className="bg-slate-50/90 rounded-xl p-2.5 border border-slate-100">
+              <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Not Connected</div>
+              <div className="text-xl font-bold font-mono text-amber-700 mt-0.5">{outgoingNotConnected}</div>
+            </div>
+            <div className="bg-slate-50/90 rounded-xl p-2.5 border border-slate-100">
+              <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Avg Tries / Unconnected</div>
+              <div className="text-xl font-bold font-mono text-blue-700 mt-0.5">{avgTriesPerUnconnected}</div>
+            </div>
           </div>
         </div>
 
-        {/* LAYER 2 (SUPPORTING): Activity Volume Breakdown */}
+        {/* Turnaround Speed & Window */}
         <div className="mt-2 pt-3 border-t border-slate-100/90 space-y-3">
-          <div className="bg-slate-50/80 rounded-xl p-2.5 border border-slate-100">
-            <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">
-              Activity Volume
-            </div>
-            <div className="grid grid-cols-3 gap-1 text-center divide-x divide-slate-200/80">
-              <div>
-                <div className="text-xs font-bold text-slate-800 font-mono">
-                  {summary.total_calls_made || 0}
-                </div>
-                <div className="text-[10px] text-slate-500">Dialled</div>
-              </div>
-              <div>
-                <div className="text-xs font-bold text-emerald-600 font-mono">
-                  {summary.total_calls_outgoing_connected || 0}
-                </div>
-                <div className="text-[10px] text-slate-500">Connected</div>
-              </div>
-              <div>
-                <div className="text-xs font-bold text-amber-600 font-mono">
-                  {summary.total_calls_not_picked || 0}
-                </div>
-                <div className="text-[10px] text-slate-500">Unconnected</div>
-              </div>
-            </div>
-          </div>
-
-          {/* Secondary Metric: Turnaround Speed & Window */}
           <div className="flex items-center justify-between text-xs text-slate-600 bg-white p-2 rounded-lg border border-slate-100">
             <div className="flex items-center gap-1.5">
               <Clock className="w-3.5 h-3.5 text-slate-400" />
@@ -414,14 +290,6 @@ export const ConsolidatedMetricCards: React.FC<ConsolidatedMetricCardsProps> = (
               </span>
               <span className="text-[11px] text-slate-400 font-medium">
                 (Med: {formatMinutes(outgoingTAT?.median)})
-              </span>
-            </div>
-            <div className="flex items-center gap-1">
-              <span 
-                className={`px-1.5 py-0.5 rounded text-[10px] font-semibold border ${getTatBadgeColor(outgoingTAT?.median, reconnectionWindow)}`}
-                title={`Target reconnection window configured in Master Settings: ${reconnectionWindowLabel}`}
-              >
-                {reconnectionWindowLabel} SLA
               </span>
             </div>
           </div>
@@ -456,95 +324,69 @@ export const ConsolidatedMetricCards: React.FC<ConsolidatedMetricCardsProps> = (
                 <h3 className="text-sm font-bold text-slate-900 leading-tight">
                   SMS Follow-Up
                 </h3>
-                <span className="text-[11px] text-slate-500">Outgoing Missed vs SMS Dispatched</span>
+                <span className="text-[11px] text-slate-500">Daily Follow-up SMS Tracking</span>
               </div>
             </div>
 
-            {/* Open Obligations Badge */}
-            <span 
-              className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-bold border transition-colors ${
-                smsOpen > 0 
-                  ? 'bg-amber-100 text-amber-800 border-amber-200 animate-pulse' 
-                  : 'bg-slate-100 text-slate-700 border-slate-200'
-              }`}
-              title={`${smsOpen} open SMS follow-up obligations currently pending`}
-            >
-              {smsOpen > 0 ? (
-                <AlertCircle className="w-3 h-3 text-amber-600" />
-              ) : (
-                <CheckCircle2 className="w-3 h-3 text-emerald-600" />
-              )}
-              {smsOpen} Open
-            </span>
-            {smsBreached > 0 && (
-              <span
-                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-bold border bg-red-100 text-red-800 border-red-200"
-                title={`${smsBreached} breached SMS follow-up obligations`}
+            {/* Badges */}
+            <div className="flex items-center gap-1.5 flex-wrap">
+              <span 
+                className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-bold border transition-colors ${
+                  smsOpen > 0 
+                    ? 'bg-amber-100 text-amber-800 border-amber-200 animate-pulse' 
+                    : 'bg-slate-100 text-slate-700 border-slate-200'
+                }`}
+                title={`${smsOpen} open SMS follow-up obligations currently pending`}
               >
-                <AlertCircle className="w-3 h-3 text-red-600" />
-                {smsBreached} Breached
+                {smsOpen > 0 ? (
+                  <AlertCircle className="w-3 h-3 text-amber-600" />
+                ) : (
+                  <CheckCircle2 className="w-3 h-3 text-emerald-600" />
+                )}
+                {smsOpen} Open
               </span>
-            )}
+
+              <span 
+                className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-bold border transition-colors ${
+                  smsCarriedOver > 0 
+                    ? 'bg-rose-100 text-rose-800 border-rose-200 animate-pulse' 
+                    : 'bg-slate-100 text-slate-700 border-slate-200'
+                }`}
+                title={`${smsCarriedOver} SMS follow-up obligations carried over to next period`}
+              >
+                {smsCarriedOver > 0 ? (
+                  <AlertCircle className="w-3 h-3 text-rose-600" />
+                ) : (
+                  <CheckCircle2 className="w-3 h-3 text-slate-400" />
+                )}
+                {smsCarriedOver} Carried Over
+              </span>
+            </div>
           </div>
 
-          {/* LAYER 1 (DOMINANT): Compliance Verdict */}
-          <div className="my-3.5">
-            {hasSmsObligations && smsPct !== null && smsPct !== undefined ? (
-              <div>
-                <div className="flex items-baseline gap-2">
-                  <span className={`text-4xl font-extrabold font-mono tracking-tight ${smsTheme.primaryText}`}>
-                    {smsPct}%
-                  </span>
-                  <span className="text-xs font-bold text-slate-600 uppercase tracking-wide">
-                    Compliance
-                  </span>
-                </div>
-                <p className="text-xs text-slate-500 mt-1 font-medium">
-                  {smsMet} of {smsTotal} SMS dispatched within {smsWindow}m SLA deadline
-                </p>
-              </div>
-            ) : (
-              <div>
-                <div className="text-lg sm:text-xl font-bold text-slate-600 tracking-tight">
-                  No obligations in period
-                </div>
-                <p className="text-xs text-slate-400 mt-1">
-                  0 unpicked dials requiring follow-up SMS
-                </p>
-              </div>
-            )}
+          {/* PLAIN COUNT GRID */}
+          <div className="my-3.5 grid grid-cols-2 gap-2.5">
+            <div className="bg-slate-50/90 rounded-xl p-2.5 border border-slate-100">
+              <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Eligible</div>
+              <div className="text-xl font-bold font-mono text-slate-900 mt-0.5">{smsEligible}</div>
+            </div>
+            <div className="bg-slate-50/90 rounded-xl p-2.5 border border-slate-100">
+              <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Sent</div>
+              <div className="text-xl font-bold font-mono text-purple-600 mt-0.5">{smsSent}</div>
+            </div>
+            <div className="bg-slate-50/90 rounded-xl p-2.5 border border-slate-100">
+              <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Returned within period</div>
+              <div className="text-xl font-bold font-mono text-purple-700 mt-0.5">{smsMet}</div>
+            </div>
+            <div className={`rounded-xl p-2.5 border ${smsCarriedOver > 0 ? 'bg-rose-50/80 border-rose-200' : 'bg-slate-50/90 border-slate-100'}`}>
+              <div className={`text-[10px] font-bold uppercase tracking-wider ${smsCarriedOver > 0 ? 'text-rose-600' : 'text-slate-500'}`}>Carried over to next period</div>
+              <div className={`text-xl font-bold font-mono mt-0.5 ${smsCarriedOver > 0 ? 'text-rose-700' : 'text-slate-700'}`}>{smsCarriedOver}</div>
+            </div>
           </div>
         </div>
 
-        {/* LAYER 2 (SUPPORTING): Activity Volume Breakdown */}
+        {/* Turnaround Speed & Window */}
         <div className="mt-2 pt-3 border-t border-slate-100/90 space-y-3">
-          <div className="bg-slate-50/80 rounded-xl p-2.5 border border-slate-100">
-            <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">
-              Outgoing Missed vs SMS Sent
-            </div>
-            <div className="grid grid-cols-3 gap-1 text-center divide-x divide-slate-200/80">
-              <div>
-                <div className="text-xs font-bold text-amber-700 font-mono">
-                  {summary?.total_calls_not_picked ?? smsCreated}
-                </div>
-                <div className="text-[10px] text-slate-500">Unconnected</div>
-              </div>
-              <div>
-                <div className="text-xs font-bold text-purple-600 font-mono">
-                  {smsSent}
-                </div>
-                <div className="text-[10px] text-slate-500">SMS Sent</div>
-              </div>
-              <div>
-                <div className="text-xs font-bold text-amber-600 font-mono">
-                  {smsOpen}
-                </div>
-                <div className="text-[10px] text-slate-500">Outstanding</div>
-              </div>
-            </div>
-          </div>
-
-          {/* Secondary Metric: Turnaround Speed & Window */}
           <div className="flex items-center justify-between text-xs text-slate-600 bg-white p-2 rounded-lg border border-slate-100">
             <div className="flex items-center gap-1.5">
               <Clock className="w-3.5 h-3.5 text-slate-400" />
@@ -558,10 +400,10 @@ export const ConsolidatedMetricCards: React.FC<ConsolidatedMetricCardsProps> = (
             </div>
             <div className="flex items-center gap-1">
               <span 
-                className={`px-1.5 py-0.5 rounded text-[10px] font-semibold border ${getTatBadgeColor(smsTAT?.median, smsWindow)}`}
-                title={`Target SMS deadline configured in Master Settings: ${smsWindow} minutes`}
+                className="px-2 py-0.5 rounded text-[10px] font-semibold border bg-purple-50 text-purple-700 border-purple-200"
+                title="Target deadline: End of the working day"
               >
-                {smsWindow}m SLA
+                Within the Day
               </span>
             </div>
           </div>

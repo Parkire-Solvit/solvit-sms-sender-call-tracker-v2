@@ -60,7 +60,7 @@ export type ObligationType =
   | 'OUTGOING_RECONNECTION'     // Obligation B
   | 'SMS_FOLLOWUP';            // Obligation C
 
-export type ObligationStatus = 'MET' | 'BREACHED' | 'OPEN';
+export type ObligationStatus = 'MET' | 'CARRIED_OVER' | 'OPEN';
 
 export interface Obligation {
   id: string;
@@ -95,7 +95,7 @@ export interface MeanMedianMetric {
   median: number | null;
   count: number;
   threshold: number;
-  status: 'OPTIMAL' | 'WARNING' | 'BREACHED' | 'NO_DATA';
+  status: 'OPTIMAL' | 'WARNING' | 'CARRIED_OVER' | 'NO_DATA';
 }
 
 export interface TurnaroundMetricsGroup {
@@ -121,24 +121,23 @@ export interface AgentComplianceSummary {
   phone_number?: string;
   installed_at?: string;
   last_active_at?: string;
-  archived_at?: string | null;
   
-  // Compliance
+  // Obligations plain counts
   incoming_callback_met: number;
   incoming_callback_total: number;
-  incoming_callback_compliance_pct: number | null;
+  carried_over_incoming_count?: number;
 
-  outgoing_reconnect_met: number;
-  outgoing_reconnect_total: number;
-  outgoing_reconnect_compliance_pct: number | null;
+  incoming_returned_within_sla_count: number;
+  incoming_returned_outside_sla_count: number;
+  incoming_not_returned_count: number;
+  incoming_returned_total_count: number;
 
   sms_followup_met: number;
   sms_followup_total: number;
-  sms_followup_compliance_pct: number | null;
+  carried_over_sms_count?: number;
 
-  combined_compliance_pct: number | null;
+  carried_over_count?: number;
   open_obligations_count: number;
-  breaches_attributed_count: number;
 
   // Raw activity counts
   calls_made: number;
@@ -152,30 +151,31 @@ export interface AgentComplianceSummary {
 }
 
 export interface HeadlineComplianceStats {
-  incoming_callback_compliance_pct: number | null;
   incoming_callback_met: number;
   incoming_callback_total: number;
   open_incoming_count: number;
+  carried_over_incoming_count?: number;
 
-  outgoing_reconnect_compliance_pct: number | null;
-  outgoing_reconnect_met: number;
-  outgoing_reconnect_total: number;
-  open_outgoing_count: number;
+  incoming_returned_within_sla_count: number;
+  incoming_returned_outside_sla_count: number;
+  incoming_not_returned_count: number;
+  incoming_returned_total_count: number;
 
-  sms_followup_compliance_pct: number | null;
   sms_followup_met: number;
   sms_followup_total: number;
   open_sms_count: number;
+  carried_over_sms_count?: number;
 
   open_obligations_count: number;
+  avg_tries_per_unconnected_number: number;
 }
 
 export interface TagGroupCompliance {
   tag: string;
   agent_count: number;
-  compliance_pct: number | null;
+  compliance_pct?: number | null;
   open_obligations_count: number;
-  breaches_count: number;
+  carried_over_count: number;
 }
 
 export interface ContactThreadObligationSummary {
@@ -192,6 +192,6 @@ export interface ContactThreadObligationSummary {
 
 export interface EventComplianceLabel {
   eventId: number;
-  complianceEffect: 'CREATED_OBLIGATION' | 'CLEARED_OBLIGATION' | 'BREACHED_OBLIGATION' | null;
+  complianceEffect: 'CREATED_OBLIGATION' | 'CLEARED_OBLIGATION' | 'CARRIED_OVER_OBLIGATION' | null;
   description?: string;
 }
