@@ -23,6 +23,11 @@ export interface GraphDeltaPage {
   '@odata.deltaLink'?: string;
 }
 
+interface GraphMessagePage {
+  value: GraphMessage[];
+  '@odata.nextLink'?: string;
+}
+
 export interface GraphMailFolder { id: string; displayName: string }
 
 export interface GraphConfig {
@@ -125,6 +130,31 @@ export class GraphClient {
     const page = await this.getJson<GraphDeltaPage>(url);
     if (!Array.isArray(page.value)) throw new Error('Invalid Graph delta response');
     return page;
+  }
+
+  async getRecentFolderMessages(mailbox: string, folder: string, since: Date): Promise<GraphMessage[]> {
+    if (!folder || folder.includes('/') || Number.isNaN(since.getTime())) throw new Error('Invalid recent-message query');
+    const path = `${this.mailboxPath(mailbox)}/mailFolders/${encodeURIComponent(folder)}/messages`;
+    const base = `${graphOrigin}${path}`;
+    const params = new URLSearchParams({
+      '$select': 'id,conversationId,internetMessageId,subject,from,toRecipients,ccRecipients,bodyPreview,webLink,receivedDateTime',
+      '$filter': `receivedDateTime ge ${since.toISOString()}`,
+      '$orderby': 'receivedDateTime asc',
+      '$top': '100',
+    });
+    let url: string | undefined = `${base}?${params}`;
+    const messages: GraphMessage[] = [];
+    for (let pageNumber = 0; url && pageNumber < 10; pageNumber++) {
+      const parsed = new URL(url);
+      if (parsed.origin !== graphOrigin || parsed.pathname.toLowerCase() !== new URL(base).pathname.toLowerCase()) {
+        throw new Error('Invalid Graph recent-message continuation');
+      }
+      const page: GraphMessagePage = await this.getJson(url);
+      if (!Array.isArray(page.value)) throw new Error('Invalid Graph recent-message response');
+      messages.push(...page.value);
+      url = page['@odata.nextLink'];
+    }
+    return messages;
   }
 
   async getMessageHeaders(mailbox: string, messageId: string): Promise<GraphMessage> {

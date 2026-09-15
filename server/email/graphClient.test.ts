@@ -101,3 +101,20 @@ test('discovers the CS Team folder within an allowed personal mailbox', async ()
   assert.match(calls[1], /users\/mercy%40example\.com\/mailFolders/);
   assert.doesNotMatch(calls[1], /body|attachments/i);
 });
+
+test('reconciles recent Inbox messages without requesting bodies or attachments', async () => {
+  const calls: string[] = [];
+  const http = async (input: string | URL | Request) => {
+    calls.push(String(input));
+    return new Response(JSON.stringify(calls.length === 1
+      ? { access_token: 'mock-token', expires_in: 3600 }
+      : { value: [{ id: 'recent-id', subject: 'Direct message' }] }), { status: 200 });
+  };
+  const client = new GraphClient(config, http as typeof fetch);
+  const messages = await client.getRecentFolderMessages('mercy@example.com', 'inbox', new Date('2026-09-15T12:00:00Z'));
+  assert.equal(messages[0].id, 'recent-id');
+  assert.match(calls[1], /mailFolders\/inbox\/messages\?/);
+  assert.match(decodeURIComponent(calls[1]), /receivedDateTime ge 2026-09-15T12:00:00.000Z/);
+  assert.doesNotMatch(calls[1], /attachments/i);
+  assert.doesNotMatch(calls[1], /body,/i);
+});

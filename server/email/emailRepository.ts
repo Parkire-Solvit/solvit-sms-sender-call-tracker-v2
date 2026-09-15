@@ -130,7 +130,7 @@ export async function storeInbound(
   const sla = startEmailSla(receivedAt, settings);
   return transaction(async (client) => {
     const existing = await client.query<SqlRow>('SELECT email_thread_id FROM email_messages WHERE internet_message_id=$1', [internetId]);
-    if (existing.rows[0]) return Number(existing.rows[0].email_thread_id);
+    if (existing.rows[0]) return null;
     const identity = emailIdentity(message);
     const referenced = [identity.inReplyTo, ...identity.references].filter((value): value is string => Boolean(value));
     if (referenced.length) {

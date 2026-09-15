@@ -36,6 +36,10 @@ const emptyMetrics = (): FolderSyncMetrics => ({
   repliesUnmatched: 0,
 });
 
+const reconciliationIntervalMs = 5 * 60_000;
+const reconciliationLookbackMs = 6 * 60 * 60_000;
+let lastInboxReconciliationAt = 0;
+
 function addMetrics(total: FolderSyncMetrics, next: FolderSyncMetrics): void {
   total.processed += next.processed;
   total.inboundTracked += next.inboundTracked;
@@ -119,6 +123,28 @@ async function syncFolder(config: EmailRuntimeConfig, mailbox: string, folder: s
   return metrics;
 }
 
+async function reconcileRecentInbox(config: EmailRuntimeConfig, mailbox: string): Promise<FolderSyncMetrics> {
+  const metrics = emptyMetrics();
+  const settings = await getEmailSettings();
+  const since = new Date(Math.max(config.monitoringStart.getTime(), Date.now() - reconciliationLookbackMs));
+  const items = await config.graph.getRecentFolderMessages(mailbox, 'inbox', since);
+  for (const item of items) {
+    const addressedDirectlyToMailbox = (item.toRecipients || []).some((recipient) =>
+      recipient.emailAddress?.address?.trim().toLowerCase() === mailbox);
+    if (!isAddressedToGroup(item, config.groupAddress) && !addressedDirectlyToMailbox) continue;
+    const sender = item.from?.emailAddress?.address?.trim().toLowerCase();
+    if (sender && config.mailboxes.includes(sender)) continue;
+    const detail = await config.graph.getMessageHeaders(mailbox, item.id);
+    const message: GraphMessage = { ...item, internetMessageHeaders: detail.internetMessageHeaders };
+    if (!emailIdentity(message).internetMessageId) continue;
+    if (await storeInbound(mailbox, config.groupAddress, message, settings, config.monitoringStart)) {
+      metrics.processed++;
+      metrics.inboundTracked++;
+    }
+  }
+  return metrics;
+}
+
 export async function runEmailSync(config: EmailRuntimeConfig): Promise<EmailSyncResult> {
   const lockClient = await getPostgresPool().connect();
   const lockKey = 872_615_901;
@@ -148,6 +174,18 @@ export async function runEmailSync(config: EmailRuntimeConfig): Promise<EmailSyn
         const code = error instanceof Error ? error.message : 'Unknown sync error';
         await recordSyncFailure(mailbox, 'inbox', code).catch(() => undefined);
         console.error('[EMAIL] Inbox sync failure', { mailbox, code });
+      }
+    }
+    const shouldReconcileInbox = Date.now() - lastInboxReconciliationAt >= reconciliationIntervalMs;
+    if (shouldReconcileInbox) {
+      lastInboxReconciliationAt = Date.now();
+      for (const mailbox of config.mailboxes) {
+        try { addMetrics(metrics, await reconcileRecentInbox(config, mailbox)); }
+        catch (error) {
+          const code = error instanceof Error ? error.message : 'Unknown reconciliation error';
+          await recordSyncFailure(mailbox, 'inbox-reconciliation', code).catch(() => undefined);
+          console.error('[EMAIL] Inbox reconciliation failure', { mailbox, code });
+        }
       }
     }
     for (const mailbox of config.mailboxes) {
