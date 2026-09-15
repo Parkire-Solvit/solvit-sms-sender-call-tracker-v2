@@ -13,6 +13,38 @@ export interface EmailRuntimeConfig {
   graph: GraphClient;
 }
 
+type FolderSyncMetrics = {
+  processed: number;
+  inboundTracked: number;
+  sentScanned: number;
+  replyCandidates: number;
+  repliesMatched: number;
+  repliesUnmatched: number;
+};
+
+export type EmailSyncResult = FolderSyncMetrics & {
+  alerts: number;
+  skipped: boolean;
+};
+
+const emptyMetrics = (): FolderSyncMetrics => ({
+  processed: 0,
+  inboundTracked: 0,
+  sentScanned: 0,
+  replyCandidates: 0,
+  repliesMatched: 0,
+  repliesUnmatched: 0,
+});
+
+function addMetrics(total: FolderSyncMetrics, next: FolderSyncMetrics): void {
+  total.processed += next.processed;
+  total.inboundTracked += next.inboundTracked;
+  total.sentScanned += next.sentScanned;
+  total.replyCandidates += next.replyCandidates;
+  total.repliesMatched += next.repliesMatched;
+  total.repliesUnmatched += next.repliesUnmatched;
+}
+
 function parseMailboxList(value: string): string[] {
   return value.split(',').map((mailbox) => mailbox.trim().toLowerCase()).filter(Boolean);
 }
@@ -36,9 +68,9 @@ export function configuredEmailRuntime(): EmailRuntimeConfig | null {
   };
 }
 
-async function syncFolder(config: EmailRuntimeConfig, mailbox: string, folder: string, direction: 'inbox' | 'sentitems'): Promise<number> {
+async function syncFolder(config: EmailRuntimeConfig, mailbox: string, folder: string, direction: 'inbox' | 'sentitems'): Promise<FolderSyncMetrics> {
   let link = await getDeltaLink(mailbox, folder);
-  let processed = 0;
+  const metrics = emptyMetrics();
   const settings = await getEmailSettings();
   for (let pageNumber = 0; pageNumber < 25; pageNumber++) {
     const page = await config.graph.getDeltaPage(mailbox, folder, link);
@@ -57,11 +89,23 @@ async function syncFolder(config: EmailRuntimeConfig, mailbox: string, folder: s
         const detail = await config.graph.getMessageHeaders(mailbox, item.id);
         const message: GraphMessage = { ...item, internetMessageHeaders: detail.internetMessageHeaders };
         if (!emailIdentity(message).internetMessageId) continue;
-        if (await storeInbound(mailbox, config.groupAddress, message, settings, config.monitoringStart)) processed++;
+        if (await storeInbound(mailbox, config.groupAddress, message, settings, config.monitoringStart)) {
+          metrics.processed++;
+          metrics.inboundTracked++;
+        }
       } else {
+        metrics.sentScanned++;
         const detail = await config.graph.getMessageHeaders(mailbox, item.id);
         const message: GraphMessage = { ...item, internetMessageHeaders: detail.internetMessageHeaders };
-        if (await storeOutbound(mailbox, message)) processed++;
+        const identity = emailIdentity(message);
+        const isReplyCandidate = Boolean(identity.inReplyTo || identity.references.length);
+        if (isReplyCandidate) metrics.replyCandidates++;
+        if (await storeOutbound(mailbox, message)) {
+          metrics.processed++;
+          metrics.repliesMatched++;
+        } else if (isReplyCandidate) {
+          metrics.repliesUnmatched++;
+        }
       }
     }
     const next = page['@odata.nextLink'] || page['@odata.deltaLink'];
@@ -70,26 +114,26 @@ async function syncFolder(config: EmailRuntimeConfig, mailbox: string, folder: s
     link = next;
     if (page['@odata.deltaLink']) break;
   }
-  return processed;
+  return metrics;
 }
 
-export async function runEmailSync(config: EmailRuntimeConfig): Promise<{ processed: number; alerts: number; skipped: boolean }> {
+export async function runEmailSync(config: EmailRuntimeConfig): Promise<EmailSyncResult> {
   const lockClient = await getPostgresPool().connect();
   const lockKey = 872_615_901;
   let acquired = false;
   try {
     const lock = await lockClient.query<{ locked: boolean }>('SELECT pg_try_advisory_lock($1) AS locked', [lockKey]);
     acquired = Boolean(lock.rows[0]?.locked);
-    if (!acquired) return { processed: 0, alerts: 0, skipped: true };
+    if (!acquired) return { ...emptyMetrics(), alerts: 0, skipped: true };
     await ensureEmailTeam(config.mailboxes);
-    let processed = 0;
+    const metrics = emptyMetrics();
     // Process all incoming copies before Sent Items so references can resolve.
     const teamFolderName = (process.env.MICROSOFT_CS_FOLDER_NAME || 'Team').trim().toLowerCase();
     for (const mailbox of config.mailboxes) {
       try {
         const folders = await config.graph.getMailFolders(mailbox);
         const team = folders.find((folder) => folder.displayName.trim().toLowerCase() === teamFolderName);
-        if (team) processed += await syncFolder(config, mailbox, team.id, 'inbox');
+        if (team) addMetrics(metrics, await syncFolder(config, mailbox, team.id, 'inbox'));
         else await recordOptionalFolderAbsent(mailbox);
       } catch (error) {
         const code = error instanceof Error ? error.message : 'Unknown sync error';
@@ -97,7 +141,7 @@ export async function runEmailSync(config: EmailRuntimeConfig): Promise<{ proces
         console.error('[EMAIL] Team sync failure', { mailbox, code });
       }
       // Some tenants deliver CS copies to Inbox as well. Dedupe is by RFC ID.
-      try { processed += await syncFolder(config, mailbox, 'inbox', 'inbox'); }
+      try { addMetrics(metrics, await syncFolder(config, mailbox, 'inbox', 'inbox')); }
       catch (error) {
         const code = error instanceof Error ? error.message : 'Unknown sync error';
         await recordSyncFailure(mailbox, 'inbox', code).catch(() => undefined);
@@ -105,7 +149,7 @@ export async function runEmailSync(config: EmailRuntimeConfig): Promise<{ proces
       }
     }
     for (const mailbox of config.mailboxes) {
-      try { processed += await syncFolder(config, mailbox, 'sentitems', 'sentitems'); }
+      try { addMetrics(metrics, await syncFolder(config, mailbox, 'sentitems', 'sentitems')); }
       catch (error) {
         const code = error instanceof Error ? error.message : 'Unknown sync error';
         await recordSyncFailure(mailbox, 'sentitems', code).catch(() => undefined);
@@ -113,8 +157,10 @@ export async function runEmailSync(config: EmailRuntimeConfig): Promise<{ proces
       }
     }
     const alerts = await emitDueAlerts(await getEmailSettings());
-    if (processed || alerts) console.info('[EMAIL] Sync cycle', { processed, alerts });
-    return { processed, alerts, skipped: false };
+    if (metrics.processed || metrics.sentScanned || alerts) {
+      console.info('[EMAIL] Sync cycle', { ...metrics, alerts });
+    }
+    return { ...metrics, alerts, skipped: false };
   } finally {
     if (acquired) await lockClient.query('SELECT pg_advisory_unlock($1)', [lockKey]).catch(() => undefined);
     lockClient.release();
