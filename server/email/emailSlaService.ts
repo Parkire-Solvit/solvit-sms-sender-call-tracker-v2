@@ -80,15 +80,11 @@ export function dueEmailAlerts(
     if (responseRemaining <= settings.responseMinutes - settings.responseWarningMinutes) due.push('RESPONSE_WARNING');
     if (responseRemaining <= settings.responseMinutes - settings.responseUrgentMinutes) due.push('RESPONSE_URGENT');
     if (now >= state.responseDueAt) due.push('RESPONSE_BREACH');
-  } else if (state.responseBreached) {
-    due.push('RESPONSE_BREACH');
   }
   if (!state.resolvedAt) {
     if (resolutionRemaining <= settings.resolutionMinutes - settings.resolutionWarningMinutes) due.push('RESOLUTION_WARNING');
     if (resolutionRemaining <= settings.resolutionMinutes - settings.resolutionUrgentMinutes) due.push('RESOLUTION_URGENT');
     if (now >= state.resolutionDueAt) due.push('RESOLUTION_BREACH');
-  } else if (state.resolutionBreached) {
-    due.push('RESOLUTION_BREACH');
   }
   return due.filter((alert) => !alreadyEmitted.has(alert));
 }

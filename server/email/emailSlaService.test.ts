@@ -57,6 +57,16 @@ test('a resolved thread stops future warnings', () => {
   assert.deepEqual(dueEmailAlerts(state, settings, at(200), new Set()), []);
 });
 
+test('completed stages do not create new active breach alerts', () => {
+  const answeredLate = recordFirstResponse(startEmailSla(received, settings), at(31));
+  assert.equal(answeredLate.responseBreached, true);
+  assert.deepEqual(dueEmailAlerts(answeredLate, settings, at(40), new Set()), []);
+
+  const resolvedLate = resolveEmailSla(answeredLate, at(121));
+  assert.equal(resolvedLate.resolutionBreached, true);
+  assert.deepEqual(dueEmailAlerts(resolvedLate, settings, at(130), new Set()), []);
+});
+
 test('Friday afternoon deadlines resume Monday morning', () => {
   const friday = new Date('2026-09-18T13:50:00.000Z'); // 4:50 PM Nairobi
   const state = startEmailSla(friday, settings);

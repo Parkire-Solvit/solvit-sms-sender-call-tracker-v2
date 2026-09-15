@@ -210,6 +210,11 @@ export async function storeOutbound(sourceMailbox: string, message: GraphMessage
        status=CASE WHEN status='RESOLVED' THEN status ELSE 'IN_PROGRESS' END,updated_at=now() WHERE id=$1`,
       [threadId, state.firstResponseAt, state.responseBreached],
     );
+    await client.query(
+      `UPDATE email_alerts SET acknowledged_at=now()
+       WHERE email_thread_id=$1 AND acknowledged_at IS NULL AND alert_type LIKE 'RESPONSE_%'`,
+      [threadId],
+    );
     return threadId;
   });
 }
@@ -303,13 +308,26 @@ export async function assignEmailThread(threadId: number, memberId: number): Pro
 }
 
 export async function resolveEmailThread(threadId: number, actor: string, ownerEmail: string | null, note: string | null): Promise<boolean> {
-  const result = await getPostgresPool().query(
-    resolveEmailThreadSql, [threadId, ownerEmail, actor, note],
-  );
-  return Boolean(result.rowCount);
+  return transaction(async (client) => {
+    const result = await client.query(resolveEmailThreadSql, [threadId, ownerEmail, actor, note]);
+    if (!result.rowCount) return false;
+    await client.query(
+      `UPDATE email_alerts SET acknowledged_at=now()
+       WHERE email_thread_id=$1 AND acknowledged_at IS NULL AND alert_type LIKE 'RESOLUTION_%'`,
+      [threadId],
+    );
+    return true;
+  });
 }
 
 export async function emitDueAlerts(settings: EmailSlaSettings): Promise<number> {
+  // Reconcile alerts created before automatic lifecycle closing was introduced.
+  await getPostgresPool().query(
+    `UPDATE email_alerts a SET acknowledged_at=now()
+     FROM email_threads t WHERE a.email_thread_id=t.id AND a.acknowledged_at IS NULL AND
+       ((a.alert_type LIKE 'RESPONSE_%' AND t.first_response_at IS NOT NULL) OR
+        (a.alert_type LIKE 'RESOLUTION_%' AND t.resolved_at IS NOT NULL))`,
+  );
   const rows = (await getPostgresPool().query<SqlRow>(
     `SELECT * FROM email_threads WHERE received_at > now()-interval '30 days' AND
      (resolved_at IS NULL OR response_breached OR resolution_breached)`,
@@ -342,7 +360,11 @@ export async function listEmailAlerts(ownerEmail?: string): Promise<SqlRow[]> {
     `SELECT a.id,a.email_thread_id,a.alert_type,a.emitted_at,t.subject,t.customer_email,m.display_name AS owner_name
      FROM email_alerts a JOIN email_threads t ON t.id=a.email_thread_id
      LEFT JOIN email_team_members m ON m.id=t.assigned_member_id
-     WHERE a.acknowledged_at IS NULL ${ownerEmail ? 'AND m.email=$1' : ''}
+     WHERE a.acknowledged_at IS NULL AND
+       ((a.alert_type='EMAIL_UNASSIGNED' AND t.status='UNASSIGNED') OR
+        (a.alert_type LIKE 'RESPONSE_%' AND t.first_response_at IS NULL) OR
+        (a.alert_type LIKE 'RESOLUTION_%' AND t.resolved_at IS NULL))
+     ${ownerEmail ? 'AND m.email=$1' : ''}
      ORDER BY a.emitted_at DESC LIMIT 100`, ownerEmail ? [ownerEmail.toLowerCase()] : [],
   )).rows;
 }
