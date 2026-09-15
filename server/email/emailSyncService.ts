@@ -88,8 +88,6 @@ async function syncFolder(config: EmailRuntimeConfig, mailbox: string, folder: s
         const addressedDirectlyToMailbox = (item.toRecipients || []).some((recipient) =>
           recipient.emailAddress?.address?.trim().toLowerCase() === mailbox);
         if (!isAddressedToGroup(item, config.groupAddress) && !addressedDirectlyToMailbox) continue;
-        const sender = item.from?.emailAddress?.address?.trim().toLowerCase();
-        if (sender && config.mailboxes.includes(sender)) continue;
         // Headers identify customer follow-ups. Only request them for messages
         // addressed to CS; full bodies and attachments are never retrieved.
         const detail = await config.graph.getMessageHeaders(mailbox, item.id);
@@ -132,8 +130,6 @@ async function reconcileRecentInbox(config: EmailRuntimeConfig, mailbox: string)
     const addressedDirectlyToMailbox = (item.toRecipients || []).some((recipient) =>
       recipient.emailAddress?.address?.trim().toLowerCase() === mailbox);
     if (!isAddressedToGroup(item, config.groupAddress) && !addressedDirectlyToMailbox) continue;
-    const sender = item.from?.emailAddress?.address?.trim().toLowerCase();
-    if (sender && config.mailboxes.includes(sender)) continue;
     const detail = await config.graph.getMessageHeaders(mailbox, item.id);
     const message: GraphMessage = { ...item, internetMessageHeaders: detail.internetMessageHeaders };
     if (!emailIdentity(message).internetMessageId) continue;
