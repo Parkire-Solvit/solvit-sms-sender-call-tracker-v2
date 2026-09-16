@@ -55,14 +55,14 @@ function SlaCell({ completedAt, dueAt, label, now, settings }: {
     const late = new Date(completedAt) > new Date(dueAt);
     return <div className="space-y-1">
       <p className="font-semibold text-slate-800">{label}</p>
-      <time dateTime={completedAt} className="block whitespace-nowrap text-xs text-slate-600">{emailCompletionTime(completedAt)}</time>
+      <time dateTime={completedAt} className="block text-xs text-slate-600">{emailCompletionTime(completedAt)}</time>
       <span className={`inline-block rounded-full px-2 py-0.5 text-xs font-medium ${late ? 'bg-red-50 text-red-700' : 'bg-emerald-50 text-emerald-700'}`}>
         {emailCompletionOutcome(completedAt, dueAt, settings?.holidayDates)}
       </span>
     </div>;
   }
   const overdue = new Date(dueAt).getTime() <= now;
-  return <span className={`whitespace-nowrap font-medium ${overdue ? 'text-red-700' : 'text-slate-700'}`}>
+  return <span className={`font-medium ${overdue ? 'text-red-700' : 'text-slate-700'}`}>
     {emailDeadlineLabel(dueAt, false, now, settings)}
   </span>;
 }
@@ -162,7 +162,7 @@ export function EmailSlaSection({ employeeEmail }: { employeeEmail?: string }) {
     ['Resolved today', summary.resolved_today], ...(!isEmployee ? [['Unassigned', summary.unassigned] as [string, number]] : []),
   ] : [];
 
-  return <main className="max-w-7xl mx-auto px-6 py-7 space-y-6">
+  return <main className="max-w-7xl mx-auto px-3 sm:px-6 py-7 space-y-6">
     <div className="flex flex-wrap items-center justify-between gap-3">
       <div><h2 className="text-xl font-bold flex items-center gap-2"><Mail className="w-5 h-5 text-[#ff353e]" /> {isEmployee ? 'My CS emails' : 'Email SLA'}</h2>
         <p className="text-sm text-slate-500">{isEmployee ? `Assigned to ${employeeEmail}. Reply in Outlook; this queue updates after sync.` : 'CS group email response and resolution tracking'}</p></div>
@@ -211,19 +211,36 @@ export function EmailSlaSection({ employeeEmail }: { employeeEmail?: string }) {
         {!isEmployee && <select aria-label="Email owner filter" value={owner} onChange={(event) => setOwner(event.target.value)} className="border rounded-lg px-2 py-1.5 text-sm"><option value="">All owners</option>{members.map((member) => <option key={member.id} value={member.email}>{member.display_name}</option>)}</select>}
         <input aria-label="Email received date filter" title="Filter by received date" type="date" value={receivedDate} onChange={(event) => setReceivedDate(event.target.value)} className="border rounded-lg px-2 py-1.5 text-sm" />
       </div></div>
-        <div className="overflow-x-auto rounded-xl border border-slate-100"><table className="w-full min-w-[1200px] text-sm [&_th]:px-3 [&_td]:px-3 [&_td]:py-3"><thead className="bg-slate-50"><tr className="text-left text-slate-500 border-b"><th className="py-3">Received</th><th>Customer / subject</th><th>Owner</th><th>Response</th><th>Resolution</th><th>Status</th><th>Actions</th></tr></thead><tbody>
-          {threads.map((thread) => <tr key={thread.id} className="border-b border-slate-100 align-top hover:bg-slate-50/60">
-            <td className="py-3 whitespace-nowrap">{new Date(thread.received_at).toLocaleString('en-KE', { timeZone: 'Africa/Nairobi' })}</td>
-            <td className="max-w-xs"><p className="font-medium truncate">{thread.subject || '(no subject)'}</p><p className="text-xs text-slate-500 truncate">{thread.customer_email}</p>{thread.assignment_reason && <p className="text-xs text-slate-400 truncate" title={thread.assignment_reason}>{thread.assignment_reason}</p>}</td>
-            <td>{thread.owner_name || 'Unassigned'}</td>
-            <td><SlaCell completedAt={thread.first_response_at} dueAt={thread.response_due_at} label="Responded" now={now} settings={thread.sla_settings_snapshot} /></td>
-            <td><SlaCell completedAt={thread.resolved_at} dueAt={thread.resolution_due_at} label="Resolved" now={now} settings={thread.sla_settings_snapshot} /></td>
-            <td>{thread.status.replaceAll('_', ' ')}{thread.resolved_at && <p className="mt-1 text-xs text-slate-500">By {thread.resolved_by || 'unrecorded'} · {new Date(thread.resolved_at).toLocaleString('en-KE', { timeZone: 'Africa/Nairobi' })}</p>}{thread.resolution_note && <p className="text-xs text-slate-500">{thread.resolution_note}</p>}</td>
-            <td className="min-w-44">{thread.outlook_web_link && <a href={thread.outlook_web_link} target="_blank" rel="noopener noreferrer" title="Open email in Outlook" aria-label={`Open ${thread.subject || 'email'} in Outlook`} className="mr-2 inline-flex h-9 w-9 items-center justify-center rounded-lg border border-blue-200 bg-blue-50 text-blue-700 transition-colors hover:bg-blue-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2"><Mail aria-hidden="true" className="h-4 w-4" /></a>}{!isEmployee && thread.status !== 'RESOLVED' && <select aria-label={`Assign thread ${thread.id}`} value="" disabled={busy} onChange={(event) => void action(`/api/email/threads/${thread.id}/assign`, { memberId: Number(event.target.value) })} className="border rounded px-1 py-1 text-xs"><option value="">Assign / reassign</option>{members.filter((member) => member.is_monitored).map((member) => <option key={member.id} value={member.id}>{member.display_name}</option>)}</select>}
-              {thread.status !== 'RESOLVED' && (!isEmployee || thread.status === 'IN_PROGRESS') && <button disabled={busy} onClick={() => { setError(''); setResolveTarget(thread); setResolutionNote(''); }} className="ml-1 text-xs text-emerald-700 whitespace-nowrap">Mark resolved</button>}</td>
-          </tr>)}
-          {!threads.length && <tr><td colSpan={7} className="text-center py-8 text-slate-500">No email conversations match this filter.</td></tr>}
-        </tbody></table></div>
+        <div className="space-y-3">
+          {threads.map((thread) => <article key={thread.id} className="grid min-w-0 gap-4 rounded-xl border border-slate-200 p-4 md:grid-cols-2 xl:grid-cols-3">
+            <div className="min-w-0">
+              <span className={`inline-block rounded-full px-2 py-1 text-xs font-medium ${thread.status === 'RESOLVED' ? 'bg-emerald-50 text-emerald-700' : thread.status === 'IN_PROGRESS' ? 'bg-blue-50 text-blue-700' : 'bg-amber-50 text-amber-800'}`}>{thread.status.replaceAll('_', ' ')}</span>
+              <p className="mt-2 break-words font-semibold">{thread.subject || '(no subject)'}</p>
+              <p className="mt-1 break-all text-xs text-slate-500">{thread.customer_email}</p>
+              <p className="mt-2 text-xs text-slate-600">Owner: {thread.owner_name || 'Unassigned'}</p>
+              <p className="mt-1 text-xs text-slate-500">Received {emailCompletionTime(thread.received_at)}</p>
+            </div>
+            <div className="grid min-w-0 grid-cols-2 gap-3 rounded-lg bg-slate-50 p-3">
+              <div className="min-w-0"><p className="mb-2 text-xs text-slate-500">Response SLA</p><SlaCell completedAt={thread.first_response_at} dueAt={thread.response_due_at} label="Responded" now={now} settings={thread.sla_settings_snapshot} /></div>
+              <div className="min-w-0"><p className="mb-2 text-xs text-slate-500">Resolution SLA</p><SlaCell completedAt={thread.resolved_at} dueAt={thread.resolution_due_at} label="Resolved" now={now} settings={thread.sla_settings_snapshot} /></div>
+            </div>
+            <div className="min-w-0 space-y-3">
+              <div className="flex flex-wrap items-center gap-2">
+                {thread.outlook_web_link && <a href={thread.outlook_web_link} target="_blank" rel="noopener noreferrer" title="Open email in Outlook" aria-label={`Open ${thread.subject || 'email'} in Outlook`} className="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100 focus-visible:ring-2 focus-visible:ring-blue-500"><Mail aria-hidden="true" className="h-4 w-4" /></a>}
+                {thread.status !== 'RESOLVED' && (!isEmployee || thread.status === 'IN_PROGRESS') && <button disabled={busy} onClick={() => { setError(''); setResolveTarget(thread); setResolutionNote(''); }} className="rounded-lg border border-emerald-200 px-3 py-2 text-xs text-emerald-700">Mark resolved</button>}
+              </div>
+              <details className="text-xs text-slate-600"><summary className="cursor-pointer font-medium">Details{!isEmployee && thread.status !== 'RESOLVED' ? ' / reassign' : ''}</summary>
+                <div className="mt-2 space-y-2 break-words">
+                  {thread.assignment_reason && <p>{thread.assignment_reason}</p>}
+                  {thread.resolved_at && <p>Resolved by {thread.resolved_by || 'unrecorded'}</p>}
+                  {thread.resolution_note && <p>{thread.resolution_note}</p>}
+                  {!isEmployee && thread.status !== 'RESOLVED' && <select aria-label={`Assign thread ${thread.id}`} value="" disabled={busy} onChange={(event) => void action(`/api/email/threads/${thread.id}/assign`, { memberId: Number(event.target.value) })} className="w-full min-w-0 rounded-lg border px-2 py-2"><option value="">Assign / reassign</option>{members.filter((member) => member.is_monitored).map((member) => <option key={member.id} value={member.id}>{member.display_name}</option>)}</select>}
+                </div>
+              </details>
+            </div>
+          </article>)}
+          {!threads.length && <p className="py-8 text-center text-sm text-slate-500">No email conversations match this filter.</p>}
+        </div>
       </section>
     </>}
     {resolveTarget && <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4">
