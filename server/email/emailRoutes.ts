@@ -2,6 +2,8 @@ import { Router, type RequestHandler } from 'express';
 import { isAdminRequest, requireAdmin } from '../auth/adminSession';
 import { emailMember } from '../auth/emailMemberSession';
 import { getPostgresPool } from '../../db';
+import { emailReportPeriod } from './emailReporting';
+import { getEmailReport, emailReportWorkbook } from './emailReportService';
 import type { EmailRuntimeConfig } from './emailSyncService';
 import { getEmailSyncHealth, runEmailSync } from './emailSyncService';
 import {
@@ -46,6 +48,30 @@ export function createEmailRouter(config: EmailRuntimeConfig | null): Router {
   });
 
   router.get('/summary', safe(async (_request, response) => response.json(await emailSummary(response.locals.emailOwner || undefined))));
+  router.get(['/reports', '/reports/export'], safe(async (request, response) => {
+    const now = new Date();
+    let period;
+    let owner: string;
+    try {
+      const kind = request.query.kind;
+      if (kind !== 'weekly' && kind !== 'monthly' && kind !== 'custom') throw new Error('Choose weekly, monthly or custom');
+      if (typeof request.query.anchor !== 'string') throw new Error('Choose a report date');
+      period = emailReportPeriod(kind, request.query.anchor, typeof request.query.end === 'string' ? request.query.end : undefined);
+      if (period.start > now || period.endExclusive.getTime()-period.start.getTime() > 366*86400000) throw new Error('Choose a past/current period of at most 366 days');
+      // Never trust an owner parameter from an employee session.
+      owner = response.locals.emailOwner || (typeof request.query.owner === 'string' ? request.query.owner.trim().toLowerCase() : '');
+      if (owner && !config!.mailboxes.includes(owner)) throw new Error('Invalid report owner');
+    } catch (cause) { return response.status(400).json({ error: (cause as Error).message }); }
+    const report = await getEmailReport(period, now, owner || undefined);
+    if (request.path === '/reports/export') {
+      response.setHeader('Content-Type','application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+      response.setHeader('Content-Disposition',`attachment; filename="email-sla-${request.query.kind}-${request.query.anchor}.xlsx"`);
+      response.setHeader('Cache-Control','no-store');
+      return response.send(emailReportWorkbook(report));
+    }
+    response.setHeader('Cache-Control','no-store');
+    response.json(report);
+  }));
   router.get('/threads', safe(async (request, response) => {
     const filter = typeof request.query.filter === 'string' ? request.query.filter : 'all';
     const validFilters = new Set(['all', 'unassigned', 'awaiting', 'in-progress', 'resolved', 'breached']);

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { AlertTriangle, Mail, RefreshCw, Settings2 } from 'lucide-react';
 import { emailDeadlineLabel } from '../../shared/emailDeadlineLabel';
 import { emailCompletionOutcome, emailCompletionTime } from '../../shared/emailCompletionLabel';
+import { EmailSlaReports } from './EmailSlaReports';
 
 type Thread = {
   id: number; subject: string; customer_email: string; received_at: string;
@@ -69,6 +70,8 @@ function SlaCell({ completedAt, dueAt, label, now, settings }: {
 
 export function EmailSlaSection({ employeeEmail }: { employeeEmail?: string }) {
   const isEmployee = Boolean(employeeEmail);
+  const [view, setView] = useState<'queue' | 'reports'>('queue');
+  const [reportRefreshToken, setReportRefreshToken] = useState(0);
   const [enabled, setEnabled] = useState<boolean | null>(null);
   const [threads, setThreads] = useState<Thread[]>([]);
   const [members, setMembers] = useState<TeamMember[]>([]);
@@ -168,12 +171,14 @@ export function EmailSlaSection({ employeeEmail }: { employeeEmail?: string }) {
         <p className="text-sm text-slate-500">{isEmployee ? `Assigned to ${employeeEmail}. Reply in Outlook; this queue updates after sync.` : 'CS group email response and resolution tracking'}</p></div>
       <div className="flex gap-2">
         {!isEmployee && <button onClick={() => setShowSettings(!showSettings)} className="px-3 py-2 rounded-lg border text-sm flex items-center gap-2"><Settings2 className="w-4 h-4" /> Settings</button>}
-        <button onClick={() => void refresh()} className="px-3 py-2 rounded-lg border text-sm flex items-center gap-2"><RefreshCw className="w-4 h-4" /> Refresh</button>
+        <button onClick={() => { void refresh(); setReportRefreshToken(value => value + 1); }} className="px-3 py-2 rounded-lg border text-sm flex items-center gap-2"><RefreshCw className="w-4 h-4" /> Refresh</button>
       </div>
     </div>
     {error && <p role="alert" className="p-3 rounded-lg bg-red-50 text-red-700 text-sm">{error}</p>}
     {enabled === false && <div className="p-5 rounded-xl border bg-amber-50 text-amber-900 text-sm">Email SLA is not enabled on this service yet. Existing call and SMS reporting is unaffected.</div>}
-    {enabled && <>
+    {enabled && <nav aria-label="Email SLA views" className="flex gap-2 border-b border-slate-200 pb-3">{(['queue','reports'] as const).map(tab => <button key={tab} onClick={() => setView(tab)} aria-pressed={view === tab} className={`rounded-lg px-4 py-2 text-sm font-medium ${view === tab ? 'bg-blue-50 text-blue-700' : 'text-slate-500 hover:bg-slate-100'}`}>{tab === 'queue' ? 'Email queue' : 'Reports'}</button>)}</nav>}
+    {enabled && view === 'reports' && <EmailSlaReports employeeEmail={employeeEmail} members={members} refreshToken={reportRefreshToken} />}
+    {enabled && view === 'queue' && <>
       {isEmployee && assignmentNotices.length > 0 && <section className="p-4 rounded-xl border border-blue-200 bg-blue-50">
         <h3 className="font-semibold text-sm">New assignments ({assignmentNotices.length})</h3>
         <div className="mt-2 space-y-2">{assignmentNotices.map((notice) => <div key={notice.id} className="flex flex-wrap justify-between gap-2 text-xs">
