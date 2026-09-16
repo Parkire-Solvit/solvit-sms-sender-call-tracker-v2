@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { AlertTriangle, Mail, RefreshCw, Settings2 } from 'lucide-react';
 import { emailDeadlineLabel } from '../../shared/emailDeadlineLabel';
+import { emailCompletionOutcome, emailCompletionTime } from '../../shared/emailCompletionLabel';
 
 type Thread = {
   id: number; subject: string; customer_email: string; received_at: string;
@@ -45,6 +46,25 @@ async function api<T>(url: string, init?: RequestInit): Promise<T> {
   const data = await response.json();
   if (!response.ok) throw new Error(data.error || `Request failed (${response.status})`);
   return data as T;
+}
+
+function SlaCell({ completedAt, dueAt, label, now, settings }: {
+  completedAt: string | null; dueAt: string; label: string; now: number; settings: Settings | null;
+}) {
+  if (completedAt) {
+    const late = new Date(completedAt) > new Date(dueAt);
+    return <div className="space-y-1">
+      <p className="font-semibold text-slate-800">{label}</p>
+      <time dateTime={completedAt} className="block whitespace-nowrap text-xs text-slate-600">{emailCompletionTime(completedAt)}</time>
+      <span className={`inline-block rounded-full px-2 py-0.5 text-xs font-medium ${late ? 'bg-red-50 text-red-700' : 'bg-emerald-50 text-emerald-700'}`}>
+        {emailCompletionOutcome(completedAt, dueAt, settings?.holidayDates)}
+      </span>
+    </div>;
+  }
+  const overdue = new Date(dueAt).getTime() <= now;
+  return <span className={`whitespace-nowrap font-medium ${overdue ? 'text-red-700' : 'text-slate-700'}`}>
+    {emailDeadlineLabel(dueAt, false, now, settings)}
+  </span>;
 }
 
 export function EmailSlaSection({ employeeEmail }: { employeeEmail?: string }) {
@@ -186,18 +206,18 @@ export function EmailSlaSection({ employeeEmail }: { employeeEmail?: string }) {
             <label className="flex items-center gap-1"><input type="checkbox" checked={member.round_robin_enabled} disabled={busy} onChange={(event) => void updateMember(member, 'roundRobinEnabled', event.target.checked)} />Rotation</label></span>
         </div>)}</div>
       </section>}
-      <section className="p-4 rounded-xl border bg-white"><div className="flex flex-wrap items-center justify-between gap-3 mb-4"><h3 className="font-semibold">CS emails</h3><div className="flex flex-wrap gap-2">
+      <section className="p-5 rounded-2xl border border-slate-200 bg-white shadow-sm"><div className="flex flex-wrap items-center justify-between gap-3 mb-4"><div><h3 className="font-semibold">CS emails</h3><p className="mt-1 text-xs text-slate-500">All times are Nairobi time (UTC+3). SLA counts Mon–Fri, 08:00–17:00, excluding configured holidays. Auto-refreshes every 30 seconds.</p></div><div className="flex flex-wrap gap-2">
         <select aria-label="Email status filter" value={filter} onChange={(event) => setFilter(event.target.value)} className="border rounded-lg px-2 py-1.5 text-sm">{filters.filter(([value]) => !isEmployee || value !== 'unassigned').map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select>
         {!isEmployee && <select aria-label="Email owner filter" value={owner} onChange={(event) => setOwner(event.target.value)} className="border rounded-lg px-2 py-1.5 text-sm"><option value="">All owners</option>{members.map((member) => <option key={member.id} value={member.email}>{member.display_name}</option>)}</select>}
         <input aria-label="Email received date filter" title="Filter by received date" type="date" value={receivedDate} onChange={(event) => setReceivedDate(event.target.value)} className="border rounded-lg px-2 py-1.5 text-sm" />
       </div></div>
-        <div className="overflow-x-auto"><table className="w-full text-sm"><thead><tr className="text-left text-slate-500 border-b"><th className="py-2">Received</th><th>Customer / subject</th><th>Owner</th><th>Response</th><th>Resolution</th><th>Status</th><th>Actions</th></tr></thead><tbody>
-          {threads.map((thread) => <tr key={thread.id} className="border-b align-top">
+        <div className="overflow-x-auto rounded-xl border border-slate-100"><table className="w-full min-w-[1200px] text-sm [&_th]:px-3 [&_td]:px-3 [&_td]:py-3"><thead className="bg-slate-50"><tr className="text-left text-slate-500 border-b"><th className="py-3">Received</th><th>Customer / subject</th><th>Owner</th><th>Response</th><th>Resolution</th><th>Status</th><th>Actions</th></tr></thead><tbody>
+          {threads.map((thread) => <tr key={thread.id} className="border-b border-slate-100 align-top hover:bg-slate-50/60">
             <td className="py-3 whitespace-nowrap">{new Date(thread.received_at).toLocaleString('en-KE', { timeZone: 'Africa/Nairobi' })}</td>
             <td className="max-w-xs"><p className="font-medium truncate">{thread.subject || '(no subject)'}</p><p className="text-xs text-slate-500 truncate">{thread.customer_email}</p>{thread.assignment_reason && <p className="text-xs text-slate-400 truncate" title={thread.assignment_reason}>{thread.assignment_reason}</p>}</td>
             <td>{thread.owner_name || 'Unassigned'}</td>
-            <td className={thread.response_breached || (!thread.first_response_at && new Date(thread.response_due_at).getTime() <= now) ? 'text-red-700 font-semibold' : ''}>{emailDeadlineLabel(thread.response_due_at, Boolean(thread.first_response_at), now, thread.sla_settings_snapshot)}</td>
-            <td className={thread.resolution_breached || (!thread.resolved_at && new Date(thread.resolution_due_at).getTime() <= now) ? 'text-red-700 font-semibold' : ''}>{emailDeadlineLabel(thread.resolution_due_at, Boolean(thread.resolved_at), now, thread.sla_settings_snapshot)}</td>
+            <td><SlaCell completedAt={thread.first_response_at} dueAt={thread.response_due_at} label="Responded" now={now} settings={thread.sla_settings_snapshot} /></td>
+            <td><SlaCell completedAt={thread.resolved_at} dueAt={thread.resolution_due_at} label="Resolved" now={now} settings={thread.sla_settings_snapshot} /></td>
             <td>{thread.status.replaceAll('_', ' ')}{thread.resolved_at && <p className="mt-1 text-xs text-slate-500">By {thread.resolved_by || 'unrecorded'} · {new Date(thread.resolved_at).toLocaleString('en-KE', { timeZone: 'Africa/Nairobi' })}</p>}{thread.resolution_note && <p className="text-xs text-slate-500">{thread.resolution_note}</p>}</td>
             <td className="min-w-44">{thread.outlook_web_link && <a href={thread.outlook_web_link} target="_blank" rel="noopener noreferrer" className="mr-2 text-xs font-semibold text-blue-700 whitespace-nowrap">Open in Outlook</a>}{!isEmployee && thread.status !== 'RESOLVED' && <select aria-label={`Assign thread ${thread.id}`} value="" disabled={busy} onChange={(event) => void action(`/api/email/threads/${thread.id}/assign`, { memberId: Number(event.target.value) })} className="border rounded px-1 py-1 text-xs"><option value="">Assign / reassign</option>{members.filter((member) => member.is_monitored).map((member) => <option key={member.id} value={member.id}>{member.display_name}</option>)}</select>}
               {thread.status !== 'RESOLVED' && (!isEmployee || thread.status === 'IN_PROGRESS') && <button disabled={busy} onClick={() => { setError(''); setResolveTarget(thread); setResolutionNote(''); }} className="ml-1 text-xs text-emerald-700 whitespace-nowrap">Mark resolved</button>}</td>
