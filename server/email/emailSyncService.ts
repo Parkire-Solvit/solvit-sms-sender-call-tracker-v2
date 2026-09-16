@@ -2,7 +2,7 @@ import { getPostgresPool } from '../../db';
 import { GraphClient, type GraphMessage } from './graphClient';
 import { emailIdentity, isAddressedToGroup } from './messageIdentity';
 import {
-  emailHealth, emitDueAlerts, ensureEmailTeam, getDeltaLink, getEmailSettings,
+  emailHealth, emitDueAlerts, ensureEmailTeam, getDeltaLink, getEmailSettings, isStoredEmail,
   recordOptionalFolderAbsent, recordSyncFailure, saveDeltaLink, storeInbound, storeOutbound,
 } from './emailRepository';
 
@@ -37,7 +37,7 @@ const emptyMetrics = (): FolderSyncMetrics => ({
 });
 
 const reconciliationIntervalMs = 5 * 60_000;
-const reconciliationLookbackMs = 6 * 60 * 60_000;
+const reconciliationLookbackMs = 48 * 60 * 60_000;
 let lastInboxReconciliationAt = 0;
 
 function addMetrics(total: FolderSyncMetrics, next: FolderSyncMetrics): void {
@@ -102,7 +102,7 @@ async function syncFolder(config: EmailRuntimeConfig, mailbox: string, folder: s
         const detail = await config.graph.getMessageHeaders(mailbox, item.id);
         const message: GraphMessage = { ...item, internetMessageHeaders: detail.internetMessageHeaders };
         const identity = emailIdentity(message);
-        const isReplyCandidate = Boolean(identity.inReplyTo || identity.references.length);
+        const isReplyCandidate = Boolean(identity.inReplyTo || identity.references.length || message.conversationId);
         if (isReplyCandidate) metrics.replyCandidates++;
         if (await storeOutbound(mailbox, message)) {
           metrics.processed++;
@@ -130,7 +130,8 @@ async function reconcileRecentInbox(config: EmailRuntimeConfig, mailbox: string)
     const addressedDirectlyToMailbox = (item.toRecipients || []).some((recipient) =>
       recipient.emailAddress?.address?.trim().toLowerCase() === mailbox);
     if (!isAddressedToGroup(item, config.groupAddress) && !addressedDirectlyToMailbox) continue;
-    const detail = await config.graph.getMessageHeaders(mailbox, item.id);
+    // Known copies need only their mailbox-local identity, not another header request.
+    const detail = await isStoredEmail(item) ? item : await config.graph.getMessageHeaders(mailbox, item.id);
     const message: GraphMessage = { ...item, internetMessageHeaders: detail.internetMessageHeaders };
     if (!emailIdentity(message).internetMessageId) continue;
     if (await storeInbound(mailbox, config.groupAddress, message, settings, config.monitoringStart)) {
@@ -150,7 +151,7 @@ async function reconcileRecentSent(config: EmailRuntimeConfig, mailbox: string):
     const detail = await config.graph.getMessageHeaders(mailbox, item.id);
     const message = { ...item, internetMessageHeaders: detail.internetMessageHeaders };
     const identity = emailIdentity(message);
-    if (!identity.inReplyTo && !identity.references.length) continue;
+    if (!identity.inReplyTo && !identity.references.length && !message.conversationId) continue;
     metrics.replyCandidates++;
     if (await storeOutbound(mailbox, message)) {
       metrics.processed++;

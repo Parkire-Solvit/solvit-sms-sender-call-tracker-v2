@@ -114,7 +114,7 @@ test('reconciles recent Inbox messages without requesting bodies or attachments'
   const messages = await client.getRecentFolderMessages('mercy@example.com', 'inbox', new Date('2026-09-15T12:00:00Z'));
   assert.equal(messages[0].id, 'recent-id');
   assert.match(calls[1], /mailFolders\/inbox\/messages\?/);
-  assert.match(decodeURIComponent(calls[1]), /receivedDateTime ge 2026-09-15T12:00:00.000Z/);
+  assert.equal(new URL(calls[1]).searchParams.get('$filter'), 'receivedDateTime ge 2026-09-15T12:00:00.000Z');
   assert.doesNotMatch(calls[1], /attachments/i);
   assert.doesNotMatch(calls[1], /body,/i);
 });
@@ -139,10 +139,10 @@ test('Sent Items recovery queries original sent timestamps', async () => {
   let requested = '';
   const client = new GraphClient(config, (async (input) => {
     if (String(input).includes('/token')) return new Response(JSON.stringify({ access_token: 'mock', expires_in: 3600 }));
-    requested = decodeURIComponent(String(input));
+    requested = String(input);
     return new Response(JSON.stringify({ value: [] }));
   }) as typeof fetch);
   await client.getRecentFolderMessages('mercy@example.com', 'sentitems', new Date('2026-09-16T00:00:00Z'));
-  assert.match(requested, /sentDateTime ge/);
-  assert.match(requested, /sentDateTime asc/);
+  assert.equal(new URL(requested).searchParams.get('$filter'), 'sentDateTime ge 2026-09-16T00:00:00.000Z');
+  assert.equal(new URL(requested).searchParams.get('$orderby'), 'sentDateTime asc');
 });

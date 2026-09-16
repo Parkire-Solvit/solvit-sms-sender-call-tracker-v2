@@ -7,6 +7,7 @@ import { dueEmailAlerts, recordFirstResponse, startEmailSla, validateEmailSlaSet
 import type { EmailAlertType, EmailSlaSettings, EmailSlaState } from './emailTypes';
 import { emailWorkingMinutesBetween, isEmailWorkingTime } from '../../shared/emailBusinessHours';
 import { resolveEmailThreadSql } from './emailResolution';
+import { replyConversationCandidatesSql } from './replyFallback';
 
 type Client = pg.PoolClient;
 type SqlRow = Record<string, any>;
@@ -37,6 +38,14 @@ function recipients(message: GraphMessage): string[] {
 
 function toRecipients(message: GraphMessage): string[] {
   return (message.toRecipients || []).map((item) => address(item.emailAddress?.address)).filter(Boolean);
+}
+
+async function rememberMailboxCopy(client: Client, mailbox: string, message: GraphMessage, threadId: number): Promise<void> {
+  await client.query(
+    `INSERT INTO email_mailbox_copies (source_mailbox,graph_message_id,email_thread_id,graph_conversation_id)
+     VALUES ($1,$2,$3,$4) ON CONFLICT (source_mailbox,graph_message_id) DO UPDATE
+     SET graph_conversation_id=EXCLUDED.graph_conversation_id`,
+    [address(mailbox), message.id, threadId, message.conversationId || null]);
 }
 
 export async function getEmailSettings(): Promise<EmailSlaSettings> {
@@ -140,6 +149,7 @@ export async function storeInbound(
     );
     if (existing.rows[0]) {
       const threadId = Number(existing.rows[0].email_thread_id);
+      await rememberMailboxCopy(client, sourceMailbox, message, threadId);
       // A message sent to the CS group can exist in every member's mailbox.
       // Keep the Outlook deep link for the assigned member's own copy so they
       // can open it without needing access to another person's mailbox.
@@ -157,6 +167,7 @@ export async function storeInbound(
       );
       if (prior.rows[0]) {
         const priorThreadId = Number(prior.rows[0].email_thread_id);
+        await rememberMailboxCopy(client, sourceMailbox, message, priorThreadId);
         await client.query(
           `INSERT INTO email_messages (email_thread_id,graph_message_id,internet_message_id,graph_conversation_id,
            source_mailbox,sender_email,recipient_data,direction,sent_or_received_at)
@@ -180,6 +191,7 @@ export async function storeInbound(
     );
     const threadId = Number(thread.rows[0]?.id || (await client.query<SqlRow>(
       'SELECT id FROM email_threads WHERE root_internet_message_id=$1', [internetId])).rows[0]?.id);
+    await rememberMailboxCopy(client, sourceMailbox, message, threadId);
     await client.query(
       `INSERT INTO email_messages (email_thread_id,graph_message_id,internet_message_id,graph_conversation_id,
        source_mailbox,sender_email,recipient_data,direction,sent_or_received_at)
@@ -208,24 +220,33 @@ export async function storeOutbound(sourceMailbox: string, message: GraphMessage
   const sentAt = new Date(message.sentDateTime || '');
   if (!identity.internetMessageId || Number.isNaN(sentAt.getTime())) return null;
   const referenced = [identity.inReplyTo, ...identity.references].filter((value): value is string => Boolean(value));
-  if (!referenced.length) return null;
   return transaction(async (client) => {
     const known = await client.query<SqlRow>(
       `SELECT internet_message_id,email_thread_id FROM email_messages WHERE internet_message_id = ANY($1::text[])
        ORDER BY sent_or_received_at DESC LIMIT 1`, [referenced],
     );
-    if (!known.rows[0] || !replyMatchesKnownMessage(message, new Set(known.rows.map((row) => row.internet_message_id)))) return null;
-    const threadId = Number(known.rows[0].email_thread_id);
-    const insert = await client.query<SqlRow>(
+    let threadId = known.rows[0] && replyMatchesKnownMessage(message, new Set(known.rows.map((row) => row.internet_message_id)))
+      ? Number(known.rows[0].email_thread_id) : null;
+    let matchMethod = 'RFC_HEADERS';
+    if (!threadId && !referenced.length && message.conversationId &&
+        address(message.from?.emailAddress?.address) === address(sourceMailbox)) {
+      // Only an unambiguous conversation in this exact mailbox, sent back to
+      // the original customer after receipt, can substitute for RFC headers.
+      const candidates = await client.query<SqlRow>(
+        replyConversationCandidatesSql,
+        [address(sourceMailbox), message.conversationId, sentAt, toRecipients(message), identity.internetMessageId]);
+      if (candidates.rows.length === 1) { threadId = Number(candidates.rows[0].id); matchMethod = 'MAILBOX_CONVERSATION'; }
+    }
+    if (!threadId) return null;
+    await client.query<SqlRow>(
       `INSERT INTO email_messages (email_thread_id,graph_message_id,internet_message_id,graph_conversation_id,
        source_mailbox,sender_email,recipient_data,direction,sent_or_received_at)
        VALUES ($1,$2,$3,$4,$5,$6,$7,'OUTBOUND',$8) ON CONFLICT DO NOTHING RETURNING id`,
       [threadId, message.id, identity.internetMessageId, message.conversationId || null, sourceMailbox,
         address(message.from?.emailAddress?.address), JSON.stringify(recipients(message)), sentAt],
     );
-    if (!insert.rowCount) return threadId;
     const row = (await client.query<SqlRow>('SELECT * FROM email_threads WHERE id=$1 FOR UPDATE', [threadId])).rows[0];
-    if (!row || sentAt < new Date(row.received_at) || row.first_response_at) return threadId;
+    if (!row || sentAt < new Date(row.received_at) || (row.first_response_at && sentAt >= new Date(row.first_response_at))) return threadId;
     const state = recordFirstResponse({
       receivedAt: new Date(row.received_at), responseDueAt: new Date(row.response_due_at),
       resolutionDueAt: new Date(row.resolution_due_at), firstResponseAt: null,
@@ -242,8 +263,15 @@ export async function storeOutbound(sourceMailbox: string, message: GraphMessage
        WHERE email_thread_id=$1 AND acknowledged_at IS NULL AND alert_type LIKE 'RESPONSE_%'`,
       [threadId],
     );
+    console.info('[EMAIL] Response recovered', { threadId, mailbox: sourceMailbox, sentAt: sentAt.toISOString(), matchMethod });
     return threadId;
   });
+}
+
+export async function isStoredEmail(message: GraphMessage): Promise<boolean> {
+  const id = emailIdentity(message).internetMessageId;
+  if (!id) return false;
+  return Boolean((await getPostgresPool().query('SELECT 1 FROM email_messages WHERE internet_message_id=$1 LIMIT 1', [id])).rowCount);
 }
 
 export async function getDeltaLink(mailbox: string, folder: string): Promise<string | undefined> {
