@@ -118,3 +118,31 @@ test('reconciles recent Inbox messages without requesting bodies or attachments'
   assert.doesNotMatch(calls[1], /attachments/i);
   assert.doesNotMatch(calls[1], /body,/i);
 });
+
+test('recent recovery follows canonical Graph links but rejects other resources', async () => {
+  const canonical = "https://graph.microsoft.com/v1.0/users('mercy@example.com')/mailfolders('inbox')/messages?$skiptoken=opaque";
+  for (const next of [canonical, canonical.replace('mercy@example.com', 'joyce@example.com'),
+    canonical.replace("('inbox')", "('sentitems')"), canonical.replace('graph.microsoft.com', 'example.net')]) {
+    let requests = 0;
+    const client = new GraphClient(config, (async (input) => {
+      if (String(input).includes('/token')) return new Response(JSON.stringify({ access_token: 'mock', expires_in: 3600 }));
+      requests++;
+      return new Response(JSON.stringify(requests === 1 ? { value: [{ id: 'first' }], '@odata.nextLink': next } : { value: [{ id: 'second' }] }));
+    }) as typeof fetch);
+    const result = client.getRecentFolderMessages('mercy@example.com', 'inbox', new Date('2026-09-16T00:00:00Z'));
+    if (next === canonical) assert.equal((await result).length, 2);
+    else { await assert.rejects(result, /Invalid Graph recent-message continuation/); assert.equal(requests, 1); }
+  }
+});
+
+test('Sent Items recovery queries original sent timestamps', async () => {
+  let requested = '';
+  const client = new GraphClient(config, (async (input) => {
+    if (String(input).includes('/token')) return new Response(JSON.stringify({ access_token: 'mock', expires_in: 3600 }));
+    requested = decodeURIComponent(String(input));
+    return new Response(JSON.stringify({ value: [] }));
+  }) as typeof fetch);
+  await client.getRecentFolderMessages('mercy@example.com', 'sentitems', new Date('2026-09-16T00:00:00Z'));
+  assert.match(requested, /sentDateTime ge/);
+  assert.match(requested, /sentDateTime asc/);
+});

@@ -136,17 +136,24 @@ export class GraphClient {
     if (!folder || folder.includes('/') || Number.isNaN(since.getTime())) throw new Error('Invalid recent-message query');
     const path = `${this.mailboxPath(mailbox)}/mailFolders/${encodeURIComponent(folder)}/messages`;
     const base = `${graphOrigin}${path}`;
+    const timeField = folder.toLowerCase() === 'sentitems' ? 'sentDateTime' : 'receivedDateTime';
     const params = new URLSearchParams({
-      '$select': 'id,conversationId,internetMessageId,subject,from,toRecipients,ccRecipients,bodyPreview,webLink,receivedDateTime',
-      '$filter': `receivedDateTime ge ${since.toISOString()}`,
-      '$orderby': 'receivedDateTime asc',
+      '$select': 'id,conversationId,internetMessageId,subject,from,toRecipients,ccRecipients,bodyPreview,webLink,receivedDateTime,sentDateTime',
+      '$filter': `${timeField} ge ${since.toISOString()}`,
+      '$orderby': `${timeField} asc`,
       '$top': '100',
     });
     let url: string | undefined = `${base}?${params}`;
     const messages: GraphMessage[] = [];
     for (let pageNumber = 0; url && pageNumber < 10; pageNumber++) {
       const parsed = new URL(url);
-      if (parsed.origin !== graphOrigin || parsed.pathname.toLowerCase() !== new URL(base).pathname.toLowerCase()) {
+      const match = /^\/v1\.0\/users(?:\/([^/]+)|\('([^']+)'\))\/mailfolders(?:\/([^/]+)|\('([^']+)'\))\/messages$/i.exec(parsed.pathname);
+      const linkMailbox = match ? decodeURIComponent(match[1] || match[2]) : '';
+      const linkFolder = match ? decodeURIComponent(match[3] || match[4]) : '';
+      const sameFolder = ['inbox', 'sentitems'].includes(folder.toLowerCase())
+        ? linkFolder.toLowerCase() === folder.toLowerCase() : linkFolder === folder;
+      if (parsed.origin !== graphOrigin || parsed.username || parsed.password || parsed.hash ||
+          linkMailbox.toLowerCase() !== mailbox.trim().toLowerCase() || !sameFolder) {
         throw new Error('Invalid Graph recent-message continuation');
       }
       const page: GraphMessagePage = await this.getJson(url);
@@ -154,6 +161,7 @@ export class GraphClient {
       messages.push(...page.value);
       url = page['@odata.nextLink'];
     }
+    if (url) throw new Error('Graph recent-message recovery exceeded page limit; scan incomplete');
     return messages;
   }
 

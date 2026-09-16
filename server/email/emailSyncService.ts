@@ -141,6 +141,26 @@ async function reconcileRecentInbox(config: EmailRuntimeConfig, mailbox: string)
   return metrics;
 }
 
+async function reconcileRecentSent(config: EmailRuntimeConfig, mailbox: string): Promise<FolderSyncMetrics> {
+  const metrics = emptyMetrics();
+  const since = new Date(Math.max(config.monitoringStart.getTime(), Date.now() - reconciliationLookbackMs));
+  const items = await config.graph.getRecentFolderMessages(mailbox, 'sentitems', since);
+  for (const item of items) {
+    metrics.sentScanned++;
+    const detail = await config.graph.getMessageHeaders(mailbox, item.id);
+    const message = { ...item, internetMessageHeaders: detail.internetMessageHeaders };
+    const identity = emailIdentity(message);
+    if (!identity.inReplyTo && !identity.references.length) continue;
+    metrics.replyCandidates++;
+    if (await storeOutbound(mailbox, message)) {
+      metrics.processed++;
+      metrics.repliesMatched++;
+    } else metrics.repliesUnmatched++;
+  }
+  console.info('[EMAIL] Sent Items reconciliation', { mailbox, ...metrics });
+  return metrics;
+}
+
 export async function runEmailSync(config: EmailRuntimeConfig): Promise<EmailSyncResult> {
   const lockClient = await getPostgresPool().connect();
   const lockKey = 872_615_901;
@@ -190,6 +210,14 @@ export async function runEmailSync(config: EmailRuntimeConfig): Promise<EmailSyn
         const code = error instanceof Error ? error.message : 'Unknown sync error';
         await recordSyncFailure(mailbox, 'sentitems', code).catch(() => undefined);
         console.error('[EMAIL] Sent Items sync failure', { mailbox, code });
+      }
+      if (shouldReconcileInbox) {
+        try { addMetrics(metrics, await reconcileRecentSent(config, mailbox)); }
+        catch (error) {
+          const code = error instanceof Error ? error.message : 'Unknown reconciliation error';
+          await recordSyncFailure(mailbox, 'sentitems-reconciliation', code).catch(() => undefined);
+          console.error('[EMAIL] Sent Items reconciliation failure', { mailbox, code });
+        }
       }
     }
     const alerts = await emitDueAlerts(await getEmailSettings());
