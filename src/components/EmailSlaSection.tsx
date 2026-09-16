@@ -212,13 +212,16 @@ export function EmailSlaSection({ employeeEmail }: { employeeEmail?: string }) {
         <input aria-label="Email received date filter" title="Filter by received date" type="date" value={receivedDate} onChange={(event) => setReceivedDate(event.target.value)} className="border rounded-lg px-2 py-1.5 text-sm" />
       </div></div>
         <div className="space-y-3">
-          {threads.map((thread) => <article key={thread.id} className="grid min-w-0 gap-4 rounded-xl border border-slate-200 p-4 md:grid-cols-2 xl:grid-cols-3">
+          {threads.map((thread) => <article key={thread.id} className="grid min-w-0 gap-4 rounded-xl border border-slate-200 p-4 md:grid-cols-2 xl:grid-cols-[minmax(0,1.4fr)_minmax(0,.65fr)_minmax(0,1.2fr)_minmax(0,.8fr)]">
             <div className="min-w-0">
               <span className={`inline-block rounded-full px-2 py-1 text-xs font-medium ${thread.status === 'RESOLVED' ? 'bg-emerald-50 text-emerald-700' : thread.status === 'IN_PROGRESS' ? 'bg-blue-50 text-blue-700' : 'bg-amber-50 text-amber-800'}`}>{thread.status.replaceAll('_', ' ')}</span>
               <p className="mt-2 break-words font-semibold">{thread.subject || '(no subject)'}</p>
               <p className="mt-1 break-all text-xs text-slate-500">{thread.customer_email}</p>
-              <p className="mt-2 text-xs text-slate-600">Owner: {thread.owner_name || 'Unassigned'}</p>
               <p className="mt-1 text-xs text-slate-500">Received {emailCompletionTime(thread.received_at)}</p>
+            </div>
+            <div className="min-w-0 rounded-lg bg-slate-50 p-3">
+              <p className="mb-2 text-xs text-slate-500">Owner</p>
+              <p className="break-words text-sm font-semibold text-slate-800">{thread.owner_name || 'Unassigned'}</p>
             </div>
             <div className="grid min-w-0 grid-cols-2 gap-3 rounded-lg bg-slate-50 p-3">
               <div className="min-w-0"><p className="mb-2 text-xs text-slate-500">Response SLA</p><SlaCell completedAt={thread.first_response_at} dueAt={thread.response_due_at} label="Responded" now={now} settings={thread.sla_settings_snapshot} /></div>
