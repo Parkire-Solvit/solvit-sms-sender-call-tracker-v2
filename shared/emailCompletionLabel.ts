@@ -1,4 +1,5 @@
 import { emailWorkingMinutesBetween } from './emailBusinessHours';
+import { emailDurationLabel } from './emailDurationLabel';
 
 export function emailCompletionOutcome(completedAt: string, dueAt: string, holidayDates: string[] = []): string {
   const completed = new Date(completedAt);
@@ -6,7 +7,7 @@ export function emailCompletionOutcome(completedAt: string, dueAt: string, holid
   if (!Number.isFinite(completed.getTime()) || !Number.isFinite(due.getTime())) return 'SLA unavailable';
   if (completed <= due) return 'Within SLA';
   const lateMinutes = emailWorkingMinutesBetween(due, completed, holidayDates);
-  return lateMinutes > 0 ? `${Math.ceil(lateMinutes)} working min late` : 'After deadline';
+  return lateMinutes > 0 ? `${emailDurationLabel(lateMinutes)} late` : 'After deadline';
 }
 
 export function emailCompletionTime(value: string): string {

@@ -8,7 +8,7 @@ const at = (value: string) => new Date(value).getTime();
 test('email received after 5 PM shows full response and resolution time overnight', () => {
   const mondayNight = at('2026-09-14T19:00:00Z'); // 10 PM Nairobi
   assert.equal(emailDeadlineLabel('2026-09-15T05:30:00Z', false, mondayNight, calendar), '30m left');
-  assert.equal(emailDeadlineLabel('2026-09-15T07:00:00Z', false, mondayNight, calendar), '120m left');
+  assert.equal(emailDeadlineLabel('2026-09-15T07:00:00Z', false, mondayNight, calendar), '2h left');
   assert.equal(emailDeadlineLabel('2026-09-15T05:30:00Z', false, at('2026-09-15T04:00:00Z'), calendar), '30m left');
   assert.equal(emailDeadlineLabel('2026-09-15T05:30:00Z', false, at('2026-09-15T05:10:00Z'), calendar), '20m left');
 });
