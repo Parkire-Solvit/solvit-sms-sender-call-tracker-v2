@@ -46,8 +46,12 @@ interface CardDrilldownModalProps {
   settings?: SystemSettings;
   allObligations: Obligation[];
   rawEvents?: any[];
+  allEvents?: any[];
+  startDate?: string;
+  endDate?: string;
   onInspectContact: (phone: string) => void;
-  onInspectAgent: (agentId: number) => void;
+  onInspectAgent?: (agentId: number) => void;
+  onSelectAgent?: (agentId: number) => void;
 }
 
 export const CardDrilldownModal: React.FC<CardDrilldownModalProps> = ({
@@ -56,13 +60,17 @@ export const CardDrilldownModal: React.FC<CardDrilldownModalProps> = ({
   cardType,
   headlineStats,
   summary,
-  agents,
+  agents = [],
   turnaroundReport,
   settings,
-  allObligations,
+  allObligations = [],
   rawEvents = [],
+  allEvents = [],
+  startDate,
+  endDate,
   onInspectContact,
   onInspectAgent,
+  onSelectAgent,
 }) => {
   const [activeTab, setActiveTab] = useState<'agents' | 'obligations' | 'events'>('agents');
   const [selectedTagFilter, setSelectedTagFilter] = useState<string>('ALL');
@@ -70,7 +78,69 @@ export const CardDrilldownModal: React.FC<CardDrilldownModalProps> = ({
   const [agentSearch, setAgentSearch] = useState<string>('');
   const [recordSearch, setRecordSearch] = useState<string>('');
 
-  if (!isOpen || !cardType) return null;
+  const eventsData = allEvents.length > 0 ? allEvents : rawEvents;
+
+  // Filtered Agent Rows
+  const filteredAgents = useMemo(() => {
+    if (!isOpen || !agents) return [];
+    return agents.filter(agent => {
+      if (selectedTagFilter !== 'ALL' && agent.tag !== selectedTagFilter) return false;
+      if (agentSearch.trim()) {
+        const query = agentSearch.toLowerCase();
+        const matchesName = agent.agent_name.toLowerCase().includes(query);
+        const matchesPhone = (agent.phone_number || '').includes(query);
+        const matchesTag = (agent.tag || '').toLowerCase().includes(query);
+        if (!matchesName && !matchesPhone && !matchesTag) return false;
+      }
+      return true;
+    });
+  }, [isOpen, agents, selectedTagFilter, agentSearch]);
+
+  // Filtered Obligations for this Card Type
+  const relevantObligations = useMemo(() => {
+    if (!isOpen || !cardType || !allObligations) return [];
+    return allObligations.filter(obl => obl.obligation_type === cardType);
+  }, [isOpen, allObligations, cardType]);
+
+  const filteredObligations = useMemo(() => {
+    if (!isOpen || relevantObligations.length === 0) return [];
+    return relevantObligations.filter(obl => {
+      if (obligationStatusFilter !== 'ALL' && obl.status !== obligationStatusFilter) return false;
+      if (recordSearch.trim()) {
+        const query = recordSearch.toLowerCase();
+        const matchesPhone = obl.target_phone.toLowerCase().includes(query);
+        const matchesAgent = obl.originating_agent_name.toLowerCase().includes(query);
+        const matchesResolver = (obl.resolving_agent_name || '').toLowerCase().includes(query);
+        const matchesId = obl.id.toLowerCase().includes(query);
+        if (!matchesPhone && !matchesAgent && !matchesResolver && !matchesId) return false;
+      }
+      return true;
+    });
+  }, [isOpen, relevantObligations, obligationStatusFilter, recordSearch]);
+
+  // Filtered Raw Events
+  const filteredEvents = useMemo(() => {
+    if (!isOpen || !cardType || eventsData.length === 0) return [];
+    return eventsData.filter(ev => {
+      if (cardType === 'MISSED_INCOMING_CALLBACK') {
+        if (ev.type !== 'CALL') return false;
+        if (ev.status !== 'MISSED' && ev.status !== 'INCOMING_NOT_PICKED' && ev.direction !== 'INCOMING') return false;
+      } else if (cardType === 'OUTGOING_RECONNECTION') {
+        if (ev.type !== 'CALL' || ev.direction !== 'OUTGOING') return false;
+      } else if (cardType === 'SMS_FOLLOWUP') {
+        if (ev.type !== 'SMS' && !(ev.type === 'CALL' && (ev.status === 'MISSED' || ev.status === 'NO_ANSWER' || ev.status === 'FAILED'))) {
+          return false;
+        }
+      }
+      if (recordSearch.trim()) {
+        const query = recordSearch.toLowerCase();
+        const matchesPhone = (ev.target_phone || '').toLowerCase().includes(query);
+        const matchesAgent = (ev.agent_name || '').toLowerCase().includes(query);
+        if (!matchesPhone && !matchesAgent) return false;
+      }
+      return true;
+    });
+  }, [isOpen, eventsData, cardType, recordSearch]);
 
   const formatMinutes = (minutes: number | null | undefined) => {
     if (minutes === null || minutes === undefined || isNaN(minutes)) return 'N/A';
@@ -84,7 +154,7 @@ export const CardDrilldownModal: React.FC<CardDrilldownModalProps> = ({
   };
 
   // Card Meta Configurations
-  const meta = {
+  const meta = cardType ? {
     MISSED_INCOMING_CALLBACK: {
       title: 'Incoming Calls Drilldown',
       subtitle: 'Raw agent activity and individual obligation audit for missed incoming calls',
@@ -109,69 +179,13 @@ export const CardDrilldownModal: React.FC<CardDrilldownModalProps> = ({
       slaLabel: 'Within the Day',
       tatMetric: turnaroundReport?.company_wide?.failed_outgoing_to_sms,
     }
-  }[cardType];
+  }[cardType] : null;
 
   // Available unique tags for filtering
   const allTags = Array.from(new Set(agents.map(a => a.tag).filter(Boolean)));
 
-  // Filtered Agent Rows
-  const filteredAgents = useMemo(() => {
-    return agents.filter(agent => {
-      if (selectedTagFilter !== 'ALL' && agent.tag !== selectedTagFilter) return false;
-      if (agentSearch.trim()) {
-        const query = agentSearch.toLowerCase();
-        const matchesName = agent.agent_name.toLowerCase().includes(query);
-        const matchesPhone = (agent.phone_number || '').includes(query);
-        const matchesTag = (agent.tag || '').toLowerCase().includes(query);
-        if (!matchesName && !matchesPhone && !matchesTag) return false;
-      }
-      return true;
-    });
-  }, [agents, selectedTagFilter, agentSearch]);
-
-  // Filtered Obligations for this Card Type
-  const relevantObligations = useMemo(() => {
-    if (!cardType) return [];
-    return allObligations.filter(obl => obl.obligation_type === cardType);
-  }, [allObligations, cardType]);
-
-  const filteredObligations = useMemo(() => {
-    return relevantObligations.filter(obl => {
-      if (obligationStatusFilter !== 'ALL' && obl.status !== obligationStatusFilter) return false;
-      if (recordSearch.trim()) {
-        const query = recordSearch.toLowerCase();
-        const matchesPhone = obl.target_phone.toLowerCase().includes(query);
-        const matchesAgent = obl.originating_agent_name.toLowerCase().includes(query);
-        const matchesResolver = (obl.resolving_agent_name || '').toLowerCase().includes(query);
-        const matchesId = obl.id.toLowerCase().includes(query);
-        if (!matchesPhone && !matchesAgent && !matchesResolver && !matchesId) return false;
-      }
-      return true;
-    });
-  }, [relevantObligations, obligationStatusFilter, recordSearch]);
-
-  // Filtered Raw Events
-  const filteredEvents = useMemo(() => {
-    return rawEvents.filter(ev => {
-      if (cardType === 'MISSED_INCOMING_CALLBACK') {
-        if (ev.type !== 'CALL') return false;
-        if (ev.status !== 'MISSED' && ev.status !== 'INCOMING_NOT_PICKED' && ev.direction !== 'INCOMING') return false;
-      } else if (cardType === 'OUTGOING_RECONNECTION') {
-        if (ev.type !== 'CALL' || ev.direction !== 'OUTGOING') return false;
-      } else if (cardType === 'SMS_FOLLOWUP') {
-        if (ev.type !== 'SMS' && !(ev.type === 'CALL' && (ev.status === 'MISSED' || ev.status === 'NO_ANSWER' || ev.status === 'FAILED'))) {
-          return false;
-        }
-      }
-      if (recordSearch.trim()) {
-        const query = recordSearch.toLowerCase();
-        const matchesPhone = (ev.target_phone || '').toLowerCase().includes(query);
-        const matchesAgent = (ev.agent_name || '').toLowerCase().includes(query);
-        if (!matchesPhone && !matchesAgent) return false;
-      }
-      return true;
-    });
-  }, [rawEvents, cardType, recordSearch]);
+  // ALL HOOKS COMPLETE. Safe to return early if modal is closed or cardType is null
+  if (!isOpen || !cardType || !meta) return null;
 
   // Export Drilldown Data to Excel
   const handleExportDrilldown = () => {
@@ -690,7 +704,7 @@ export const CardDrilldownModal: React.FC<CardDrilldownModalProps> = ({
                             <td className="py-3 px-4 text-right">
                               <button
                                 id={`btn-inspect-agent-${agent.agent_id}`}
-                                onClick={() => onInspectAgent(agent.agent_id)}
+                                onClick={() => (onInspectAgent || onSelectAgent)?.(agent.agent_id)}
                                 className="inline-flex items-center gap-1 text-[11px] font-semibold text-slate-700 hover:text-slate-900 bg-slate-100 hover:bg-slate-200 px-2.5 py-1 rounded-lg transition-colors"
                               >
                                 <span>Audit Records</span>

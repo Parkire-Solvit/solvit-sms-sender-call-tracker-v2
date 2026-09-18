@@ -414,64 +414,64 @@ function computeActivitySummary(events: any[], totalAgents: number = 0) {
   let total_sms = 0;
   let total_calls_made = 0;
   let total_calls_incoming = 0;
-  let total_calls_connected = 0;
-  let total_calls_outgoing_connected = 0;
   let total_calls_incoming_connected = 0;
-  let total_calls_not_picked = 0;
   let total_calls_missed = 0;
 
-  const lastLegByPhone = new Map<string, { status: string; timestamp: number }>();
-  const CORRELATION_WINDOW_MS = 30 * 60 * 1000;
+  const outgoingByPhone = new Map<string, number[]>(); // timestamps of OUTGOING events, unmatched so far
+  const connectedByPhone = new Map<string, number[]>(); // timestamps of CONNECTED events, unmatched so far
 
   for (const e of events) {
     const type = (e.type || "").toUpperCase();
     const status = (e.status || "").toUpperCase();
-    const duration = Number(e.duration) || 0;
     const phone = e.target_phone;
     const ts = new Date(e.timestamp).getTime();
 
-    if (type === "CALL" && (status === "INCOMING" || status === "OUTGOING")) {
-      lastLegByPhone.set(phone, { status, timestamp: ts });
-    }
-
-    if (type === "CALL" && status === "CONNECTED") {
-      const leg = lastLegByPhone.get(phone);
-      const wasIncoming = leg && leg.status === "INCOMING" && (ts - leg.timestamp) <= CORRELATION_WINDOW_MS;
-      if (wasIncoming) {
-        total_calls_incoming_connected += 1;
-      } else {
-        total_calls_made += 1;
-        total_calls_outgoing_connected += 1;
-      }
-      total_calls_connected += 1;
-      lastLegByPhone.delete(phone);
-      continue;
-    }
-
     if (type === "SMS") {
       total_sms += 1;
-    } else if (type === "CALL") {
-      if (status === "MISSED") {
-        total_calls_missed += 1;
-        total_calls_incoming += 1;
-      } else if (status === "INCOMING") {
-        total_calls_incoming += 1;
-      } else if (["NOT_PICKED", "FAILED", "BUSY", "NO_ANSWER"].includes(status)) {
-        total_calls_made += 1;
-        total_calls_not_picked += 1;
-      } else if (status === "OUTGOING") {
-        total_calls_made += 1;
-        if (duration > 0) {
-          total_calls_outgoing_connected += 1;
-          total_calls_connected += 1;
-        } else {
-          total_calls_not_picked += 1;
-        }
-      } else {
-        total_calls_made += 1;
+      continue;
+    }
+    if (type !== "CALL") continue;
+
+    if (status === "MISSED") {
+      total_calls_missed += 1;
+      total_calls_incoming += 1;
+    } else if (status === "INCOMING") {
+      total_calls_incoming += 1;
+      total_calls_incoming_connected += 1; // INCOMING already means answered, no correlation needed
+    } else if (status === "OUTGOING") {
+      total_calls_made += 1; // one dial attempt, counted exactly once, regardless of outcome
+      const list = outgoingByPhone.get(phone) || [];
+      list.push(ts);
+      outgoingByPhone.set(phone, list);
+    } else if (status === "CONNECTED") {
+      const list = connectedByPhone.get(phone) || [];
+      list.push(ts);
+      connectedByPhone.set(phone, list);
+    } else if (["NOT_PICKED", "FAILED", "BUSY", "NO_ANSWER"].includes(status)) {
+      total_calls_made += 1;
+    }
+  }
+
+  // Match each outgoing attempt to its own CONNECTED companion, fired back-to-back
+  // on the device, not thirty minutes later, so a short window is what's correct here.
+  const SHORT_WINDOW_MS = 5 * 60 * 1000;
+  let total_calls_outgoing_connected = 0;
+
+  for (const [phone, outTimestamps] of outgoingByPhone) {
+    const connTimestamps = [...(connectedByPhone.get(phone) || [])];
+    for (const outTs of outTimestamps) {
+      const matchIdx = connTimestamps.findIndex(
+        (cTs) => cTs >= outTs && cTs - outTs <= SHORT_WINDOW_MS
+      );
+      if (matchIdx !== -1) {
+        total_calls_outgoing_connected += 1;
+        connTimestamps.splice(matchIdx, 1);
       }
     }
   }
+
+  const total_calls_not_picked = total_calls_made - total_calls_outgoing_connected;
+  const total_calls_connected = total_calls_incoming_connected + total_calls_outgoing_connected;
 
   return {
     total_agents: totalAgents,
