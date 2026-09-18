@@ -7,6 +7,21 @@ const config = {
   mailboxes: ['mercy@example.com', 'joyce@example.com'],
 };
 
+test('fresh Outlook links use allowed mailbox and metadata only, and reject foreign redirect hosts',async () => {
+  const calls:string[]=[];
+  let webLink='https://outlook.office365.com/owa/?ItemID=owned-copy';
+  const http=async(input:string|URL|Request) => {
+    calls.push(String(input));
+    return new Response(JSON.stringify(calls.length===1 ? {access_token:'test',expires_in:3600} : {id:'copy',webLink}));
+  };
+  const graph=new GraphClient(config,http as typeof fetch);
+  assert.match(await graph.getMessageWebLink('mercy@example.com','copy'),/ispopout=0/);
+  assert.match(calls[1],/users\/mercy%40example.com\/messages\/copy\?\$select=id,webLink/);
+  await assert.rejects(graph.getMessageWebLink('outsider@example.com','copy'),/allowlist/);
+  webLink='https://attacker.example/';
+  await assert.rejects(graph.getMessageWebLink('mercy@example.com','copy'),/Invalid Outlook/);
+});
+
 test('delta transport selects allowed mailbox, metadata and immutable IDs', async () => {
   const calls: Array<{ url: string; init?: RequestInit }> = [];
   const http = async (input: string | URL | Request, init?: RequestInit) => {

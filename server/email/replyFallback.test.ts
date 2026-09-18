@@ -24,5 +24,8 @@ test('conversation fallback is mailbox-scoped, recipient-checked, chronological 
       SELECT mailbox,'<other-root>',customer_email,received_at,response_due_at,resolution_due_at FROM email_threads WHERE id=1`);
     await db.query("INSERT INTO email_mailbox_copies VALUES ('carol@example.com','other-copy',2,'conversation')");
     assert.equal((await candidates()).length, 2); // Production requires exactly one.
+    await db.query("UPDATE email_threads SET received_at='2026-09-16T06:00:00Z' WHERE id=2");
+    assert.deepEqual(await candidates(),[{id:2}]);
+    assert.deepEqual(await candidates(undefined,undefined,'2026-09-16T05:00:00Z'),[{id:1}]);
   } finally { await db.close(); }
 });

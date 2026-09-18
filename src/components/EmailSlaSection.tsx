@@ -49,8 +49,8 @@ async function api<T>(url: string, init?: RequestInit): Promise<T> {
   return data as T;
 }
 
-function SlaCell({ completedAt, dueAt, label, now, settings }: {
-  completedAt: string | null; dueAt: string; label: string; now: number; settings: Settings | null;
+function SlaCell({ completedAt, dueAt, label, now, settings, closedAt }: {
+  completedAt: string | null; dueAt: string; label: string; now: number; settings: Settings | null; closedAt?: string | null;
 }) {
   if (completedAt) {
     const late = new Date(completedAt) > new Date(dueAt);
@@ -62,6 +62,7 @@ function SlaCell({ completedAt, dueAt, label, now, settings }: {
       </span>
     </div>;
   }
+  if (closedAt) return <span className="text-xs text-amber-700">Closed without detected reply</span>;
   const overdue = new Date(dueAt).getTime() <= now;
   return <span className={`font-medium ${overdue ? 'text-red-700' : 'text-slate-700'}`}>
     {emailDeadlineLabel(dueAt, false, now, settings)}
@@ -100,7 +101,7 @@ export function EmailSlaSection({ employeeEmail }: { employeeEmail?: string }) {
         ...(receivedDate ? { date: receivedDate } : {}),
       });
       const [nextThreads, nextMembers, nextAlerts, nextSummary, nextSettings, nextNotices] = await Promise.all([
-        api<Thread[]>(`/api/email/threads?${query}`), isEmployee ? Promise.resolve([] as TeamMember[]) : api<TeamMember[]>('/api/email/team'),
+        api<Thread[]>(`/api/email/threads?${query}`), api<TeamMember[]>(isEmployee ? '/api/email/assignment-targets' : '/api/email/team'),
         api<Alert[]>('/api/email/alerts'), api<Summary>('/api/email/summary'), api<Settings>('/api/email/settings'),
         isEmployee ? api<AssignmentNotice[]>('/api/email/assignment-notifications') : Promise.resolve([] as AssignmentNotice[]),
       ]);
@@ -134,6 +135,16 @@ export function EmailSlaSection({ employeeEmail }: { employeeEmail?: string }) {
       setShowSettings(false); await refresh();
     } catch (cause) { setError((cause as Error).message); }
     finally { setBusy(false); }
+  }
+
+  async function openOutlook(thread: Thread) {
+    const popup=window.open('about:blank','_blank');
+    if (!popup) { setError('Allow popups to open Outlook, or open Outlook directly and search the email subject.'); return; }
+    popup.opener=null;
+    try {
+      const data=await api<{url:string;mailbox:string}>(`/api/email/threads/${thread.id}/outlook`);
+      popup.location.href=data.url;
+    } catch(cause) { popup.close(); setError((cause as Error).message); }
   }
 
   async function updateMember(member: TeamMember, field: 'isAvailable' | 'roundRobinEnabled', value: boolean) {
@@ -229,20 +240,20 @@ export function EmailSlaSection({ employeeEmail }: { employeeEmail?: string }) {
               <p className="break-words text-sm font-semibold text-slate-800">{thread.owner_name || 'Unassigned'}</p>
             </div>
             <div className="grid min-w-0 grid-cols-2 gap-3 rounded-lg bg-slate-50 p-3">
-              <div className="min-w-0"><p className="mb-2 text-xs text-slate-500">Response SLA</p><SlaCell completedAt={thread.first_response_at} dueAt={thread.response_due_at} label="Responded" now={now} settings={thread.sla_settings_snapshot} /></div>
+              <div className="min-w-0"><p className="mb-2 text-xs text-slate-500">Response SLA</p><SlaCell completedAt={thread.first_response_at} dueAt={thread.response_due_at} label="Responded" now={now} settings={thread.sla_settings_snapshot} closedAt={thread.resolved_at} /></div>
               <div className="min-w-0"><p className="mb-2 text-xs text-slate-500">Resolution SLA</p><SlaCell completedAt={thread.resolved_at} dueAt={thread.resolution_due_at} label="Resolved" now={now} settings={thread.sla_settings_snapshot} /></div>
             </div>
             <div className="min-w-0 space-y-3">
               <div className="flex flex-wrap items-center gap-2">
-                {thread.outlook_web_link && <a href={thread.outlook_web_link} target="_blank" rel="noopener noreferrer" title="Open email in Outlook" aria-label={`Open ${thread.subject || 'email'} in Outlook`} className="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100 focus-visible:ring-2 focus-visible:ring-blue-500"><Mail aria-hidden="true" className="h-4 w-4" /></a>}
-                {thread.status !== 'RESOLVED' && (!isEmployee || thread.status === 'IN_PROGRESS') && <button disabled={busy} onClick={() => { setError(''); setResolveTarget(thread); setResolutionNote(''); }} className="rounded-lg border border-emerald-200 px-3 py-2 text-xs text-emerald-700">Mark resolved</button>}
+                <button type="button" onClick={() => void openOutlook(thread)} title={`Open in Outlook signed in as ${thread.owner_email || 'the assigned agent'}`} aria-label={`Open ${thread.subject || 'email'} in Outlook`} className="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100 focus-visible:ring-2 focus-visible:ring-blue-500"><Mail aria-hidden="true" className="h-4 w-4" /></button>
+                {thread.status !== 'RESOLVED' && <button disabled={busy} onClick={() => { setError(''); setResolveTarget(thread); setResolutionNote(''); }} className="rounded-lg border border-emerald-200 px-3 py-2 text-xs text-emerald-700">Mark resolved</button>}
               </div>
-              <details className="text-xs text-slate-600"><summary className="cursor-pointer font-medium">Details{!isEmployee && thread.status !== 'RESOLVED' ? ' / reassign' : ''}</summary>
+              <details className="text-xs text-slate-600"><summary className="cursor-pointer font-medium">Details{thread.status !== 'RESOLVED' ? ' / reassign' : ''}</summary>
                 <div className="mt-2 space-y-2 break-words">
                   {thread.assignment_reason && <p>{thread.assignment_reason}</p>}
                   {thread.resolved_at && <p>Resolved by {thread.resolved_by || 'unrecorded'}</p>}
                   {thread.resolution_note && <p>{thread.resolution_note}</p>}
-                  {!isEmployee && thread.status !== 'RESOLVED' && <select aria-label={`Assign thread ${thread.id}`} value="" disabled={busy} onChange={(event) => void action(`/api/email/threads/${thread.id}/assign`, { memberId: Number(event.target.value) })} className="w-full min-w-0 rounded-lg border px-2 py-2"><option value="">Assign / reassign</option>{members.filter((member) => member.is_monitored).map((member) => <option key={member.id} value={member.id}>{member.display_name}</option>)}</select>}
+                  {thread.status !== 'RESOLVED' && <select aria-label={`Assign thread ${thread.id}`} value="" disabled={busy} onChange={(event) => void action(`/api/email/threads/${thread.id}/assign`, { memberId: Number(event.target.value) })} className="w-full min-w-0 rounded-lg border px-2 py-2"><option value="">Assign / reassign</option>{members.filter((member) => member.is_monitored).map((member) => <option key={member.id} value={member.id}>{member.display_name}</option>)}</select>}
                 </div>
               </details>
             </div>
@@ -255,6 +266,7 @@ export function EmailSlaSection({ employeeEmail }: { employeeEmail?: string }) {
       <div role="dialog" aria-modal="true" aria-labelledby="resolve-title" className="w-full max-w-md rounded-xl bg-white p-6 shadow-xl">
         <h3 id="resolve-title" className="text-lg font-semibold">Confirm resolution</h3>
         <p className="mt-2 text-sm text-slate-700">Are you sure this customer issue is fully resolved? This will stop its resolution SLA clock.</p>
+        {!resolveTarget.first_response_at && <p className="mt-2 text-sm text-amber-700">No reply has been detected. Explain why this can be closed in the note. Closing does not count as a detected response.</p>}
         <p className="mt-3 rounded-lg bg-slate-50 p-3 text-sm"><strong>{resolveTarget.subject || '(no subject)'}</strong><span className="block text-slate-500">{resolveTarget.customer_email}</span></p>
         {error && <p role="alert" className="mt-3 text-sm text-red-700">{error}</p>}
         <label className="mt-4 block text-sm font-medium">Resolution note (optional)
@@ -263,7 +275,7 @@ export function EmailSlaSection({ employeeEmail }: { employeeEmail?: string }) {
         <p className="mt-2 text-xs text-slate-500">SMS Sender records your account and the time of confirmation.</p>
         <div className="mt-5 flex justify-end gap-2">
           <button type="button" disabled={busy} onClick={() => setResolveTarget(null)} className="rounded-lg border px-4 py-2 text-sm">Cancel</button>
-          <button type="button" disabled={busy} onClick={() => void confirmResolve()} className="rounded-lg bg-emerald-700 px-4 py-2 text-sm font-semibold text-white">Yes, mark resolved</button>
+          <button type="button" disabled={busy || (isEmployee && !resolveTarget.first_response_at && !resolutionNote.trim())} onClick={() => void confirmResolve()} className="rounded-lg bg-emerald-700 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50">Yes, mark resolved</button>
         </div>
       </div>
     </div>}

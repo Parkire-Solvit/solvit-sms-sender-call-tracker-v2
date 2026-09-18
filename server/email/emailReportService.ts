@@ -36,7 +36,7 @@ LEFT JOIN LATERAL (SELECT m.email FROM email_assignment_history h
   ORDER BY (h.changed_at < $2) DESC,
     CASE WHEN h.changed_at < $2 THEN h.changed_at END DESC,
     CASE WHEN h.changed_at < $2 THEN h.id END DESC,h.changed_at,h.id LIMIT 1) cutoff_owner ON true
-WHERE t.received_at < $2 AND (t.received_at >= $1 OR t.resolved_at IS NULL OR t.resolved_at >= $1)`;
+WHERE t.sla_exclusion_reason IS NULL AND t.received_at < $2 AND (t.received_at >= $1 OR t.resolved_at IS NULL OR t.resolved_at >= $1)`;
 
 export function assembleEmailReport(emails: OwnedReportEmail[], owners: Owner[], period: ReportPeriod, now: Date, owner?: string) {
   const cutoff = new Date(Math.min(now.getTime(), period.endExclusive.getTime()));
@@ -53,7 +53,7 @@ export function assembleEmailReport(emails: OwnedReportEmail[], owners: Owner[],
     const at = stage === 'response' ? e.firstResponseAt : e.resolvedAt;
     const due = stage === 'response' ? e.responseDueAt : e.resolutionDueAt;
     const assigned = stage === 'response' ? e.responseOwner : e.resolutionOwner;
-    if ((owner && assigned !== owner) || (at && at < cutoff) || due >= cutoff) return [];
+    if ((owner && assigned !== owner) || (at && at < cutoff) || (e.resolvedAt && e.resolvedAt < cutoff) || due >= cutoff) return [];
     return [{ id: e.id, subject: e.subject, customerEmail: e.customerEmail,
       owner: assigned ? owners.find(m => m.email === assigned)?.name || assigned : 'Unknown / unassigned',
       stage, receivedAt: e.receivedAt.toISOString(), dueAt: due.toISOString(),

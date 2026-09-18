@@ -54,8 +54,8 @@ async function startServer() {
 
   const emailRuntime = configuredEmailRuntime();
   if (emailRuntime) {
-    const migration = await db.queryOne('SELECT version FROM schema_migrations WHERE version = 16');
-    if (!migration) throw new Error('Email SLA requires database migration 016 before it can be enabled');
+    const migration = await db.queryOne('SELECT version FROM schema_migrations WHERE version = 18');
+    if (!migration) throw new Error('Email SLA requires database migration 018 before it can be enabled');
     startEmailPolling(emailRuntime);
   }
   app.use('/api/email', createEmailRouter(emailRuntime));

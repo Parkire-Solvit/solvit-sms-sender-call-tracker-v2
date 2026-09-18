@@ -54,7 +54,7 @@ export function calculateEmailReport(emails: readonly ReportEmail[], period: Rep
   const cohort = emails.filter((email) => email.receivedAt >= period.start && email.receivedAt < cutoff);
   const earlier = emails.filter((email) => email.receivedAt < period.start);
   const metric = (stage: 'response' | 'resolution') => {
-    let met = 0, late = 0, overdue = 0, pending = 0;
+    let met = 0, late = 0, overdue = 0, pending = 0, closedWithoutCompletion = 0;
     const durations: number[] = [];
     for (const email of cohort) {
       const at = stage === 'response' ? email.firstResponseAt : email.resolvedAt;
@@ -62,11 +62,12 @@ export function calculateEmailReport(emails: readonly ReportEmail[], period: Rep
       if (completed(at)) {
         if (at! <= due) met++; else late++;
         durations.push(emailWorkingMinutesBetween(email.receivedAt, at!, email.holidayDates));
-      } else if (due < cutoff) overdue++; else pending++;
+      } else if (stage === 'response' && completed(email.resolvedAt)) closedWithoutCompletion++;
+      else if (due < cutoff) overdue++; else pending++;
     }
-    const assessed = met + late + overdue;
+    const assessed = met + late + overdue + closedWithoutCompletion;
     return { met, completedLate: late, overdueOpen: overdue, pendingWithinDeadline: pending,
-      assessed, compliancePercent: assessed ? 100 * met / assessed : null,
+      closedWithoutCompletion, assessed, compliancePercent: assessed ? 100 * met / assessed : null,
       medianWorkingMinutes: median(durations) };
   };
   return {

@@ -42,6 +42,7 @@ test('real SQL reconstructs ownership before reply, after reassign, and delayed 
   const db=new PGlite();
   try {
     await db.exec(await fs.readFile(new URL('../../migrations/009_email_sla_foundation.sql',import.meta.url),'utf8'));
+    await db.exec(await fs.readFile(new URL('../../migrations/017_email_workflow_reliability.sql',import.meta.url),'utf8'));
     await db.query("INSERT INTO email_team_members(email,display_name) VALUES ('irene@solvit.co.ke','Irene'),('carol@solvit.co.ke','Caroline')");
     await db.query(`INSERT INTO email_threads(mailbox,root_internet_message_id,customer_email,received_at,first_response_at,response_due_at,resolution_due_at,assigned_member_id,status)
       VALUES ('irene@solvit.co.ke','test-1','client@example.com','2026-09-16 05:00Z','2026-09-16 06:00Z','2026-09-16 05:30Z','2026-09-16 07:00Z',2,'IN_PROGRESS')`);

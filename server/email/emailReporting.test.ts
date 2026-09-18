@@ -7,6 +7,14 @@ const email = (changes: Partial<ReportEmail> = {}): ReportEmail => ({
   responseDueAt: at('2026-09-16T05:30:00Z'), resolutionDueAt: at('2026-09-16T07:00:00Z'), holidayDates: [], ...changes,
 });
 
+test('manual closure without a detected reply is not a successful response or an open overdue stage', () => {
+  const report=calculateEmailReport([email({resolvedAt:at('2026-09-16T06:00Z')})],emailReportPeriod('weekly','2026-09-16'),at('2026-09-16T08:00Z'));
+  assert.equal(report.response.closedWithoutCompletion,1);
+  assert.equal(report.response.overdueOpen,0);
+  assert.equal(report.response.met,0);
+  assert.equal(report.response.compliancePercent,0);
+});
+
 test('weekly monthly and inclusive custom dates use Nairobi boundaries', () => {
   const week = emailReportPeriod('weekly', '2026-09-16');
   assert.equal(week.start.toISOString(), '2026-09-13T21:00:00.000Z');

@@ -178,4 +178,14 @@ export class GraphClient {
     return { ...message, internetMessageHeaders: Array.isArray(message.internetMessageHeaders)
       ? message.internetMessageHeaders : [] };
   }
+
+  async getMessageWebLink(mailbox: string, messageId: string): Promise<string> {
+    if (!messageId || messageId.includes('/')) throw new Error('Invalid Graph message ID');
+    const path=`${this.mailboxPath(mailbox)}/messages/${encodeURIComponent(messageId)}`;
+    const message=await this.getJson<GraphMessage>(`${graphOrigin}${path}?$select=id,webLink`);
+    const url=new URL(message.webLink || '');
+    if (url.protocol !== 'https:' || url.username || url.password || !['outlook.office365.com','outlook.office.com','outlook.cloud.microsoft'].includes(url.hostname)) throw new Error('Invalid Outlook message link');
+    url.searchParams.set('ispopout','0');
+    return url.toString();
+  }
 }

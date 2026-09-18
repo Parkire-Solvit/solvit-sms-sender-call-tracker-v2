@@ -4,7 +4,7 @@ import fs from 'node:fs/promises';
 import { PGlite } from '@electric-sql/pglite';
 import { resolveEmailThreadSql } from './emailResolution';
 
-test('only the assigned member can resolve an in-progress thread, with an audit record', async () => {
+test('only assigned member can resolve; closing without detected response requires a note and preserves response history', async () => {
   const db = new PGlite();
   try {
     for (const migration of ['009_email_sla_foundation.sql', '011_email_business_calendar.sql', '012_email_assignment_notifications.sql', '013_email_resolution_audit.sql']) {
@@ -28,10 +28,13 @@ test('only the assigned member can resolve an in-progress thread, with an audit 
     assert.equal(memberResult.rows[0].resolved_by, 'irene@solvit.co.ke');
     assert.equal(memberResult.rows[0].resolution_note, 'Report delivered');
     assert.ok(memberResult.rows[0].resolved_at);
-    assert.equal((await resolve(2, null, 'admin', 'Admin override')).affectedRows, 1);
+    assert.equal((await resolve(2, 'mercy@solvit.co.ke', 'mercy@solvit.co.ke', 'Wrong owner')).affectedRows,0);
+    assert.equal((await resolve(2, 'irene@solvit.co.ke', 'irene@solvit.co.ke', 'Handled outside email')).affectedRows,1);
+    const noReply=await db.query<{first_response_at:unknown}>('SELECT first_response_at FROM email_threads WHERE id=2');
+    assert.equal(noReply.rows[0].first_response_at,null);
     const adminResult = await db.query<{ resolved_by: string; resolution_note: string }>(
       'SELECT resolved_by,resolution_note FROM email_threads WHERE id=2',
     );
-    assert.deepEqual(adminResult.rows[0], { resolved_by: 'admin', resolution_note: 'Admin override' });
+    assert.deepEqual(adminResult.rows[0], { resolved_by: 'irene@solvit.co.ke', resolution_note: 'Handled outside email' });
   } finally { await db.close(); }
 });

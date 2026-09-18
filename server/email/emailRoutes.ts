@@ -4,6 +4,7 @@ import { emailMember } from '../auth/emailMemberSession';
 import { getPostgresPool } from '../../db';
 import { emailReportPeriod } from './emailReporting';
 import { getEmailReport, emailReportWorkbook } from './emailReportService';
+import { emailOutlookCopySql } from './emailOutlookLookup';
 import type { EmailRuntimeConfig } from './emailSyncService';
 import { getEmailSyncHealth, runEmailSync } from './emailSyncService';
 import {
@@ -87,6 +88,16 @@ export function createEmailRouter(config: EmailRuntimeConfig | null): Router {
     response.json(await listEmailThreads(filter, owner || undefined, receivedDate || undefined));
   }));
   router.get('/alerts', safe(async (_request, response) => response.json(await listEmailAlerts(response.locals.emailOwner || undefined))));
+  router.get('/threads/:id/outlook', safe(async (request,response) => {
+    const id=positiveId(request.params.id);
+    if (!id) return response.status(400).json({error:'Invalid thread ID'});
+    const result=await getPostgresPool().query(emailOutlookCopySql,[id,response.locals.emailOwner || null]);
+    const copy=result.rows[0];
+    if (!copy) return response.status(404).json({error:'Email not found in your queue'});
+    if (!copy.graph_message_id) return response.status(409).json({error:'No copy has been synced in the assigned agent’s mailbox. Open Outlook and search the subject; reassignment does not grant mailbox access.'});
+    try { return response.json({url:await config!.graph.getMessageWebLink(copy.email,copy.graph_message_id),mailbox:copy.email}); }
+    catch { return response.status(502).json({error:'Microsoft could not open this mailbox copy. Sign in to Outlook with your CS email and search the subject while we verify synchronization.'}); }
+  }));
   router.get('/assignment-notifications', safe(async (_request, response) => {
     response.json(response.locals.emailOwner ? await listAssignmentNotifications(response.locals.emailOwner) : []);
   }));
@@ -105,6 +116,10 @@ export function createEmailRouter(config: EmailRuntimeConfig | null): Router {
     response.status(updated ? 200 : 404).json(updated ? { success: true } : { error: 'Alert not found' });
   }));
   router.get('/team', requireAdmin, safe(async (_request, response) => response.json(await listEmailTeam())));
+  router.get('/assignment-targets', safe(async (_request,response) => {
+    const team = await listEmailTeam();
+    response.json(team.filter(m => m.is_monitored && config!.mailboxes.includes(m.email)).map(m => ({id:m.id,email:m.email,display_name:m.display_name,is_monitored:true})));
+  }));
   router.patch('/team/:id', requireAdmin, safe(async (request, response) => {
     const id = positiveId(request.params.id);
     if (!id) return response.status(400).json({ error: 'Invalid team member ID' });
@@ -125,11 +140,14 @@ export function createEmailRouter(config: EmailRuntimeConfig | null): Router {
       response.status(400).json({ error: (error as Error).message });
     }
   }));
-  router.post('/threads/:id/assign', requireAdmin, safe(async (request, response) => {
+  router.post('/threads/:id/assign', safe(async (request, response) => {
     const id = positiveId(request.params.id);
     const memberId = positiveId(String(request.body?.memberId || ''));
     if (!id || !memberId) return response.status(400).json({ error: 'Valid thread and member IDs are required' });
-    const updated = await assignEmailThread(id, memberId);
+    const team = await listEmailTeam();
+    if (!team.some(m => Number(m.id) === memberId && m.is_monitored && config!.mailboxes.includes(m.email))) return response.status(400).json({error:'Choose an approved CS member'});
+    const ownerEmail = response.locals.emailOwner || null;
+    const updated = await assignEmailThread(id, memberId, ownerEmail, ownerEmail || 'admin');
     response.status(updated ? 200 : 404).json(updated ? { success: true } : { error: 'Thread or member not found' });
   }));
   router.post('/threads/:id/resolve', safe(async (request, response) => {
@@ -143,7 +161,7 @@ export function createEmailRouter(config: EmailRuntimeConfig | null): Router {
     const actor = ownerEmail || process.env.ADMIN_USERNAME?.trim().toLowerCase() || 'admin';
     const updated = await resolveEmailThread(id, actor, ownerEmail, rawNote?.trim() || null);
     response.status(updated ? 200 : ownerEmail ? 409 : 404).json(updated ? { success: true } : {
-      error: ownerEmail ? 'Only an in-progress email currently assigned to you can be resolved' : 'Open thread not found',
+      error: ownerEmail ? 'You can resolve only your own open email. A note is required if no reply has been detected.' : 'Open thread not found',
     });
   }));
   router.post('/sync', requireAdmin, safe(async (_request, response) => response.json(await runEmailSync(config!))));
