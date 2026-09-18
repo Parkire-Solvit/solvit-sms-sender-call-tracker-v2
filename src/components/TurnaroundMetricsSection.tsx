@@ -3,9 +3,6 @@ import {
   Clock, 
   TrendingUp, 
   CheckCircle2, 
-  AlertTriangle, 
-  AlertOctagon, 
-  HelpCircle,
   Users,
   Tag as TagIcon,
   PhoneCall,
@@ -13,7 +10,6 @@ import {
 } from 'lucide-react';
 import { 
   TurnaroundTimeReport, 
-  MeanMedianMetric, 
   TurnaroundMetricsGroup 
 } from '../types/compliance';
 
@@ -39,39 +35,6 @@ export const TurnaroundMetricsSection: React.FC<TurnaroundMetricsSectionProps> =
       return `${hrs}h ${mins}m`;
     }
     return `${Math.round(minutes)} min`;
-  };
-
-  const getStatusBadge = (status: MeanMedianMetric['status']) => {
-    switch (status) {
-      case 'OPTIMAL':
-        return (
-          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-200">
-            <CheckCircle2 className="w-3 h-3 text-emerald-600" />
-            Optimal (≤ 50%)
-          </span>
-        );
-      case 'WARNING':
-        return (
-          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 text-amber-800 border border-amber-200">
-            <AlertTriangle className="w-3 h-3 text-amber-600" />
-            Warning (50-100%)
-          </span>
-        );
-      case 'CARRIED_OVER':
-        return (
-          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-rose-100 text-rose-800 border border-rose-200">
-            <AlertOctagon className="w-3 h-3 text-rose-600" />
-            Carried Over (&gt; 100%)
-          </span>
-        );
-      default:
-        return (
-          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-slate-100 text-slate-600">
-            <HelpCircle className="w-3 h-3 text-slate-400" />
-            No Data
-          </span>
-        );
-    }
   };
 
   // Determine current active metric group based on viewMode
@@ -246,9 +209,6 @@ export const TurnaroundMetricsSection: React.FC<TurnaroundMetricsSectionProps> =
 
       <div className="flex items-center justify-between text-xs text-slate-500 px-1">
         <span className="font-semibold text-slate-700">{contextTitle}</span>
-        <span className="text-[11px] text-slate-400">
-          Threshold rule status: ≤ 50% optimal (green), 50-100% warning (amber), &gt; 100% breached (red)
-        </span>
       </div>
 
       {/* Metric Cards Grid */}
@@ -266,7 +226,6 @@ export const TurnaroundMetricsSection: React.FC<TurnaroundMetricsSectionProps> =
                   <div className={`p-2 rounded-lg ${card.iconColor}`}>
                     <Icon className="w-4 h-4" />
                   </div>
-                  {getStatusBadge(card.data.status)}
                 </div>
 
                 <h3 className="text-xs font-bold text-slate-800 leading-snug">
@@ -277,27 +236,13 @@ export const TurnaroundMetricsSection: React.FC<TurnaroundMetricsSectionProps> =
                 </p>
               </div>
 
-              <div className="mt-4 pt-3 border-t border-slate-200/60 grid grid-cols-2 gap-2">
-                <div>
-                  <span className="text-[10px] uppercase tracking-wider font-semibold text-slate-400 block">
-                    Mean (Avg)
-                  </span>
-                  <span className="text-sm font-bold font-mono text-slate-900">
-                    {formatMinutes(card.data.mean)}
-                  </span>
-                </div>
-                <div>
-                  <span className="text-[10px] uppercase tracking-wider font-semibold text-slate-400 block">
-                    Median
-                  </span>
-                  <span className="text-sm font-bold font-mono text-slate-900">
-                    {formatMinutes(card.data.median)}
-                  </span>
-                </div>
-                <div className="col-span-2 flex items-center justify-between text-[10px] text-slate-400 mt-1 font-medium">
-                  <span>Samples: {card.data.count}</span>
-                  <span>Limit: {formatMinutes(card.data.threshold)}</span>
-                </div>
+              <div className="mt-4 pt-3 border-t border-slate-200/60">
+                <span className="text-[10px] uppercase tracking-wider font-semibold text-slate-400 block">
+                  Average TAT
+                </span>
+                <span className="text-2xl font-bold font-mono text-slate-900">
+                  {formatMinutes(card.data.mean)}
+                </span>
               </div>
             </div>
           );
