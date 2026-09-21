@@ -314,7 +314,7 @@ export async function recordOptionalFolderAbsent(mailbox: string): Promise<void>
   );
 }
 
-export async function listEmailThreads(filter: string, ownerEmail?: string, receivedDate?: string): Promise<SqlRow[]> {
+export async function listEmailThreads(filter: string, ownerEmail?: string, receivedFrom?: string, receivedTo?: string): Promise<SqlRow[]> {
   const conditions: string[] = ['t.sla_exclusion_reason IS NULL'];
   const params: unknown[] = [];
   if (filter === 'unassigned') conditions.push("t.status='UNASSIGNED'");
@@ -326,9 +326,13 @@ export async function listEmailThreads(filter: string, ownerEmail?: string, rece
     params.push(ownerEmail.toLowerCase());
     conditions.push(`m.email=$${params.length}`);
   }
-  if (receivedDate) {
-    params.push(receivedDate);
-    conditions.push(`(t.received_at AT TIME ZONE 'Africa/Nairobi')::date=$${params.length}::date`);
+  if (receivedFrom) {
+    params.push(receivedFrom);
+    conditions.push(`(t.received_at AT TIME ZONE 'Africa/Nairobi')::date >= $${params.length}::date`);
+  }
+  if (receivedTo) {
+    params.push(receivedTo);
+    conditions.push(`(t.received_at AT TIME ZONE 'Africa/Nairobi')::date <= $${params.length}::date`);
   }
   return (await getPostgresPool().query<SqlRow>(
     `SELECT t.id,t.subject,t.customer_email,t.received_at,t.first_response_at,t.resolved_at,

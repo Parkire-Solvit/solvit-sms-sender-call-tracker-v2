@@ -102,7 +102,8 @@ export function EmailSlaSection({ employeeEmail }: { employeeEmail?: string }) {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [filter, setFilter] = useState(isEmployee ? 'awaiting' : 'all');
   const [owner, setOwner] = useState('');
-  const [receivedDate, setReceivedDate] = useState('');
+  const [receivedFrom, setReceivedFrom] = useState('');
+  const [receivedTo, setReceivedTo] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
@@ -119,7 +120,8 @@ export function EmailSlaSection({ employeeEmail }: { employeeEmail?: string }) {
       const query = new URLSearchParams({
         filter,
         ...(owner ? { owner } : {}),
-        ...(receivedDate ? { date: receivedDate } : {}),
+        ...(receivedFrom ? { from: receivedFrom } : {}),
+        ...(receivedTo ? { to: receivedTo } : {}),
       });
       const [nextThreads, nextMembers, nextAlerts, nextSummary, nextSettings, nextNotices] = await Promise.all([
         api<Thread[]>(`/api/email/threads?${query}`), api<TeamMember[]>(isEmployee ? '/api/email/assignment-targets' : '/api/email/team'),
@@ -130,7 +132,7 @@ export function EmailSlaSection({ employeeEmail }: { employeeEmail?: string }) {
       setSummary(nextSummary); setSettings(nextSettings); setAssignmentNotices(nextNotices);
       setError('');
     } catch (cause) { setError((cause as Error).message); }
-  }, [filter, owner, receivedDate, isEmployee]);
+  }, [filter, owner, receivedFrom, receivedTo, isEmployee]);
 
   useEffect(() => {
     void refresh();
@@ -266,7 +268,8 @@ export function EmailSlaSection({ employeeEmail }: { employeeEmail?: string }) {
       <section className="p-5 rounded-2xl border border-slate-200 bg-white shadow-sm"><div className="flex flex-wrap items-center justify-between gap-3 mb-4"><div><h3 className="font-semibold">CS emails</h3><p className="mt-1 text-xs text-slate-500">All times are Nairobi time (UTC+3). SLA counts Mon–Fri, 08:00–17:00, excluding configured holidays. Auto-refreshes every 30 seconds.</p></div><div className="flex flex-wrap gap-2">
         <select aria-label="Email status filter" value={filter} onChange={(event) => setFilter(event.target.value)} className="border rounded-lg px-2 py-1.5 text-sm">{filters.filter(([value]) => !isEmployee || value !== 'unassigned').map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select>
         {!isEmployee && <select aria-label="Email owner filter" value={owner} onChange={(event) => setOwner(event.target.value)} className="border rounded-lg px-2 py-1.5 text-sm"><option value="">All owners</option>{members.map((member) => <option key={member.id} value={member.email}>{member.display_name}</option>)}</select>}
-        <input aria-label="Email received date filter" title="Filter by received date" type="date" value={receivedDate} onChange={(event) => setReceivedDate(event.target.value)} className="border rounded-lg px-2 py-1.5 text-sm" />
+        <label className="flex items-center gap-2 text-xs text-slate-500"><span>From</span><input aria-label="Emails received from" title="Start of received-date range" type="date" value={receivedFrom} max={receivedTo || undefined} onChange={(event) => setReceivedFrom(event.target.value)} className="border rounded-lg px-2 py-1.5 text-sm text-slate-800" /></label>
+        <label className="flex items-center gap-2 text-xs text-slate-500"><span>To</span><input aria-label="Emails received to" title="End of received-date range" type="date" value={receivedTo} min={receivedFrom || undefined} onChange={(event) => setReceivedTo(event.target.value)} className="border rounded-lg px-2 py-1.5 text-sm text-slate-800" /></label>
       </div></div>
         <div className="space-y-3">
           {threads.map((thread) => <article key={thread.id} className="grid min-w-0 gap-4 rounded-xl border border-slate-200 p-4 md:grid-cols-2 xl:grid-cols-[minmax(0,1.4fr)_minmax(0,.65fr)_minmax(0,1.2fr)_minmax(0,.8fr)]">

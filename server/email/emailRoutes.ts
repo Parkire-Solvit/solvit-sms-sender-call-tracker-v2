@@ -81,11 +81,16 @@ export function createEmailRouter(config: EmailRuntimeConfig | null): Router {
     if (owner && (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(owner) || !config!.mailboxes.includes(owner.toLowerCase()))) {
       return response.status(400).json({ error: 'Invalid owner' });
     }
-    const receivedDate = typeof request.query.date === 'string' ? request.query.date.trim() : '';
-    if (receivedDate && !validCalendarDate(receivedDate)) {
-      return response.status(400).json({ error: 'Invalid received date' });
+    const legacyDate = typeof request.query.date === 'string' ? request.query.date.trim() : '';
+    const receivedFrom = typeof request.query.from === 'string' ? request.query.from.trim() : legacyDate;
+    const receivedTo = typeof request.query.to === 'string' ? request.query.to.trim() : legacyDate;
+    if ((receivedFrom && !validCalendarDate(receivedFrom)) || (receivedTo && !validCalendarDate(receivedTo))) {
+      return response.status(400).json({ error: 'Invalid received date range' });
     }
-    response.json(await listEmailThreads(filter, owner || undefined, receivedDate || undefined));
+    if (receivedFrom && receivedTo && receivedFrom > receivedTo) {
+      return response.status(400).json({ error: 'Received date range starts after it ends' });
+    }
+    response.json(await listEmailThreads(filter, owner || undefined, receivedFrom || undefined, receivedTo || undefined));
   }));
   router.get('/alerts', safe(async (_request, response) => response.json(await listEmailAlerts(response.locals.emailOwner || undefined))));
   router.get('/threads/:id/outlook', safe(async (request,response) => {
