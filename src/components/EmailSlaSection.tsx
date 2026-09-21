@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { AlertTriangle, Mail, RefreshCw, Settings2 } from 'lucide-react';
+import { AlertTriangle, ChevronDown, Mail, RefreshCw, Settings2 } from 'lucide-react';
 import { emailDeadlineLabel } from '../../shared/emailDeadlineLabel';
 import { emailCompletionOutcome, emailCompletionTime } from '../../shared/emailCompletionLabel';
 import { EmailSlaReports } from './EmailSlaReports';
@@ -31,6 +31,26 @@ type Settings = {
   resolutionMinutes: number; resolutionWarningMinutes: number; resolutionUrgentMinutes: number;
   holidayDates: string[];
 };
+
+const alertSeverity = (type: string) => type.endsWith('_BREACH') ? 3 : type.endsWith('_URGENT') ? 2 : type.endsWith('_WARNING') ? 1 : 0;
+const alertStage = (type: string) => type.startsWith('RESPONSE_') ? 'response' : type.startsWith('RESOLUTION_') ? 'resolution' : type;
+const isSystemAlert = (alert: Alert) => {
+  const subject = alert.subject.trim().toLowerCase();
+  return subject.startsWith('automatic reply:') || subject.startsWith('out of office') ||
+    subject.startsWith('delivery status notification') || subject.startsWith('reaction daily digest');
+};
+
+function actionableAlerts(alerts: Alert[]) {
+  const current = new Map<string, Alert>();
+  for (const alert of alerts) {
+    if (isSystemAlert(alert)) continue;
+    const key = `${alert.email_thread_id}:${alertStage(alert.alert_type)}`;
+    const previous = current.get(key);
+    if (!previous || alertSeverity(alert.alert_type) > alertSeverity(previous.alert_type)) current.set(key, alert);
+  }
+  return [...current.values()].sort((a, b) => alertSeverity(b.alert_type) - alertSeverity(a.alert_type) ||
+    new Date(b.emitted_at).getTime() - new Date(a.emitted_at).getTime());
+}
 
 const minuteFields = [
   'responseMinutes', 'responseWarningMinutes', 'responseUrgentMinutes',
@@ -86,6 +106,7 @@ export function EmailSlaSection({ employeeEmail }: { employeeEmail?: string }) {
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [showAlerts, setShowAlerts] = useState(false);
   const [resolveTarget, setResolveTarget] = useState<Thread | null>(null);
   const [resolutionNote, setResolutionNote] = useState('');
   const [now, setNow] = useState(Date.now());
@@ -175,6 +196,10 @@ export function EmailSlaSection({ employeeEmail }: { employeeEmail?: string }) {
     ['In progress', summary.in_progress], ['Breached', summary.breached],
     ['Resolved today', summary.resolved_today], ...(!isEmployee ? [['Unassigned', summary.unassigned] as [string, number]] : []),
   ] : [];
+  const displayedAlerts = actionableAlerts(alerts);
+  const breachAlerts = displayedAlerts.filter((alert) => alert.alert_type.endsWith('_BREACH')).length;
+  const urgentAlerts = displayedAlerts.filter((alert) => alert.alert_type.endsWith('_URGENT')).length;
+  const warningAlerts = displayedAlerts.filter((alert) => alert.alert_type.endsWith('_WARNING')).length;
 
   return <main className="max-w-7xl mx-auto px-3 sm:px-6 py-7 space-y-6">
     <div className="flex flex-wrap items-center justify-between gap-3">
@@ -204,7 +229,23 @@ export function EmailSlaSection({ employeeEmail }: { employeeEmail?: string }) {
         <div className="p-4 rounded-xl border bg-white"><p className="font-semibold text-sm">Response SLA</p><p className="text-2xl font-bold">{summary?.responded ? `${Math.round(100 * summary.response_met / summary.responded)}%` : 'N/A'}</p><p className="text-xs text-slate-500">{summary?.response_met || 0} of {summary?.responded || 0} answered within SLA</p></div>
         <div className="p-4 rounded-xl border bg-white"><p className="font-semibold text-sm">Resolution SLA</p><p className="text-2xl font-bold">{summary?.resolved ? `${Math.round(100 * summary.resolution_met / summary.resolved)}%` : 'N/A'}</p><p className="text-xs text-slate-500">{summary?.resolution_met || 0} of {summary?.resolved || 0} resolved within SLA</p></div>
       </div>
-      {alerts.length > 0 && <section className="p-4 rounded-xl border bg-amber-50"><h3 className="font-semibold text-sm flex items-center gap-2"><AlertTriangle className="w-4 h-4" /> Active alerts ({alerts.length})</h3><div className="mt-2 space-y-1 max-h-40 overflow-auto">{alerts.map((alert) => <div key={alert.id} className="flex justify-between gap-2 text-xs"><span>#{alert.email_thread_id} · {alert.alert_type.replaceAll('_', ' ')} · {alert.owner_name || 'Unassigned'} · {alert.subject}</span><button disabled={busy} onClick={() => void action(`/api/email/alerts/${alert.id}/acknowledge`)} className="font-semibold underline shrink-0">Acknowledge</button></div>)}</div></section>}
+      {displayedAlerts.length > 0 && <section className="overflow-hidden rounded-xl border border-amber-200 bg-white shadow-sm">
+        <button type="button" aria-expanded={showAlerts} onClick={() => setShowAlerts((visible) => !visible)} className="flex w-full flex-wrap items-center justify-between gap-3 px-4 py-3 text-left hover:bg-amber-50/60">
+          <span className="flex items-center gap-2 text-sm font-semibold text-slate-800"><AlertTriangle className="h-4 w-4 text-amber-600" /> SLA alerts</span>
+          <span className="flex flex-wrap items-center gap-2 text-xs">
+            {breachAlerts > 0 && <span className="rounded-full bg-red-100 px-2.5 py-1 font-semibold text-red-700">{breachAlerts} critical</span>}
+            {urgentAlerts > 0 && <span className="rounded-full bg-orange-100 px-2.5 py-1 font-semibold text-orange-700">{urgentAlerts} urgent</span>}
+            {warningAlerts > 0 && <span className="rounded-full bg-amber-100 px-2.5 py-1 font-semibold text-amber-700">{warningAlerts} warning</span>}
+            <span className="inline-flex items-center gap-1 font-medium text-slate-600">{showAlerts ? 'Hide alerts' : 'View alerts'} <ChevronDown className={`h-4 w-4 transition-transform ${showAlerts ? 'rotate-180' : ''}`} /></span>
+          </span>
+        </button>
+        {showAlerts && <div className="max-h-72 divide-y overflow-auto border-t border-amber-100">
+          {displayedAlerts.map((alert) => <div key={alert.id} className="flex items-start justify-between gap-4 px-4 py-3 text-xs">
+            <div className="min-w-0"><p className="font-semibold text-slate-800">{alert.alert_type.replaceAll('_', ' ')}</p><p className="mt-0.5 truncate text-slate-600">#{alert.email_thread_id} · {alert.owner_name || 'Unassigned'} · {alert.subject || '(no subject)'}</p></div>
+            <button disabled={busy} onClick={() => void action(`/api/email/alerts/${alert.id}/acknowledge`)} className="shrink-0 font-semibold text-blue-700 hover:underline disabled:opacity-50">Acknowledge</button>
+          </div>)}
+        </div>}
+      </section>}
       {!isEmployee && showSettings && settings && <section className="p-4 rounded-xl border bg-white"><h3 className="font-semibold">Email SLA settings (minutes)</h3><div className="grid grid-cols-2 md:grid-cols-3 gap-3 mt-3">
         {minuteFields.map((key) => <label key={key} className="text-xs text-slate-600">{key.replace(/([A-Z])/g, ' $1')}<input className="block mt-1 w-full border rounded-lg px-2 py-1.5" type="number" min="1" value={settings[key]} onChange={(event) => setSettings({ ...settings, [key]: Number(event.target.value) })} /></label>)}
       </div><p className="mt-4 text-xs text-slate-600">SLA hours: Monday-Friday, 8:00 AM-5:00 PM Nairobi time. The clock pauses outside these hours and on the dates below.</p>
