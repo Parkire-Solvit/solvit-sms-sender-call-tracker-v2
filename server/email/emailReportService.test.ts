@@ -15,7 +15,7 @@ function email(overrides: Partial<OwnedReportEmail> = {}): OwnedReportEmail {
     responseDueAt:new Date('2026-09-16T05:30Z'),resolutionDueAt:new Date('2026-09-16T07:00Z'),holidayDates:[],
     receiptOwner:owners[0].email,responseOwner:owners[0].email,resolutionOwner:owners[1].email,cutoffOwner:owners[1].email,...overrides};
 }
-test('stage ownership keeps completed performance with original owner and scopes member exports', () => {
+test('response ownership keeps completed performance with original owner and scopes member exports', () => {
   const all=assembleEmailReport([email(),email({id:2,receiptOwner:null,responseOwner:null,resolutionOwner:null,cutoffOwner:null})],owners,period,now);
   assert.equal(all.summary.response.completedLate,2);
   assert.equal(all.owners[0].response.completedLate,1);
@@ -28,9 +28,10 @@ test('stage ownership keeps completed performance with original owner and scopes
   assert.equal(irene.overdue.length,0);
   const carol=assembleEmailReport([email()],owners,period,now,owners[1].email);
   assert.equal(carol.summary.received,0);
-  assert.equal(carol.summary.resolution.overdueOpen,1);
-  assert.equal(carol.overdue[0].owner,'Caroline');
-  const workbook=XLSX.read(emailReportWorkbook(carol),{type:'buffer'});
+  assert.equal(carol.overdue.length,0);
+  const carolOpen=assembleEmailReport([email({firstResponseAt:null,responseOwner:owners[1].email})],owners,period,now,owners[1].email);
+  assert.equal(carolOpen.overdue[0].owner,'Caroline');
+  const workbook=XLSX.read(emailReportWorkbook(carolOpen),{type:'buffer'});
   assert.deepEqual(workbook.SheetNames,['Summary','Owners','Overdue']);
   assert.equal(workbook.Sheets.Overdue.B2.t,'s');
   assert.equal(workbook.Sheets.Overdue.B2.f,undefined);

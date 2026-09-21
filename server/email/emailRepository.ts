@@ -161,26 +161,6 @@ export async function storeInbound(
       }
       return null;
     }
-    const identity = emailIdentity(message);
-    const referenced = [identity.inReplyTo, ...identity.references].filter((value): value is string => Boolean(value));
-    if (referenced.length) {
-      const prior = await client.query<SqlRow>(
-        `SELECT email_thread_id FROM email_messages WHERE internet_message_id=ANY($1::text[])
-         ORDER BY sent_or_received_at DESC LIMIT 1`, [referenced],
-      );
-      if (prior.rows[0]) {
-        const priorThreadId = Number(prior.rows[0].email_thread_id);
-        await rememberMailboxCopy(client, sourceMailbox, message, priorThreadId);
-        await client.query(
-          `INSERT INTO email_messages (email_thread_id,graph_message_id,internet_message_id,graph_conversation_id,
-           source_mailbox,sender_email,recipient_data,direction,sent_or_received_at)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,'INBOUND',$8) ON CONFLICT DO NOTHING`,
-          [priorThreadId, message.id, internetId, message.conversationId || null, sourceMailbox, sender,
-            JSON.stringify(recipients(message)), receivedAt],
-        );
-        return priorThreadId;
-      }
-    }
     const assignment = await assignOwner(client, groupAddress, message);
     const thread = await client.query<SqlRow>(
       `INSERT INTO email_threads (mailbox,graph_conversation_id,root_internet_message_id,subject,customer_email,
@@ -263,12 +243,12 @@ export async function storeOutbound(sourceMailbox: string, message: GraphMessage
     }, sentAt);
     await client.query(
       `UPDATE email_threads SET first_response_at=$2,response_breached=$3,
-       status=CASE WHEN status='RESOLVED' THEN status ELSE 'IN_PROGRESS' END,updated_at=now() WHERE id=$1`,
-      [threadId, state.firstResponseAt, state.responseBreached],
+       resolved_at=$2,responded_by=$4,status='RESOLVED',updated_at=now() WHERE id=$1`,
+      [threadId, state.firstResponseAt, state.responseBreached, address(sourceMailbox)],
     );
     await client.query(
       `UPDATE email_alerts SET acknowledged_at=now()
-       WHERE email_thread_id=$1 AND acknowledged_at IS NULL AND alert_type LIKE 'RESPONSE_%'`,
+       WHERE email_thread_id=$1 AND acknowledged_at IS NULL`,
       [threadId],
     );
     console.info('[EMAIL] Response recovered', { threadId, mailbox: sourceMailbox, sentAt: sentAt.toISOString(), matchMethod });
@@ -337,12 +317,28 @@ export async function listEmailThreads(filter: string, ownerEmail?: string, rece
   return (await getPostgresPool().query<SqlRow>(
     `SELECT t.id,t.subject,t.customer_email,t.received_at,t.first_response_at,t.resolved_at,
       t.response_due_at,t.resolution_due_at,t.status,t.response_breached,t.resolution_breached,
-      t.assignment_method,t.assignment_reason,t.outlook_web_link,t.sla_settings_snapshot,t.resolved_by,t.resolution_note,
+      t.assignment_method,t.assignment_reason,t.outlook_web_link,t.sla_settings_snapshot,t.resolved_by,t.responded_by,t.resolution_note,
       m.email AS owner_email,m.display_name AS owner_name
      FROM email_threads t LEFT JOIN email_team_members m ON m.id=t.assigned_member_id
      ${conditions.length ? `WHERE ${conditions.join(' AND ')}` : ''}
      ORDER BY t.received_at DESC LIMIT 200`, params,
   )).rows;
+}
+
+export async function excludeEmailThread(threadId: number, actor: string, ownerEmail: string | null): Promise<boolean> {
+  return transaction(async (client) => {
+    const result = await client.query(
+      `UPDATE email_threads t SET sla_exclusion_reason='No response required',resolved_by=$3,
+       resolution_note='Excluded by ' || $3,updated_at=now()
+       FROM email_team_members m
+       WHERE t.id=$1 AND t.assigned_member_id=m.id AND t.first_response_at IS NULL
+         AND t.sla_exclusion_reason IS NULL AND ($2::text IS NULL OR m.email=$2)`,
+      [threadId, ownerEmail, actor],
+    );
+    if (!result.rowCount) return false;
+    await client.query('UPDATE email_alerts SET acknowledged_at=now() WHERE email_thread_id=$1 AND acknowledged_at IS NULL', [threadId]);
+    return true;
+  });
 }
 
 export async function assignEmailThread(threadId: number, memberId: number, ownerEmail: string | null = null, actor = 'admin'): Promise<boolean> {
@@ -411,7 +407,7 @@ export async function emitDueAlerts(settings: EmailSlaSettings): Promise<number>
     };
     const snapshot: EmailSlaSettings = row.sla_settings_snapshot || settings;
     const due = dueEmailAlerts(state, snapshot, new Date(), new Set<EmailAlertType>(),
-      row.status === 'UNASSIGNED');
+      row.status === 'UNASSIGNED').filter((alert) => alert === 'EMAIL_UNASSIGNED' || alert.startsWith('RESPONSE_'));
     for (const alert of due) {
       const result = await getPostgresPool().query(
         `INSERT INTO email_alerts (email_thread_id,alert_type) VALUES ($1,$2)
@@ -430,8 +426,7 @@ export async function listEmailAlerts(ownerEmail?: string): Promise<SqlRow[]> {
      LEFT JOIN email_team_members m ON m.id=t.assigned_member_id
      WHERE a.acknowledged_at IS NULL AND t.sla_exclusion_reason IS NULL AND t.resolved_at IS NULL AND
        ((a.alert_type='EMAIL_UNASSIGNED' AND t.status='UNASSIGNED') OR
-        (a.alert_type LIKE 'RESPONSE_%' AND t.first_response_at IS NULL) OR
-        (a.alert_type LIKE 'RESOLUTION_%' AND t.resolved_at IS NULL))
+        (a.alert_type LIKE 'RESPONSE_%' AND t.first_response_at IS NULL))
      ${ownerEmail ? 'AND m.email=$1' : ''}
      ORDER BY a.emitted_at DESC LIMIT 100`, ownerEmail ? [ownerEmail.toLowerCase()] : [],
   )).rows;
@@ -481,9 +476,7 @@ export async function emailSummary(ownerEmail?: string): Promise<SqlRow> {
       COUNT(*) FILTER (WHERE status='AWAITING_RESPONSE')::int AS awaiting_response,
       COUNT(*) FILTER (WHERE status='IN_PROGRESS')::int AS in_progress,
       COUNT(*) FILTER (WHERE status='RESOLVED' AND resolved_at::date=current_date)::int AS resolved_today,
-      COUNT(*) FILTER (WHERE resolved_at IS NULL AND (response_breached OR resolution_breached OR
-        (first_response_at IS NULL AND response_due_at <= now()) OR
-        (resolved_at IS NULL AND resolution_due_at <= now())))::int AS breached,
+      COUNT(*) FILTER (WHERE first_response_at IS NULL AND response_due_at <= now())::int AS breached,
       COUNT(*) FILTER (WHERE first_response_at IS NOT NULL AND response_breached=false)::int AS response_met,
       COUNT(*) FILTER (WHERE first_response_at IS NOT NULL)::int AS responded,
       COUNT(*) FILTER (WHERE resolved_at IS NOT NULL AND resolution_breached=false)::int AS resolution_met,
@@ -504,15 +497,11 @@ export async function emailSummary(ownerEmail?: string): Promise<SqlRow> {
     )).rows;
     row.near_sla = open.filter((thread) => {
       const responseDue = new Date(thread.response_due_at);
-      const resolutionDue = new Date(thread.resolution_due_at);
       const snapshot: EmailSlaSettings = thread.sla_settings_snapshot || settings;
       if (!isEmailWorkingTime(now, snapshot.holidayDates)) return false;
-      return (!thread.first_response_at && responseDue > now &&
+      return !thread.first_response_at && responseDue > now &&
         emailWorkingMinutesBetween(now, responseDue, snapshot.holidayDates) <=
-          snapshot.responseMinutes - snapshot.responseWarningMinutes) ||
-        (!thread.resolved_at && resolutionDue > now &&
-          emailWorkingMinutesBetween(now, resolutionDue, snapshot.holidayDates) <=
-          snapshot.resolutionMinutes - snapshot.resolutionWarningMinutes);
+          snapshot.responseMinutes - snapshot.responseWarningMinutes;
     }).length;
   }
   return row;

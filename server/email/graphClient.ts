@@ -185,6 +185,12 @@ export class GraphClient {
     const message=await this.getJson<GraphMessage>(`${graphOrigin}${path}?$select=id,webLink`);
     const url=new URL(message.webLink || '');
     if (url.protocol !== 'https:' || url.username || url.password || !['outlook.office365.com','outlook.office.com','outlook.cloud.microsoft'].includes(url.hostname)) throw new Error('Invalid Outlook message link');
+    // Graph commonly returns the legacy outlook.office365.com/owa URL, which
+    // can return HTTP 401 even when the agent is signed into modern Outlook.
+    // Preserve Graph's mailbox-local item identity but use the current route.
+    const itemId=url.searchParams.get('ItemID') || url.searchParams.get('itemid');
+    if (itemId) return `https://outlook.cloud.microsoft/mail/inbox/id/${encodeURIComponent(itemId)}`;
+    url.hostname='outlook.cloud.microsoft';
     url.searchParams.set('ispopout','0');
     return url.toString();
   }

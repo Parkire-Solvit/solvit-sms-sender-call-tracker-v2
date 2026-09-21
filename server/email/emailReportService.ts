@@ -49,10 +49,10 @@ export function assembleEmailReport(emails: OwnedReportEmail[], owners: Owner[],
       openingBacklog: calculateEmailReport(scope('cutoffOwner', selected), period, now).openingBacklog,
       olderBacklogStillOpen: calculateEmailReport(scope('cutoffOwner', selected), period, now).olderBacklogStillOpen };
   };
-  const rows = emails.flatMap(e => (['response', 'resolution'] as const).flatMap(stage => {
-    const at = stage === 'response' ? e.firstResponseAt : e.resolvedAt;
-    const due = stage === 'response' ? e.responseDueAt : e.resolutionDueAt;
-    const assigned = stage === 'response' ? e.responseOwner : e.resolutionOwner;
+  const rows = emails.flatMap(e => (['response'] as const).flatMap(stage => {
+    const at = e.firstResponseAt;
+    const due = e.responseDueAt;
+    const assigned = e.responseOwner;
     if ((owner && assigned !== owner) || (at && at < cutoff) || (e.resolvedAt && e.resolvedAt < cutoff) || due >= cutoff) return [];
     return [{ id: e.id, subject: e.subject, customerEmail: e.customerEmail,
       owner: assigned ? owners.find(m => m.email === assigned)?.name || assigned : 'Unknown / unassigned',
@@ -66,7 +66,7 @@ export function assembleEmailReport(emails: OwnedReportEmail[], owners: Owner[],
     summary: summarize(owner), owners: selectedOwners.map(m => ({ ...m, ...summarize(m.email) })),
     unknownOwnership: !owner && unknown,
     overdue: rows,
-    attribution: 'Received workload: initial owner. Response/resolution SLA: owner at completion, or at period cutoff if still open. Backlog: owner at cutoff. Missing history is included in team totals only.' };
+    attribution: 'Assigned workload: initial owner. Response SLA: owner at response, or at period cutoff if still open. Missing history is included in team totals only.' };
 }
 
 export async function getEmailReport(period: ReportPeriod, now: Date, owner?: string) {
@@ -100,12 +100,11 @@ export function emailReportWorkbook(report: EmailReport): Buffer {
   const s = report.summary;
   sheet('Summary', [['Metric','Value'], ['Period start (UTC)',report.period.start],['Period end exclusive (UTC)',report.period.endExclusive],['As of (UTC)',s.asOf],
     ['Received',s.received],['Opening backlog',s.openingBacklog],['Older backlog still open',s.olderBacklogStillOpen],
-    ...(['response','resolution'] as const).flatMap(stage => Object.entries(s[stage]).map(([k,v]) => [`${stage}: ${k}`,v])),
+    ...Object.entries(s.response).map(([k,v]) => [`response: ${k}`,v]),
     ['Attribution',report.attribution]], [36,100]);
-  sheet('Owners', [['Owner','Email','Received','Response met','Response completed late','Response overdue open','Response SLA %','Resolution met','Resolution completed late','Resolution overdue open','Resolution SLA %','Older backlog'],
-    ...report.owners.map(o => [o.name,o.email,o.received,o.response.met,o.response.completedLate,o.response.overdueOpen,o.response.compliancePercent,
-      o.resolution.met,o.resolution.completedLate,o.resolution.overdueOpen,o.resolution.compliancePercent,o.olderBacklogStillOpen])], [24,32,12,16,22,22,18,16,22,22,18,18]);
-  sheet('Overdue', [['Thread','Subject','Customer','Owner','Stage','Received (UTC)','Due (UTC)','Overdue working minutes','Older backlog'],
-    ...report.overdue.map(r => [r.id,r.subject,r.customerEmail,r.owner,r.stage,r.receivedAt,r.dueAt,r.overdueWorkingMinutes,r.olderBacklog])], [12,60,32,24,16,26,26,26,18]);
+  sheet('Owners', [['Owner','Email','Assigned tickets','Response met','Response completed late','Response overdue open','Response SLA %','Older backlog'],
+    ...report.owners.map(o => [o.name,o.email,o.received,o.response.met,o.response.completedLate,o.response.overdueOpen,o.response.compliancePercent,o.olderBacklogStillOpen])], [24,32,16,16,22,22,18,18]);
+  sheet('Overdue', [['Ticket','Subject','Customer','Owner','Received (UTC)','Due (UTC)','Overdue working minutes','Older backlog'],
+    ...report.overdue.map(r => [r.id,r.subject,r.customerEmail,r.owner,r.receivedAt,r.dueAt,r.overdueWorkingMinutes,r.olderBacklog])], [12,60,32,24,26,26,26,18]);
   return XLSX.write(book, { type: 'buffer', bookType: 'xlsx' });
 }

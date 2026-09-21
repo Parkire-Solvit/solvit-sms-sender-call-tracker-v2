@@ -10,7 +10,7 @@ import { getEmailSyncHealth, runEmailSync } from './emailSyncService';
 import {
   acknowledgeEmailAlert, assignEmailThread, emailSummary, getEmailSettings, listEmailAlerts,
   listAssignmentNotifications, markAssignmentNotificationSeen, listEmailTeam, listEmailThreads,
-  resolveEmailThread, setEmailSettings, updateEmailMember,
+  excludeEmailThread, resolveEmailThread, setEmailSettings, updateEmailMember,
 } from './emailRepository';
 
 const safe = (handler: RequestHandler): RequestHandler => (request, response, next) => {
@@ -99,8 +99,11 @@ export function createEmailRouter(config: EmailRuntimeConfig | null): Router {
     const result=await getPostgresPool().query(emailOutlookCopySql,[id,response.locals.emailOwner || null]);
     const copy=result.rows[0];
     if (!copy) return response.status(404).json({error:'Email not found in your queue'});
-    if (!copy.graph_message_id) return response.status(409).json({error:'No copy has been synced in the assigned agent’s mailbox. Open Outlook and search the subject; reassignment does not grant mailbox access.'});
-    try { return response.json({url:await config!.graph.getMessageWebLink(copy.email,copy.graph_message_id),mailbox:copy.email}); }
+    if (!copy.graph_message_id) return response.json({
+      url:`https://outlook.cloud.microsoft/mail/search?q=${encodeURIComponent(copy.subject || '')}`,
+      mailbox:copy.email, exact:false,
+    });
+    try { return response.json({url:await config!.graph.getMessageWebLink(copy.email,copy.graph_message_id),mailbox:copy.email,exact:true}); }
     catch { return response.status(502).json({error:'Microsoft could not open this mailbox copy. Sign in to Outlook with your CS email and search the subject while we verify synchronization.'}); }
   }));
   router.get('/assignment-notifications', safe(async (_request, response) => {
@@ -154,6 +157,14 @@ export function createEmailRouter(config: EmailRuntimeConfig | null): Router {
     const ownerEmail = response.locals.emailOwner || null;
     const updated = await assignEmailThread(id, memberId, ownerEmail, ownerEmail || 'admin');
     response.status(updated ? 200 : 404).json(updated ? { success: true } : { error: 'Thread or member not found' });
+  }));
+  router.post('/threads/:id/no-response-required', safe(async (request, response) => {
+    const id = positiveId(request.params.id);
+    if (!id) return response.status(400).json({ error: 'Invalid ticket ID' });
+    const ownerEmail: string | null = response.locals.emailOwner || null;
+    const actor = ownerEmail || process.env.ADMIN_USERNAME?.trim().toLowerCase() || 'admin';
+    const updated = await excludeEmailThread(id, actor, ownerEmail);
+    response.status(updated ? 200 : 404).json(updated ? { success: true } : { error: 'Open ticket not found in your queue' });
   }));
   router.post('/threads/:id/resolve', safe(async (request, response) => {
     const id = positiveId(request.params.id);

@@ -15,7 +15,7 @@ test('fresh Outlook links use allowed mailbox and metadata only, and reject fore
     return new Response(JSON.stringify(calls.length===1 ? {access_token:'test',expires_in:3600} : {id:'copy',webLink}));
   };
   const graph=new GraphClient(config,http as typeof fetch);
-  assert.match(await graph.getMessageWebLink('mercy@example.com','copy'),/ispopout=0/);
+  assert.equal(await graph.getMessageWebLink('mercy@example.com','copy'),'https://outlook.cloud.microsoft/mail/inbox/id/owned-copy');
   assert.match(calls[1],/users\/mercy%40example.com\/messages\/copy\?\$select=id,webLink/);
   await assert.rejects(graph.getMessageWebLink('outsider@example.com','copy'),/allowlist/);
   webLink='https://attacker.example/';

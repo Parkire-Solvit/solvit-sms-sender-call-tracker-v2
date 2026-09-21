@@ -73,6 +73,10 @@ test('numeric migration sequence survives the two legacy 004 files and repairs S
       "SELECT column_name FROM information_schema.columns WHERE table_name='email_threads' AND column_name IN ('assignment_reason','outlook_web_link') ORDER BY column_name",
     );
     assert.deepEqual(routingColumns.rows.map((row) => row.column_name), ['assignment_reason', 'outlook_web_link']);
+    const responseActor = await db.query<{ column_name: string }>(
+      "SELECT column_name FROM information_schema.columns WHERE table_name='email_threads' AND column_name='responded_by'",
+    );
+    assert.equal(responseActor.rows.length, 1);
   } finally { await db.close(); }
 });
 
