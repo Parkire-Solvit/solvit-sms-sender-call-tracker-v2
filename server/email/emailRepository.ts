@@ -1,7 +1,7 @@
 import type pg from 'pg';
 import { getPostgresPool } from '../../db';
 import type { GraphMessage } from './graphClient';
-import { emailIdentity, isAddressedToGroup, replyMatchesKnownMessage } from './messageIdentity';
+import { emailIdentity, isAddressedToGroup, isFromMonitoredMailbox, replyMatchesKnownMessage } from './messageIdentity';
 import { chooseEmailOwner, findNamedOwner } from './emailAssignmentService';
 import { dueEmailAlerts, recordFirstResponse, startEmailSla, validateEmailSlaSettings } from './emailSlaService';
 import type { EmailAlertType, EmailSlaSettings, EmailSlaState } from './emailTypes';
@@ -131,10 +131,11 @@ export async function storeInbound(
   message: GraphMessage,
   settings: EmailSlaSettings,
   monitoringStart: Date,
+  monitoredMailboxes: readonly string[],
 ): Promise<number | null> {
   const addressedToSourceMailbox = toRecipients(message).includes(sourceMailbox.trim().toLowerCase());
   if (message['@removed'] || (!isAddressedToGroup(message, groupAddress) && !addressedToSourceMailbox)) return null;
-  if (emailExclusionReason(message)) return null;
+  if (emailExclusionReason(message) || isFromMonitoredMailbox(message, monitoredMailboxes)) return null;
   const internetId = emailIdentity(message).internetMessageId;
   const receivedAt = new Date(message.receivedDateTime || '');
   const sender = address(message.from?.emailAddress?.address);

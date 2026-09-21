@@ -30,6 +30,11 @@ export function isAddressedToGroup(message: GraphMessage, groupAddress: string):
     .some((recipient) => recipient.emailAddress?.address?.trim().toLowerCase() === target);
 }
 
+export function isFromMonitoredMailbox(message: GraphMessage, mailboxes: readonly string[]): boolean {
+  const sender = message.from?.emailAddress?.address?.trim().toLowerCase();
+  return Boolean(sender && mailboxes.some((mailbox) => mailbox.trim().toLowerCase() === sender));
+}
+
 // Conversation IDs are not assumed to be stable across personal mailboxes.
 // Prefer RFC message headers when linking an agent reply to an inbound email.
 export function replyMatchesKnownMessage(

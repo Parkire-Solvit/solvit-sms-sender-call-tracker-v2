@@ -1,6 +1,6 @@
 import { getPostgresPool } from '../../db';
 import { GraphClient, type GraphMessage } from './graphClient';
-import { emailIdentity, isAddressedToGroup } from './messageIdentity';
+import { emailIdentity, isAddressedToGroup, isFromMonitoredMailbox } from './messageIdentity';
 import {
   emailHealth, emitDueAlerts, ensureEmailTeam, getDeltaLink, getEmailSettings, isStoredEmail,
   recordOptionalFolderAbsent, recordSyncFailure, saveDeltaLink, storeInbound, storeOutbound,
@@ -53,6 +53,21 @@ function parseMailboxList(value: string): string[] {
   return value.split(',').map((mailbox) => mailbox.trim().toLowerCase()).filter(Boolean);
 }
 
+export const approvedCsMailboxes = [
+  'jmungasi@solvit.co.ke', 'iodago@solvit.co.ke', 'vmusyoka@solvit.co.ke',
+  'bmuthama@solvit.co.ke', 'modondi@solvit.co.ke', 'dbwosi@solvit.co.ke',
+  'cmbugua@solvit.co.ke',
+] as const;
+
+export function validateMonitoredMailboxes(mailboxes: readonly string[]): void {
+  const configured = [...new Set(mailboxes.map((mailbox) => mailbox.trim().toLowerCase()))].sort();
+  const approved = [...approvedCsMailboxes].sort();
+  if (configured.length !== mailboxes.length || configured.length !== approved.length ||
+      configured.some((mailbox,index) => mailbox !== approved[index])) {
+    throw new Error(`MICROSOFT_MONITORED_MAILBOXES must contain exactly the ${approved.length} approved CS mailboxes`);
+  }
+}
+
 export function configuredEmailRuntime(): EmailRuntimeConfig | null {
   if (process.env.EMAIL_SLA_ENABLED !== 'true') return null;
   const groupAddress = (process.env.MICROSOFT_CS_GROUP_ADDRESS || '').trim().toLowerCase();
@@ -61,6 +76,7 @@ export function configuredEmailRuntime(): EmailRuntimeConfig | null {
   if (!groupAddress || !mailboxes.length || Number.isNaN(monitoringStart.getTime())) {
     throw new Error('Email SLA needs a CS group address, explicit mailbox allowlist, and EMAIL_SLA_START_AT');
   }
+  validateMonitoredMailboxes(mailboxes);
   return {
     groupAddress, mailboxes, monitoringStart,
     graph: new GraphClient({
@@ -85,6 +101,7 @@ async function syncFolder(config: EmailRuntimeConfig, mailbox: string, folder: s
       const eventAt = new Date((direction === 'inbox' ? item.receivedDateTime : item.sentDateTime) || '');
       if (Number.isNaN(eventAt.getTime()) || eventAt < config.monitoringStart) continue;
       if (direction === 'inbox') {
+        if (isFromMonitoredMailbox(item, config.mailboxes)) continue;
         const addressedDirectlyToMailbox = (item.toRecipients || []).some((recipient) =>
           recipient.emailAddress?.address?.trim().toLowerCase() === mailbox);
         if (!isAddressedToGroup(item, config.groupAddress) && !addressedDirectlyToMailbox) continue;
@@ -93,7 +110,7 @@ async function syncFolder(config: EmailRuntimeConfig, mailbox: string, folder: s
         const detail = await config.graph.getMessageHeaders(mailbox, item.id);
         const message: GraphMessage = { ...item, internetMessageHeaders: detail.internetMessageHeaders };
         if (!emailIdentity(message).internetMessageId) continue;
-        if (await storeInbound(mailbox, config.groupAddress, message, settings, config.monitoringStart)) {
+        if (await storeInbound(mailbox, config.groupAddress, message, settings, config.monitoringStart, config.mailboxes)) {
           metrics.processed++;
           metrics.inboundTracked++;
         }
@@ -127,6 +144,7 @@ async function reconcileRecentInbox(config: EmailRuntimeConfig, mailbox: string)
   const since = new Date(Math.max(config.monitoringStart.getTime(), Date.now() - reconciliationLookbackMs));
   const items = await config.graph.getRecentFolderMessages(mailbox, 'inbox', since);
   for (const item of items) {
+    if (isFromMonitoredMailbox(item, config.mailboxes)) continue;
     const addressedDirectlyToMailbox = (item.toRecipients || []).some((recipient) =>
       recipient.emailAddress?.address?.trim().toLowerCase() === mailbox);
     if (!isAddressedToGroup(item, config.groupAddress) && !addressedDirectlyToMailbox) continue;
@@ -134,7 +152,7 @@ async function reconcileRecentInbox(config: EmailRuntimeConfig, mailbox: string)
     const detail = await isStoredEmail(item) ? item : await config.graph.getMessageHeaders(mailbox, item.id);
     const message: GraphMessage = { ...item, internetMessageHeaders: detail.internetMessageHeaders };
     if (!emailIdentity(message).internetMessageId) continue;
-    if (await storeInbound(mailbox, config.groupAddress, message, settings, config.monitoringStart)) {
+    if (await storeInbound(mailbox, config.groupAddress, message, settings, config.monitoringStart, config.mailboxes)) {
       metrics.processed++;
       metrics.inboundTracked++;
     }
