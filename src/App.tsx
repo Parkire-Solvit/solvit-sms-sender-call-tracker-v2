@@ -447,7 +447,7 @@ export default function App() {
                 className="mt-3 w-full py-3 bg-slate-100 hover:bg-slate-200 text-slate-800 font-bold rounded-xl transition-all cursor-pointer flex items-center justify-center gap-2 text-sm border border-slate-200"
               >
                 <Mail className="w-4 h-4" />
-                <span>Customer Service sign-in with Microsoft</span>
+                <span>Account Managers Sign in with Outlook</span>
               </a>
             )}
           </motion.div>
