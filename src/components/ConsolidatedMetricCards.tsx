@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { 
   PhoneIncoming, 
   PhoneCall, 
@@ -6,13 +6,82 @@ import {
   Clock, 
   AlertCircle, 
   CheckCircle2, 
-  ChevronRight
+  ChevronRight,
+  Info
 } from 'lucide-react';
 import { 
   HeadlineComplianceStats, 
   TurnaroundMetricsGroup, 
   SystemSettings 
 } from '../types/compliance';
+
+interface CardInfoTooltipProps {
+  id: string;
+  title: string;
+  text: string;
+}
+
+const CardInfoTooltip: React.FC<CardInfoTooltipProps> = ({ id, title, text }) => {
+  const [isOpen, setIsOpen] = useState(false);
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!isOpen) return;
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setIsOpen(false);
+      }
+    };
+
+    const handleClickOutside = (e: MouseEvent) => {
+      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
+        setIsOpen(false);
+      }
+    };
+
+    document.addEventListener('keydown', handleKeyDown);
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => {
+      document.removeEventListener('keydown', handleKeyDown);
+      document.removeEventListener('mousedown', handleClickOutside);
+    };
+  }, [isOpen]);
+
+  return (
+    <div className="relative inline-flex items-center" ref={containerRef}>
+      <button
+        id={id}
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation();
+          setIsOpen((prev) => !prev);
+        }}
+        onMouseEnter={() => setIsOpen(true)}
+        onMouseLeave={() => setIsOpen(false)}
+        className="p-0.5 text-slate-400 hover:text-slate-600 rounded-full transition-colors cursor-pointer focus:outline-hidden"
+        aria-label={`Information for ${title}`}
+      >
+        <Info className="w-3.5 h-3.5" />
+      </button>
+
+      {isOpen && (
+        <div
+          onClick={(e) => e.stopPropagation()}
+          role="tooltip"
+          className="absolute left-0 top-full mt-1.5 z-50 w-72 sm:w-80 rounded-xl bg-slate-900 text-slate-100 text-[11px] leading-relaxed p-3.5 shadow-xl border border-slate-700/80 pointer-events-auto"
+        >
+          <div className="text-[10px] font-bold uppercase tracking-wider text-indigo-300 mb-1">
+            {title}
+          </div>
+          <p className="text-slate-200 font-normal">
+            {text}
+          </p>
+        </div>
+      )}
+    </div>
+  );
+};
 
 interface ConsolidatedMetricCardsProps {
   headlineStats?: HeadlineComplianceStats;
@@ -120,9 +189,16 @@ export const ConsolidatedMetricCards: React.FC<ConsolidatedMetricCardsProps> = (
                 <PhoneIncoming className="w-4 h-4" />
               </div>
               <div>
-                <h3 className="text-sm font-bold text-slate-900 leading-tight">
-                  Incoming Calls
-                </h3>
+                <div className="flex items-center gap-1.5">
+                  <h3 className="text-sm font-bold text-slate-900 leading-tight">
+                    Incoming Calls
+                  </h3>
+                  <CardInfoTooltip
+                    id="info-tooltip-incoming"
+                    title="Incoming Calls"
+                    text="Received is every incoming call today. Answered is the ones picked up directly. Missed is the rest, calls that rang without being picked up. Each missed call becomes a callback case. Total Returned is how many of those cases have been called back and reached. Within SLA means the callback happened inside the 30-minute target set in Master Settings. Outside SLA means it still happened, just later than that. Not Returned means no callback has reached this person yet."
+                  />
+                </div>
                 <span className="text-[11px] text-slate-500">Daily Callback Tracking</span>
               </div>
             </div>
@@ -135,7 +211,6 @@ export const ConsolidatedMetricCards: React.FC<ConsolidatedMetricCardsProps> = (
                     ? 'bg-amber-100 text-amber-800 border-amber-200 animate-pulse' 
                     : 'bg-slate-100 text-slate-700 border-slate-200'
                 }`}
-                title={`${incomingOpen} open incoming callback obligations currently pending`}
               >
                 {incomingOpen > 0 ? (
                   <AlertCircle className="w-3 h-3 text-amber-600" />
@@ -143,6 +218,7 @@ export const ConsolidatedMetricCards: React.FC<ConsolidatedMetricCardsProps> = (
                   <CheckCircle2 className="w-3 h-3 text-emerald-600" />
                 )}
                 {incomingOpen} Open
+                <span className="text-[10px] font-normal text-amber-900/70 border-l border-amber-300/60 pl-1 ml-0.5">Still within window</span>
               </span>
 
               <span 
@@ -151,7 +227,6 @@ export const ConsolidatedMetricCards: React.FC<ConsolidatedMetricCardsProps> = (
                     ? 'bg-rose-100 text-rose-800 border-rose-200 animate-pulse' 
                     : 'bg-slate-100 text-slate-700 border-slate-200'
                 }`}
-                title={`${incomingNotReturned} unreturned incoming calls carried over`}
               >
                 {incomingNotReturned > 0 ? (
                   <AlertCircle className="w-3 h-3 text-rose-600" />
@@ -159,43 +234,65 @@ export const ConsolidatedMetricCards: React.FC<ConsolidatedMetricCardsProps> = (
                   <CheckCircle2 className="w-3 h-3 text-slate-400" />
                 )}
                 {incomingNotReturned} Not Returned
+                <span className="text-[10px] font-normal text-rose-900/70 border-l border-rose-300/60 pl-1 ml-0.5">Not reached yet</span>
               </span>
             </div>
           </div>
 
           {/* Top Line: Raw Activity */}
           <div className="my-2.5 grid grid-cols-3 gap-2">
-            <div className="bg-slate-50/90 rounded-xl p-2 border border-slate-100">
-              <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Received</div>
+            <div className="bg-slate-50/90 rounded-xl p-2 border border-slate-100 flex flex-col justify-between">
+              <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">
+                Received
+              </div>
               <div className="text-lg font-bold font-mono text-slate-900 mt-0.5">{summary?.total_calls_incoming || 0}</div>
+              <div className="text-[10.5px] text-slate-400 mt-0.5 leading-tight truncate">Answered or missed</div>
             </div>
-            <div className="bg-slate-50/90 rounded-xl p-2 border border-slate-100">
-              <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Answered</div>
+            <div className="bg-slate-50/90 rounded-xl p-2 border border-slate-100 flex flex-col justify-between">
+              <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">
+                Answered
+              </div>
               <div className="text-lg font-bold font-mono text-emerald-600 mt-0.5">{summary?.total_calls_incoming_connected || 0}</div>
+              <div className="text-[10.5px] text-slate-400 mt-0.5 leading-tight truncate">Picked up directly</div>
             </div>
-            <div className="bg-slate-50/90 rounded-xl p-2 border border-slate-100">
-              <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Missed</div>
+            <div className="bg-slate-50/90 rounded-xl p-2 border border-slate-100 flex flex-col justify-between">
+              <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">
+                Missed
+              </div>
               <div className="text-lg font-bold font-mono text-amber-600 mt-0.5">{summary?.total_calls_missed || 0}</div>
+              <div className="text-[10.5px] text-slate-400 mt-0.5 leading-tight truncate">Rang, unanswered</div>
             </div>
           </div>
 
           {/* Breakdown Block */}
           <div className="my-2.5 grid grid-cols-2 gap-2">
-            <div className="bg-slate-50/90 rounded-xl p-2 border border-slate-100">
-              <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Total Returned</div>
+            <div className="bg-slate-50/90 rounded-xl p-2 border border-slate-100 flex flex-col justify-between">
+              <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">
+                Total Returned
+              </div>
               <div className="text-lg font-bold font-mono text-indigo-700 mt-0.5">{incomingReturnedTotal}</div>
+              <div className="text-[10.5px] text-slate-400 mt-0.5 leading-tight truncate">Missed calls reached since</div>
             </div>
-            <div className="bg-slate-50/90 rounded-xl p-2 border border-slate-100">
-              <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Within SLA</div>
+            <div className="bg-slate-50/90 rounded-xl p-2 border border-slate-100 flex flex-col justify-between">
+              <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">
+                Within SLA
+              </div>
               <div className="text-lg font-bold font-mono text-emerald-700 mt-0.5">{incomingReturnedWithinSla}</div>
+              <div className="text-[10.5px] text-slate-400 mt-0.5 leading-tight truncate">Back within 30 min</div>
             </div>
-            <div className="bg-slate-50/90 rounded-xl p-2 border border-slate-100">
-              <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Outside SLA</div>
+            <div className="bg-slate-50/90 rounded-xl p-2 border border-slate-100 flex flex-col justify-between">
+              <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">
+                Outside SLA
+              </div>
               <div className="text-lg font-bold font-mono text-amber-700 mt-0.5">{incomingReturnedOutsideSla}</div>
+              <div className="text-[10.5px] text-slate-400 mt-0.5 leading-tight truncate">Back, but later</div>
             </div>
-            <div className={`rounded-xl p-2 border ${incomingNotReturned > 0 ? 'bg-rose-50/80 border-rose-200' : 'bg-slate-50/90 border-slate-100'}`}>
-              <div className={`text-[10px] font-bold uppercase tracking-wider ${incomingNotReturned > 0 ? 'text-rose-600' : 'text-slate-500'}`}>Not Returned</div>
+            <div className={`rounded-xl p-2 border flex flex-col justify-between ${incomingNotReturned > 0 ? 'bg-rose-50/80 border-rose-200' : 'bg-slate-50/90 border-slate-100'}`}>
+              <div className={`text-[10px] font-bold uppercase tracking-wider ${incomingNotReturned > 0 ? 'text-rose-600' : 'text-slate-500'}`}>
+                Not Returned
+              </div>
               <div className={`text-lg font-bold font-mono mt-0.5 ${incomingNotReturned > 0 ? 'text-rose-700' : 'text-slate-700'}`}>{incomingNotReturned}</div>
+              <div className={`text-[10.5px] mt-0.5 leading-tight truncate ${incomingNotReturned > 0 ? 'text-rose-500' : 'text-slate-400'}`}>Not reached yet</div>
             </div>
           </div>
         </div>
@@ -214,11 +311,9 @@ export const ConsolidatedMetricCards: React.FC<ConsolidatedMetricCardsProps> = (
               </span>
             </div>
             <div className="flex items-center gap-1">
-              <span 
-                className="px-2 py-0.5 rounded text-[10px] font-semibold border bg-indigo-50 text-indigo-700 border-indigo-200"
-                title={`Target deadline: within ${settings?.callback_window_minutes || 30} minutes`}
-              >
-                {settings?.callback_window_minutes || 30}m SLA
+              <span className="px-2 py-0.5 rounded text-[10px] font-semibold border bg-indigo-50 text-indigo-700 border-indigo-200 flex items-center gap-1">
+                <span>{settings?.callback_window_minutes || 30}m SLA</span>
+                <span className="text-[9px] font-normal text-indigo-500/80 border-l border-indigo-200 pl-1">Target for this card</span>
               </span>
             </div>
           </div>
@@ -250,9 +345,16 @@ export const ConsolidatedMetricCards: React.FC<ConsolidatedMetricCardsProps> = (
                 <PhoneCall className="w-4 h-4" />
               </div>
               <div>
-                <h3 className="text-sm font-bold text-slate-900 leading-tight">
-                  Outgoing Calls
-                </h3>
+                <div className="flex items-center gap-1.5">
+                  <h3 className="text-sm font-bold text-slate-900 leading-tight">
+                    Outgoing Calls
+                  </h3>
+                  <CardInfoTooltip
+                    id="info-tooltip-outgoing"
+                    title="Outgoing Calls"
+                    text="Dialled is every outgoing call attempt today. Connected is the ones that reached someone. Not Connected is the rest. Avg Tries / Unconnected is, on average, how many times a number was dialled before the day's attempts on it stopped, whether because it finally connected or because the team moved on."
+                  />
+                </div>
                 <span className="text-[11px] text-slate-500">Daily Dialling Activity</span>
               </div>
             </div>
@@ -260,21 +362,33 @@ export const ConsolidatedMetricCards: React.FC<ConsolidatedMetricCardsProps> = (
 
           {/* 4 PLAIN ACTIVITY COUNTS */}
           <div className="my-3.5 grid grid-cols-2 gap-2.5">
-            <div className="bg-slate-50/90 rounded-xl p-2.5 border border-slate-100">
-              <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Dialled</div>
+            <div className="bg-slate-50/90 rounded-xl p-2.5 border border-slate-100 flex flex-col justify-between">
+              <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">
+                Dialled
+              </div>
               <div className="text-xl font-bold font-mono text-slate-900 mt-0.5">{outgoingDialled}</div>
+              <div className="text-[10.5px] text-slate-400 mt-0.5 leading-tight truncate">Every attempt today</div>
             </div>
-            <div className="bg-slate-50/90 rounded-xl p-2.5 border border-slate-100">
-              <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Connected</div>
+            <div className="bg-slate-50/90 rounded-xl p-2.5 border border-slate-100 flex flex-col justify-between">
+              <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">
+                Connected
+              </div>
               <div className="text-xl font-bold font-mono text-emerald-600 mt-0.5">{outgoingConnected}</div>
+              <div className="text-[10.5px] text-slate-400 mt-0.5 leading-tight truncate">Reached someone</div>
             </div>
-            <div className="bg-slate-50/90 rounded-xl p-2.5 border border-slate-100">
-              <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Not Connected</div>
+            <div className="bg-slate-50/90 rounded-xl p-2.5 border border-slate-100 flex flex-col justify-between">
+              <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">
+                Not Connected
+              </div>
               <div className="text-xl font-bold font-mono text-amber-700 mt-0.5">{outgoingNotConnected}</div>
+              <div className="text-[10.5px] text-slate-400 mt-0.5 leading-tight truncate">Didn't connect</div>
             </div>
-            <div className="bg-slate-50/90 rounded-xl p-2.5 border border-slate-100">
-              <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Avg Tries / Unconnected</div>
+            <div className="bg-slate-50/90 rounded-xl p-2.5 border border-slate-100 flex flex-col justify-between">
+              <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">
+                Avg Tries / Unconnected
+              </div>
               <div className="text-xl font-bold font-mono text-blue-700 mt-0.5">{avgTriesPerUnconnected}</div>
+              <div className="text-[10.5px] text-slate-400 mt-0.5 leading-tight truncate">Dials before stopping</div>
             </div>
           </div>
         </div>
@@ -321,9 +435,16 @@ export const ConsolidatedMetricCards: React.FC<ConsolidatedMetricCardsProps> = (
                 <MessageSquare className="w-4 h-4" />
               </div>
               <div>
-                <h3 className="text-sm font-bold text-slate-900 leading-tight">
-                  SMS Follow-Up
-                </h3>
+                <div className="flex items-center gap-1.5">
+                  <h3 className="text-sm font-bold text-slate-900 leading-tight">
+                    SMS Follow-Up
+                  </h3>
+                  <CardInfoTooltip
+                    id="info-tooltip-sms"
+                    title="SMS Follow-Up"
+                    text="Every outgoing call that doesn't connect opens its own case here, even if the same number was tried more than once. Eligible is the total of those cases today. Sending one SMS to a number clears every case open for it at once, it doesn't take a separate message per attempt. Sent is how many cases have had that message go out. Returned within period means the SMS went out before the working day ended. Carried Over means the day ended before it did."
+                  />
+                </div>
                 <span className="text-[11px] text-slate-500">Daily Follow-up SMS Tracking</span>
               </div>
             </div>
@@ -336,7 +457,6 @@ export const ConsolidatedMetricCards: React.FC<ConsolidatedMetricCardsProps> = (
                     ? 'bg-amber-100 text-amber-800 border-amber-200 animate-pulse' 
                     : 'bg-slate-100 text-slate-700 border-slate-200'
                 }`}
-                title={`${smsOpen} open SMS follow-up obligations currently pending`}
               >
                 {smsOpen > 0 ? (
                   <AlertCircle className="w-3 h-3 text-amber-600" />
@@ -344,6 +464,7 @@ export const ConsolidatedMetricCards: React.FC<ConsolidatedMetricCardsProps> = (
                   <CheckCircle2 className="w-3 h-3 text-emerald-600" />
                 )}
                 {smsOpen} Open
+                <span className="text-[10px] font-normal text-amber-900/70 border-l border-amber-300/60 pl-1 ml-0.5">Still within today</span>
               </span>
 
               <span 
@@ -352,7 +473,6 @@ export const ConsolidatedMetricCards: React.FC<ConsolidatedMetricCardsProps> = (
                     ? 'bg-rose-100 text-rose-800 border-rose-200 animate-pulse' 
                     : 'bg-slate-100 text-slate-700 border-slate-200'
                 }`}
-                title={`${smsCarriedOver} SMS follow-up obligations carried over to next period`}
               >
                 {smsCarriedOver > 0 ? (
                   <AlertCircle className="w-3 h-3 text-rose-600" />
@@ -360,27 +480,40 @@ export const ConsolidatedMetricCards: React.FC<ConsolidatedMetricCardsProps> = (
                   <CheckCircle2 className="w-3 h-3 text-slate-400" />
                 )}
                 {smsCarriedOver} Carried Over
+                <span className="text-[10px] font-normal text-rose-900/70 border-l border-rose-300/60 pl-1 ml-0.5">Not sent same day</span>
               </span>
             </div>
           </div>
 
           {/* PLAIN COUNT GRID */}
           <div className="my-3.5 grid grid-cols-2 gap-2.5">
-            <div className="bg-slate-50/90 rounded-xl p-2.5 border border-slate-100">
-              <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Eligible</div>
+            <div className="bg-slate-50/90 rounded-xl p-2.5 border border-slate-100 flex flex-col justify-between">
+              <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">
+                Eligible
+              </div>
               <div className="text-xl font-bold font-mono text-slate-900 mt-0.5">{smsEligible}</div>
+              <div className="text-[10.5px] text-slate-400 mt-0.5 leading-tight truncate">One per unconnected call</div>
             </div>
-            <div className="bg-slate-50/90 rounded-xl p-2.5 border border-slate-100">
-              <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Sent</div>
+            <div className="bg-slate-50/90 rounded-xl p-2.5 border border-slate-100 flex flex-col justify-between">
+              <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">
+                Sent
+              </div>
               <div className="text-xl font-bold font-mono text-purple-600 mt-0.5">{smsSent}</div>
+              <div className="text-[10.5px] text-slate-400 mt-0.5 leading-tight truncate">SMS sent, clears all</div>
             </div>
-            <div className="bg-slate-50/90 rounded-xl p-2.5 border border-slate-100">
-              <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Returned within period</div>
+            <div className="bg-slate-50/90 rounded-xl p-2.5 border border-slate-100 flex flex-col justify-between">
+              <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">
+                Returned within period
+              </div>
               <div className="text-xl font-bold font-mono text-purple-700 mt-0.5">{smsMet}</div>
+              <div className="text-[10.5px] text-slate-400 mt-0.5 leading-tight truncate">Sent same day</div>
             </div>
-            <div className={`rounded-xl p-2.5 border ${smsCarriedOver > 0 ? 'bg-rose-50/80 border-rose-200' : 'bg-slate-50/90 border-slate-100'}`}>
-              <div className={`text-[10px] font-bold uppercase tracking-wider ${smsCarriedOver > 0 ? 'text-rose-600' : 'text-slate-500'}`}>Carried over to next period</div>
+            <div className={`rounded-xl p-2.5 border flex flex-col justify-between ${smsCarriedOver > 0 ? 'bg-rose-50/80 border-rose-200' : 'bg-slate-50/90 border-slate-100'}`}>
+              <div className={`text-[10px] font-bold uppercase tracking-wider ${smsCarriedOver > 0 ? 'text-rose-600' : 'text-slate-500'}`}>
+                Carried over to next period
+              </div>
               <div className={`text-xl font-bold font-mono mt-0.5 ${smsCarriedOver > 0 ? 'text-rose-700' : 'text-slate-700'}`}>{smsCarriedOver}</div>
+              <div className={`text-[10.5px] mt-0.5 leading-tight truncate ${smsCarriedOver > 0 ? 'text-rose-500' : 'text-slate-400'}`}>Not sent same day</div>
             </div>
           </div>
         </div>
@@ -399,11 +532,9 @@ export const ConsolidatedMetricCards: React.FC<ConsolidatedMetricCardsProps> = (
               </span>
             </div>
             <div className="flex items-center gap-1">
-              <span 
-                className="px-2 py-0.5 rounded text-[10px] font-semibold border bg-purple-50 text-purple-700 border-purple-200"
-                title="Target deadline: End of the working day"
-              >
-                Within the Day
+              <span className="px-2 py-0.5 rounded text-[10px] font-semibold border bg-purple-50 text-purple-700 border-purple-200 flex items-center gap-1">
+                <span>Within the Day</span>
+                <span className="text-[9px] font-normal text-purple-500/80 border-l border-purple-200 pl-1">Target for this card</span>
               </span>
             </div>
           </div>

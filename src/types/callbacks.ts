@@ -32,6 +32,7 @@ export interface CallbackJob {
   client_name: string | null;
   client_phone: string;
   client_phone_raw: string;
+  customer_email?: string | null;
   channel_partner: string | null;
   initiated_date: string | null;
   brian_reason: string | null;
@@ -54,9 +55,14 @@ export interface CallbackJob {
 
 export interface LogOutcomePayload {
   outcome: string;
-  comment: string;
+  comment?: string;
   logged_by: string;
 }
+
+export type MaxAttemptsChronologyEntry =
+  | { kind: 'CALL'; status: string; logged_by: string; logged_by_phone: string | null; timestamp: string }
+  | { kind: 'SMS'; status: string; note: string; logged_by: string; logged_by_phone: string | null; timestamp: string }
+  | { kind: 'OUTCOME'; outcome: string; comment: string; logged_by: string; logged_by_phone: string | null; timestamp: string };
 
 export interface MaxAttemptsReportAttempt {
   attempt_number: number;
@@ -70,14 +76,33 @@ export interface MaxAttemptsReportRecord {
   vehicle_reg_raw: string;
   client_name: string | null;
   client_phone_raw: string;
+  customer_email?: string | null;
   initiated_date: string | null;
   closed_at: string | null;
+  assigned_agent_id?: number | null;
+  assigned_agent_name?: string | null;
   attempts: MaxAttemptsReportAttempt[];
+  chronology?: MaxAttemptsChronologyEntry[];
 }
 
 export interface MaxAttemptsReportGroup {
   channel_partner: string;
   records: MaxAttemptsReportRecord[];
+}
+
+export interface ChannelPartnerAllocation {
+  channel_partner: string;
+  assigned_agent_id: number | null;
+  assigned_agent_name?: string | null;
+  updated_at?: string;
+}
+
+export interface UserAccount {
+  id: number;
+  username: string;
+  display_name: string;
+  active: boolean;
+  created_at: string;
 }
 
 export interface CallbackSettings {
@@ -101,6 +126,7 @@ export interface CallbackImportRow {
   vehicle_reg: string;
   client_name?: string;
   client_phone: string;
+  customer_email?: string;
   channel_partner?: string;
   initiated_date?: string;
   reason?: string;

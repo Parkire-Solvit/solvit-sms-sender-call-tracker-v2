@@ -19,7 +19,12 @@ import {
   getCallbackJobLogs,
   closeMaturedCallbackJobs,
   getMaxAttemptsReport,
+  seedChannelPartnerAllocations,
+  getChannelPartnerAllocations,
+  setChannelPartnerAllocation,
 } from "./insuranceCallbacks";
+import * as XLSX from "xlsx";
+import { seedDefaultAdmin, hashPassword, verifyPassword } from "./auth";
 
 // SSE Clients for real-time agent name push
 const agentClients = new Map<number, any>();
@@ -52,6 +57,12 @@ async function startServer() {
   // Ensure default system settings exist
   await getSystemSettings(db);
 
+  // Seed channel-partner → agent allocations for the callbacks feature
+  await seedChannelPartnerAllocations(db);
+
+  // Seed the initial admin user (from ADMIN_USERNAME/ADMIN_PASSWORD) if none exists
+  await seedDefaultAdmin(db);
+
   const emailRuntime = configuredEmailRuntime();
   if (emailRuntime) {
     const migration = await db.queryOne('SELECT version FROM schema_migrations WHERE version = 18');
@@ -83,23 +94,42 @@ async function startServer() {
 
   const loginAttempts = new Map<string, { count: number; resetAt: number }>();
 
-  // Admin Login
-  app.post("/api/login", (req, res) => {
-    const { username, password } = req.body || {};
+  // Admin Login — validates against the users table, then sets the admin session
+  // cookie (unchanged session mechanism, so Email SLA / cs_member auth is untouched).
+  app.post("/api/login", async (req, res) => {
     const key = req.ip || 'unknown';
     const now = Date.now();
     const current = loginAttempts.get(key);
     const attempt = current && current.resetAt > now ? current : { count: 0, resetAt: now + 15 * 60_000 };
     if (attempt.count >= 30) return res.status(429).json({ error: 'Too many login attempts' });
 
-    if (credentialsMatch(username, password)) {
+    try {
+      const { username, password } = req.body || {};
+      const submittedUser = (username || "").trim();
+      const submittedPass = (password || "").trim();
+      if (!submittedUser || !submittedPass) {
+        return res.status(400).json({ error: "Username and password are required" });
+      }
+
+      const user = await db.queryOne<{ id: number; username: string; password_hash: string; display_name: string; active: any }>(
+        `SELECT id, username, password_hash, display_name, active FROM users WHERE LOWER(username) = LOWER(?)`,
+        [submittedUser]
+      );
+      const isActive = user && (user.active === true || user.active === 1);
+      const isValid = isActive ? await verifyPassword(submittedPass, user!.password_hash) : false;
+
+      if (!isValid) {
+        attempt.count++;
+        loginAttempts.set(key, attempt);
+        return res.status(401).json({ error: "Invalid credentials or inactive account" });
+      }
+
       loginAttempts.delete(key);
       setAdminSession(req, res);
-      res.json({ success: true, role: 'admin' });
-    } else {
-      attempt.count++;
-      loginAttempts.set(key, attempt);
-      res.status(401).json({ error: "Invalid credentials" });
+      res.json({ success: true, role: 'admin', display_name: user!.display_name });
+    } catch (err) {
+      console.error("[AUTH] Login error:", err);
+      res.status(500).json({ error: "Authentication failed" });
     }
   });
 
@@ -119,6 +149,133 @@ async function startServer() {
     res.json({ authenticated: false, role: null, emailLoginAvailable: Boolean(emailRuntime) && microsoftEmailLoginAvailable() });
   });
   app.post('/api/logout', (req, res) => { clearAdminSession(req, res); clearEmailMemberSession(req, res); res.json({ success: true }); });
+
+  // GET /api/users - returns all accounts omitting password_hash
+  app.get("/api/users", requireAdmin, async (req, res) => {
+    try {
+      const users = await db.queryAll<{ id: number; username: string; display_name: string; active: any; created_at: string }>(
+        `SELECT id, username, display_name, active, created_at FROM users ORDER BY id ASC`
+      );
+      const normalized = users.map((u) => ({
+        id: u.id,
+        username: u.username,
+        display_name: u.display_name,
+        active: Boolean(u.active),
+        created_at: u.created_at,
+      }));
+      res.json(normalized);
+    } catch (err) {
+      console.error("[API] Error fetching users:", err);
+      res.status(500).json({ error: "Failed to fetch users" });
+    }
+  });
+
+  // POST /api/users - creates an account
+  app.post("/api/users", requireAdmin, async (req, res) => {
+    try {
+      const { username, display_name, password } = req.body || {};
+      const cleanUser = (username || "").trim();
+      const cleanName = (display_name || "").trim() || cleanUser;
+      const cleanPass = (password || "").trim();
+
+      if (!cleanUser || !cleanPass) {
+        return res.status(400).json({ error: "Username and password are required" });
+      }
+
+      const existing = await db.queryOne<{ id: number }>(
+        `SELECT id FROM users WHERE LOWER(username) = LOWER(?)`,
+        [cleanUser]
+      );
+      if (existing) {
+        return res.status(409).json({ error: `Username "${cleanUser}" already exists` });
+      }
+
+      const passwordHash = await hashPassword(cleanPass);
+      const result = await db.execute(
+        `INSERT INTO users (username, password_hash, display_name, active, created_at, updated_at)
+         VALUES (?, ?, ?, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+        [cleanUser, passwordHash, cleanName]
+      );
+
+      res.status(201).json({
+        id: result.lastInsertId,
+        username: cleanUser,
+        display_name: cleanName,
+        active: true,
+      });
+    } catch (err) {
+      console.error("[API] Error creating user:", err);
+      res.status(500).json({ error: "Failed to create user" });
+    }
+  });
+
+  // PATCH /api/users/:id - updates display_name and/or active flag
+  app.patch("/api/users/:id", requireAdmin, async (req, res) => {
+    try {
+      const id = parseInt(req.params.id, 10);
+      const { display_name, active } = req.body || {};
+
+      const user = await db.queryOne<{ id: number }>(`SELECT id FROM users WHERE id = ?`, [id]);
+      if (!user) return res.status(404).json({ error: "User not found" });
+
+      const updates: string[] = [];
+      const params: any[] = [];
+
+      if (display_name !== undefined) {
+        updates.push("display_name = ?");
+        params.push(String(display_name).trim());
+      }
+      if (active !== undefined) {
+        updates.push("active = ?");
+        params.push(active ? 1 : 0);
+      }
+
+      if (updates.length > 0) {
+        updates.push("updated_at = CURRENT_TIMESTAMP");
+        params.push(id);
+        await db.execute(`UPDATE users SET ${updates.join(", ")} WHERE id = ?`, params);
+      }
+
+      const updated = await db.queryOne<{ id: number; username: string; display_name: string; active: any; created_at: string }>(
+        `SELECT id, username, display_name, active, created_at FROM users WHERE id = ?`,
+        [id]
+      );
+      res.json({
+        ...updated,
+        active: Boolean(updated?.active),
+      });
+    } catch (err) {
+      console.error("[API] Error updating user:", err);
+      res.status(500).json({ error: "Failed to update user" });
+    }
+  });
+
+  // POST /api/users/:id/reset-password - sets a new password
+  app.post("/api/users/:id/reset-password", requireAdmin, async (req, res) => {
+    try {
+      const id = parseInt(req.params.id, 10);
+      const { new_password } = req.body || {};
+      const cleanPass = (new_password || "").trim();
+
+      if (!cleanPass) {
+        return res.status(400).json({ error: "New password is required" });
+      }
+
+      const user = await db.queryOne<{ id: number }>(`SELECT id FROM users WHERE id = ?`, [id]);
+      if (!user) return res.status(404).json({ error: "User not found" });
+
+      const passwordHash = await hashPassword(cleanPass);
+      await db.execute(
+        `UPDATE users SET password_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+        [passwordHash, id]
+      );
+
+      res.json({ success: true, message: "Password updated successfully" });
+    } catch (err) {
+      console.error("[API] Error resetting password:", err);
+      res.status(500).json({ error: "Failed to reset password" });
+    }
+  });
 
   // Log Installation / Heartbeat
   app.post("/api/log-agent", async (req, res) => {
@@ -924,6 +1081,44 @@ function computeActivitySummary(events: any[], totalAgents: number = 0) {
   // CALLBACKS EXTENSION ENDPOINTS
   // ==========================================
 
+  // GET /api/channel-partner-allocations
+  app.get("/api/channel-partner-allocations", async (req, res) => {
+    try {
+      const data = await getChannelPartnerAllocations(db);
+      const unallocatedList = (data.unallocated_partners || []).map((p) => ({
+        channel_partner: p,
+        assigned_agent_id: null,
+        assigned_agent_name: null,
+        updated_at: null,
+      }));
+      const all = [...(data.allocations || []), ...unallocatedList].sort((a, b) =>
+        a.channel_partner.localeCompare(b.channel_partner)
+      );
+      res.json(all);
+    } catch (err) {
+      console.error("[API] Error fetching channel partner allocations:", err);
+      res.status(500).json({ error: "Failed to fetch channel partner allocations" });
+    }
+  });
+
+  // POST /api/channel-partner-allocations
+  app.post("/api/channel-partner-allocations", async (req, res) => {
+    try {
+      const { channel_partner, assigned_agent_id } = req.body || {};
+      if (!channel_partner || !String(channel_partner).trim()) {
+        return res.status(400).json({ error: "channel_partner is required" });
+      }
+      const agentId = assigned_agent_id === null || assigned_agent_id === undefined || assigned_agent_id === "" 
+        ? null 
+        : Number(assigned_agent_id);
+      await setChannelPartnerAllocation(db, String(channel_partner).trim(), agentId);
+      res.json({ success: true, channel_partner, assigned_agent_id: agentId });
+    } catch (err) {
+      console.error("[API] Error setting channel partner allocation:", err);
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
   // GET /api/callback-settings
   app.get("/api/callback-settings", requireAdmin, async (req, res) => {
     try {
@@ -1049,88 +1244,137 @@ function computeActivitySummary(events: any[], totalAgents: number = 0) {
     }
   });
 
-  // GET /api/callback-jobs/max-attempts-report/csv
-  app.get("/api/callback-jobs/max-attempts-report/csv", requireAdmin, async (req, res) => {
+  // GET /api/callback-jobs/max-attempts-report/excel (and backwards-compatible /csv)
+  const handleMaxAttemptsExcel = async (req: express.Request, res: express.Response) => {
     try {
-      const report = await getMaxAttemptsReport(db);
-
-      // Find max attempts count across records to generate dynamic headers
-      let maxAttemptsSeen = 1;
-      for (const group of report) {
-        for (const rec of group.records) {
-          if (rec.attempts.length > maxAttemptsSeen) {
-            maxAttemptsSeen = rec.attempts.length;
-          }
-        }
+      let report = await getMaxAttemptsReport(db);
+      const partnerFilter = (req.query.channel_partner as string || "").trim();
+      if (partnerFilter && partnerFilter !== "ALL") {
+        report = report.filter((g) => g.channel_partner.toLowerCase() === partnerFilter.toLowerCase());
       }
 
-      const headers = [
-        "Channel Partner",
-        "Vehicle Registration",
-        "Client Name",
-        "Client Phone",
-        "Initiated Date",
-        "Closed At",
-        "Total Contact Attempts",
-      ];
-
-      for (let i = 1; i <= maxAttemptsSeen; i++) {
-        headers.push(`Attempt ${i} Outcome`);
-        headers.push(`Attempt ${i} Comment`);
-        headers.push(`Attempt ${i} Logged By`);
-        headers.push(`Attempt ${i} Date/Time`);
-      }
-
-      const escapeCsv = (val: any) => {
-        if (val === null || val === undefined) return '""';
-        const str = String(val).replace(/"/g, '""');
-        return `"${str}"`;
-      };
-
-      const csvLines: string[] = [headers.map(escapeCsv).join(",")];
+      const rows: any[] = [];
 
       for (const group of report) {
         for (const rec of group.records) {
-          const row: any[] = [
-            group.channel_partner,
-            rec.vehicle_reg_raw,
-            rec.client_name || "",
-            rec.client_phone_raw,
-            rec.initiated_date || "",
-            rec.closed_at || "",
-            rec.attempts.length,
-          ];
+          const entries = rec.chronology && rec.chronology.length > 0 
+            ? rec.chronology 
+            : rec.attempts.map((a) => ({
+                kind: "OUTCOME" as const,
+                outcome: a.outcome,
+                comment: a.comment,
+                logged_by: a.logged_by,
+                logged_by_phone: null as string | null,
+                timestamp: a.created_at,
+              }));
 
-          for (let i = 0; i < maxAttemptsSeen; i++) {
-            const att = rec.attempts[i];
-            if (att) {
-              row.push(att.outcome);
-              row.push(att.comment);
-              row.push(att.logged_by);
-              row.push(att.created_at);
-            } else {
-              row.push("");
-              row.push("");
-              row.push("");
-              row.push("");
+          if (entries.length === 0) {
+            rows.push({
+              "Vehicle Registration": rec.vehicle_reg_raw,
+              "Client Name": rec.client_name || "N/A",
+              "Client Phone": rec.client_phone_raw || "",
+              "Channel Partner": group.channel_partner,
+              "Timestamp": rec.closed_at || "",
+              "Type": "NONE",
+              "Status / Outcome": "MAX_ATTEMPTS_REACHED",
+              "Notes": "",
+              "Agent Name": "",
+              "Agent Phone": "",
+            });
+          } else {
+            for (const item of entries) {
+              const statusOutcome = item.kind === "OUTCOME" ? item.outcome : item.status;
+              const notes = item.kind === "OUTCOME" ? item.comment : (item.kind === "SMS" ? item.note : "");
+              rows.push({
+                "Vehicle Registration": rec.vehicle_reg_raw,
+                "Client Name": rec.client_name || "N/A",
+                "Client Phone": rec.client_phone_raw || "",
+                "Channel Partner": group.channel_partner,
+                "Timestamp": item.timestamp || "",
+                "Type": item.kind,
+                "Status / Outcome": statusOutcome || "",
+                "Notes": notes || "",
+                "Agent Name": item.logged_by || "",
+                "Agent Phone": item.logged_by_phone || "",
+              });
             }
           }
-
-          csvLines.push(row.map(escapeCsv).join(","));
         }
       }
 
-      const csvContent = csvLines.join("\r\n");
-      const filename = `max_attempts_report_${new Date().toISOString().split("T")[0]}.csv`;
+      const wb = XLSX.utils.book_new();
+      const wsRaw = XLSX.utils.json_to_sheet(rows);
+      XLSX.utils.book_append_sheet(wb, wsRaw, "Raw Data");
 
-      res.setHeader("Content-Type", "text/csv; charset=utf-8");
+      // Sheet 2: Summary - deduplicated by timestamp|kind|status/outcome per client phone
+      type SummaryRow = {
+        clientName: string;
+        clientPhone: string;
+        channelPartners: Set<string>;
+        vehicles: Set<string>;
+        agent: string;
+        callKeys: Set<string>;
+        smsKeys: Set<string>;
+      };
+
+      const summaryByPhone = new Map<string, SummaryRow>();
+
+      for (const group of report) {
+        for (const record of group.records) {
+          const phone = record.client_phone_raw;
+          let entry = summaryByPhone.get(phone);
+          if (!entry) {
+            entry = {
+              clientName: record.client_name || "N/A",
+              clientPhone: phone,
+              channelPartners: new Set(),
+              vehicles: new Set(),
+              agent: record.assigned_agent_name || "Unassigned",
+              callKeys: new Set(),
+              smsKeys: new Set(),
+            };
+            summaryByPhone.set(phone, entry);
+          }
+          entry.channelPartners.add(group.channel_partner);
+          entry.vehicles.add(record.vehicle_reg_raw);
+          for (const chrono of record.chronology || []) {
+            const dedupeKey = `${chrono.timestamp}|${chrono.kind}|${"status" in chrono ? chrono.status : chrono.outcome}`;
+            if (chrono.kind === "CALL") entry.callKeys.add(dedupeKey);
+            if (chrono.kind === "SMS") entry.smsKeys.add(dedupeKey);
+          }
+        }
+      }
+
+      const summaryRows = [...summaryByPhone.values()].map((e) => ({
+        "Client Name": e.clientName,
+        "Client Phone": e.clientPhone,
+        "Channel Partner(s)": [...e.channelPartners].join(", "),
+        "Vehicles": [...e.vehicles].join(", "),
+        "Vehicle Count": e.vehicles.size,
+        "Assigned Agent": e.agent,
+        "Total Contact Attempts": e.callKeys.size,
+        "Total SMSs Sent": e.smsKeys.size,
+      }));
+
+      const wsSummary = XLSX.utils.json_to_sheet(summaryRows);
+      XLSX.utils.book_append_sheet(wb, wsSummary, "Summary");
+
+      const buffer = XLSX.write(wb, { type: "buffer", bookType: "xlsx" });
+
+      const safePartner = partnerFilter ? `_${partnerFilter.replace(/[^a-zA-Z0-9_-]/g, "_")}` : "";
+      const filename = `max_attempts_report${safePartner}_${new Date().toISOString().split("T")[0]}.xlsx`;
+
+      res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
       res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
-      res.send(csvContent);
+      res.send(buffer);
     } catch (err) {
-      console.error("[API] Error generating max-attempts CSV:", err);
+      console.error("[API] Error generating max-attempts Excel:", err);
       res.status(500).json({ error: (err as Error).message });
     }
-  });
+  };
+
+  app.get("/api/callback-jobs/max-attempts-report/excel", requireAdmin, handleMaxAttemptsExcel);
+  app.get("/api/callback-jobs/max-attempts-report/csv", requireAdmin, handleMaxAttemptsExcel);
   // Vite middleware for development
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({

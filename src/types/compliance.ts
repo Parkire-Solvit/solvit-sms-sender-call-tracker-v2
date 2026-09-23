@@ -138,6 +138,8 @@ export interface AgentComplianceSummary {
 
   carried_over_count?: number;
   open_obligations_count: number;
+  open_incoming_count: number;
+  open_sms_count: number;
 
   // Raw activity counts
   calls_made: number;

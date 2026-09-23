@@ -365,7 +365,7 @@ export function evaluateCompliance(
   threadsByPhone.forEach((threadEvents, phone) => {
     let openIncomingObligation: Obligation | null = null;
     let firstFailedOutgoingAttempt: { trigger_timestamp: string; agent_id: number | null; tag: string } | null = null;
-    let openSmsObligation: Obligation | null = null;
+    let openSmsObligations: Obligation[] = [];
 
     for (let i = 0; i < threadEvents.length; i++) {
       const ev = threadEvents[i];
@@ -463,41 +463,43 @@ export function evaluateCompliance(
       }
 
       // Check SMS Follow-up Obligation
-      if (ev.type === 'SMS' && openSmsObligation) {
-        const turnaround = calculateElapsedMinutes(
-          new Date(openSmsObligation.trigger_timestamp),
-          evTime,
-          settings.working_hours_schedule,
-          settings.clock_mode
-        );
-        const deadline = new Date(openSmsObligation.deadline_timestamp);
-        const isMet = evTime <= deadline;
+      if (ev.type === 'SMS' && openSmsObligations.length > 0) {
+        for (const smsObl of openSmsObligations) {
+          const turnaround = calculateElapsedMinutes(
+            new Date(smsObl.trigger_timestamp),
+            evTime,
+            settings.working_hours_schedule,
+            settings.clock_mode
+          );
+          const deadline = new Date(smsObl.deadline_timestamp);
+          const isMet = evTime <= deadline;
 
-        openSmsObligation.status = isMet ? 'MET' : 'CARRIED_OVER';
-        openSmsObligation.resolution_timestamp = evTime.toISOString();
-        openSmsObligation.resolution_local_timestamp = toNairobiTimeString(evTime);
-        openSmsObligation.resolving_agent_id = ev.agent_id;
-        openSmsObligation.resolving_agent_name = agentName;
-        openSmsObligation.turnaround_minutes = turnaround;
-        openSmsObligation.sms_sent = true;
-        openSmsObligation.sms_sent_timestamp = evTime.toISOString();
+          smsObl.status = isMet ? 'MET' : 'CARRIED_OVER';
+          smsObl.resolution_timestamp = evTime.toISOString();
+          smsObl.resolution_local_timestamp = toNairobiTimeString(evTime);
+          smsObl.resolving_agent_id = ev.agent_id;
+          smsObl.resolving_agent_name = agentName;
+          smsObl.turnaround_minutes = turnaround;
+          smsObl.sms_sent = true;
+          smsObl.sms_sent_timestamp = evTime.toISOString();
 
-        if (isMet) {
-          openSmsObligation.attributed_agent_id = null;
-          complianceLabels.set(ev.id, { effect: 'CLEARED_OBLIGATION', note: 'Sent Follow-up SMS' });
-        } else {
-          openSmsObligation.attributed_agent_id = openSmsObligation.originating_agent_id;
-          openSmsObligation.attributed_agent_name = openSmsObligation.originating_agent_name;
+          if (isMet) {
+            smsObl.attributed_agent_id = null;
+            complianceLabels.set(ev.id, { effect: 'CLEARED_OBLIGATION', note: 'Sent Follow-up SMS' });
+          } else {
+            smsObl.attributed_agent_id = smsObl.originating_agent_id;
+            smsObl.attributed_agent_name = smsObl.originating_agent_name;
+          }
+
+          ttFailedOutToSms.push({
+            mins: turnaround,
+            tag: smsObl.originating_agent_tag,
+            agent_id: smsObl.originating_agent_id || 0,
+          });
+
+          allObligations.push(smsObl);
         }
-
-        ttFailedOutToSms.push({
-          mins: turnaround,
-          tag: openSmsObligation.originating_agent_tag,
-          agent_id: openSmsObligation.originating_agent_id || 0,
-        });
-
-        allObligations.push(openSmsObligation);
-        openSmsObligation = null;
+        openSmsObligations = [];
       }
 
       // --- 2. TRIGGER NEW OBLIGATIONS (WITH DEDUPLICATION) ---
@@ -551,36 +553,35 @@ export function evaluateCompliance(
           };
         }
 
-        // Obligation C: SMS Follow-up (Always created for unconnected outgoing calls)
-        if (!openSmsObligation) {
-          const deadlineC = calculateEndOfWorkingDayDeadline(
-            evTime,
-            settings.working_hours_schedule
-          );
+        // Obligation C: SMS Follow-up, one opened per unconnected outgoing call,
+        // no matter how many are already pending for this number.
+        const deadlineC = calculateEndOfWorkingDayDeadline(
+          evTime,
+          settings.working_hours_schedule
+        );
 
-          openSmsObligation = {
-            id: `OBL-C-${ev.id}`,
-            target_phone: phone,
-            obligation_type: 'SMS_FOLLOWUP',
-            trigger_event_id: ev.id,
-            trigger_timestamp: evTime.toISOString(),
-            trigger_local_timestamp: toNairobiTimeString(evTime),
-            originating_agent_id: ev.agent_id,
-            originating_agent_name: agentName,
-            originating_agent_tag: agentTag,
-            deadline_timestamp: deadlineC.toISOString(),
-            deadline_local_timestamp: toNairobiTimeString(deadlineC),
-            status: 'OPEN',
-            threshold_minutes: settings.sms_deadline_minutes,
-            owed_action: 'SMS',
-            sms_sent: false,
-          };
-        }
+        openSmsObligations.push({
+          id: `OBL-C-${ev.id}`,
+          target_phone: phone,
+          obligation_type: 'SMS_FOLLOWUP',
+          trigger_event_id: ev.id,
+          trigger_timestamp: evTime.toISOString(),
+          trigger_local_timestamp: toNairobiTimeString(evTime),
+          originating_agent_id: ev.agent_id,
+          originating_agent_name: agentName,
+          originating_agent_tag: agentTag,
+          deadline_timestamp: deadlineC.toISOString(),
+          deadline_local_timestamp: toNairobiTimeString(deadlineC),
+          status: 'OPEN',
+          threshold_minutes: settings.sms_deadline_minutes,
+          owed_action: 'SMS',
+          sms_sent: false,
+        });
       }
     }
 
     // --- 3. EVALUATE LEFTOVER OPEN OBLIGATIONS AGAINST CURRENT CLOCK ---
-    [openIncomingObligation, openSmsObligation].forEach((obl) => {
+    [openIncomingObligation, ...openSmsObligations].forEach((obl) => {
       if (!obl) return;
       const deadline = new Date(obl.deadline_timestamp);
       if (evalNow > deadline) {
@@ -679,6 +680,8 @@ export function evaluateCompliance(
       carried_over_sms_count: 0,
 
       open_obligations_count: 0,
+      open_incoming_count: 0,
+      open_sms_count: 0,
 
       calls_made: 0,
       calls_incoming: 0,
@@ -699,6 +702,8 @@ export function evaluateCompliance(
 
       if (obl.status === 'OPEN') {
         summary.open_obligations_count += 1;
+        if (obl.obligation_type === 'MISSED_INCOMING_CALLBACK') summary.open_incoming_count = (summary.open_incoming_count || 0) + 1;
+        if (obl.obligation_type === 'SMS_FOLLOWUP') summary.open_sms_count = (summary.open_sms_count || 0) + 1;
       }
 
       if (obl.obligation_type === 'MISSED_INCOMING_CALLBACK') {

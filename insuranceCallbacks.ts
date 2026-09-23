@@ -8,6 +8,8 @@ import {
   MaxAttemptsReportGroup,
   MaxAttemptsReportRecord,
   MaxAttemptsReportAttempt,
+  MaxAttemptsChronologyEntry,
+  ChannelPartnerAllocation,
   CallbackJobLog
 } from "./src/types/callbacks";
 
@@ -144,6 +146,214 @@ export async function updateCallbackSettings(
 }
 
 /**
+ * Seed channel partner allocations on startup
+ */
+export async function seedChannelPartnerAllocations(db: DbAdapter): Promise<void> {
+  try {
+    // Look up Mercy and Caroline agents
+    const agents = await db.queryAll<{ id: number; name: string }>(
+      `SELECT id, name FROM agents WHERE archived_at IS NULL`
+    );
+    let mercy = agents.find((a) => a.name.trim().toLowerCase() === "mercy");
+    let caroline = agents.find((a) => a.name.trim().toLowerCase() === "caroline");
+
+    if (!mercy) {
+      await db.execute(`INSERT INTO agents (name, tag) VALUES ('Mercy', 'Callback Team') ON CONFLICT (name) DO NOTHING`);
+      mercy = (await db.queryOne<{ id: number; name: string }>(`SELECT id, name FROM agents WHERE LOWER(name) = 'mercy'`)) || undefined;
+    }
+    if (!caroline) {
+      await db.execute(`INSERT INTO agents (name, tag) VALUES ('Caroline', 'Callback Team') ON CONFLICT (name) DO NOTHING`);
+      caroline = (await db.queryOne<{ id: number; name: string }>(`SELECT id, name FROM agents WHERE LOWER(name) = 'caroline'`)) || undefined;
+    }
+
+    const mercyId = mercy ? mercy.id : null;
+    const carolineId = caroline ? caroline.id : null;
+
+    const allocations: Array<{ partner: string; agentId: number | null }> = [
+      // Mercy
+      { partner: "Britam", agentId: mercyId },
+      { partner: "Sanlam Allianz", agentId: mercyId },
+      { partner: "GA Insurance", agentId: mercyId },
+      { partner: "OLD MUTUAL", agentId: mercyId },
+      { partner: "Heritage", agentId: mercyId },
+      { partner: "Pioneer General Insurance Limited", agentId: mercyId },
+      { partner: "ICEA Lion", agentId: mercyId },
+      { partner: "Takaful", agentId: mercyId },
+      { partner: "Pioneer", agentId: mercyId },
+      { partner: "Madison", agentId: mercyId },
+      { partner: "Cannon", agentId: mercyId },
+      { partner: "Lami World", agentId: mercyId },
+      { partner: "Intra Africa", agentId: mercyId },
+      { partner: "DIRECTLINE INSURANCE", agentId: mercyId },
+      { partner: "Sanlam", agentId: mercyId },
+      { partner: "Mayfair Insurance", agentId: mercyId },
+
+      // Caroline
+      { partner: "APA", agentId: carolineId },
+      { partner: "KENINDIA ASSURANCE COMPANY LTD", agentId: carolineId },
+      { partner: "Fidelity", agentId: carolineId },
+      { partner: "First Assurance", agentId: carolineId },
+      { partner: "CIC General Insurance Ltd", agentId: carolineId },
+      { partner: "PACIS Insurance", agentId: carolineId },
+      { partner: "Occidental", agentId: carolineId },
+      { partner: "NCBA-IG", agentId: carolineId },
+      { partner: "Definite Assurance Co. Limited.", agentId: carolineId },
+      { partner: "MUA", agentId: carolineId },
+      { partner: "Geminia Insurance Company Limited", agentId: carolineId },
+      { partner: "AAR Insurance", agentId: carolineId },
+      { partner: "AMACO INSURANCE LTD", agentId: carolineId },
+      { partner: "STAR DISCOVER INSURANCE COMPANY LIMITED", agentId: carolineId },
+      { partner: "Choice Microfinance Bank Limited", agentId: carolineId },
+      { partner: "Nirvana Microfinance Bank Limited", agentId: carolineId },
+    ];
+
+    const validPartners = allocations.map((a) => a.partner);
+    await db.execute(
+      `DELETE FROM channel_partner_allocations WHERE channel_partner NOT IN (${validPartners.map(() => '?').join(',')})`,
+      validPartners
+    );
+
+    for (const alloc of allocations) {
+      await db.execute(
+        `INSERT INTO channel_partner_allocations (channel_partner, assigned_agent_id, updated_at)
+         VALUES (?, ?, CURRENT_TIMESTAMP)
+         ON CONFLICT (channel_partner) DO UPDATE SET assigned_agent_id = EXCLUDED.assigned_agent_id, updated_at = CURRENT_TIMESTAMP`,
+        [alloc.partner, alloc.agentId]
+      );
+    }
+    console.log("[ALLOCATIONS] Successfully seeded/updated channel_partner_allocations");
+
+    const allocations2 = await db.queryAll<{ channel_partner: string; assigned_agent_id: number }>(
+      `SELECT channel_partner, assigned_agent_id FROM channel_partner_allocations WHERE assigned_agent_id IS NOT NULL`
+    );
+    for (const alloc of allocations2) {
+      await db.execute(
+        `UPDATE callback_jobs SET assigned_agent_id = ?, updated_at = CURRENT_TIMESTAMP
+         WHERE channel_partner = ? AND status = 'AMBER'`,
+        [alloc.assigned_agent_id, alloc.channel_partner]
+      );
+    }
+    console.log("[ALLOCATIONS] Resynced open jobs against corrected allocation table");
+  } catch (err) {
+    console.error("[ALLOCATIONS] Error seeding channel partner allocations:", err);
+  }
+}
+
+/**
+ * Get all partner allocations and unallocated partners in callback_jobs
+ */
+export async function getChannelPartnerAllocations(db: DbAdapter): Promise<{
+  allocations: Array<{
+    channel_partner: string;
+    assigned_agent_id: number | null;
+    assigned_agent_name: string | null;
+    updated_at: string | null;
+  }>;
+  unallocated_partners: string[];
+}> {
+  const rows = await db.queryAll<{
+    channel_partner: string;
+    assigned_agent_id: number | null;
+    assigned_agent_name: string | null;
+    updated_at: string | null;
+  }>(
+    `SELECT cpa.channel_partner, cpa.assigned_agent_id, a.name as assigned_agent_name, cpa.updated_at
+     FROM channel_partner_allocations cpa
+     LEFT JOIN agents a ON cpa.assigned_agent_id = a.id
+     ORDER BY cpa.channel_partner ASC`
+  );
+
+  const unallocatedRows = await db.queryAll<{ channel_partner: string }>(
+    `SELECT DISTINCT channel_partner
+     FROM callback_jobs
+     WHERE channel_partner IS NOT NULL AND TRIM(channel_partner) != ''
+       AND channel_partner NOT IN (SELECT channel_partner FROM channel_partner_allocations)
+     ORDER BY channel_partner ASC`
+  );
+
+  return {
+    allocations: rows,
+    unallocated_partners: unallocatedRows.map((r) => r.channel_partner),
+  };
+}
+
+/**
+ * Set partner allocation and immediately reassign open AMBER jobs
+ */
+export async function setChannelPartnerAllocation(
+  db: DbAdapter,
+  channelPartner: string,
+  assignedAgentId: number | null
+): Promise<void> {
+  const partner = channelPartner.trim();
+  if (!partner) throw new Error("Channel partner name is required");
+
+  // Upsert into channel_partner_allocations
+  const existing = await db.queryOne<{ channel_partner: string }>(
+    `SELECT channel_partner FROM channel_partner_allocations WHERE channel_partner = ?`,
+    [partner]
+  );
+  if (existing) {
+    await db.execute(
+      `UPDATE channel_partner_allocations SET assigned_agent_id = ?, updated_at = CURRENT_TIMESTAMP WHERE channel_partner = ?`,
+      [assignedAgentId, partner]
+    );
+  } else {
+    await db.execute(
+      `INSERT INTO channel_partner_allocations (channel_partner, assigned_agent_id, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)`,
+      [partner, assignedAgentId]
+    );
+  }
+
+  // Immediately update every open AMBER vehicle for that partner to the new assigned_agent_id
+  await db.execute(
+    `UPDATE callback_jobs 
+     SET assigned_agent_id = ?, updated_at = CURRENT_TIMESTAMP 
+     WHERE channel_partner = ? AND status = 'AMBER'`,
+    [assignedAgentId, partner]
+  );
+}
+
+/**
+ * Reconcile clients whose open AMBER vehicles are currently split across multiple agents.
+ * Keeps the agent from the vehicle imported earliest.
+ */
+export async function reconcileClientAgentAssignments(db: DbAdapter): Promise<{ clientsFixed: number; jobsUpdated: number }> {
+  const splitPhones = await db.queryAll<{ client_phone: string }>(
+    `SELECT client_phone FROM callback_jobs
+     WHERE assigned_agent_id IS NOT NULL
+     GROUP BY client_phone
+     HAVING COUNT(DISTINCT assigned_agent_id) > 1`
+  );
+
+  let clientsFixed = 0;
+  let jobsUpdated = 0;
+
+  for (const { client_phone } of splitPhones) {
+    const earliest = await db.queryOne<{ assigned_agent_id: number }>(
+      `SELECT assigned_agent_id FROM callback_jobs
+       WHERE client_phone = ? AND assigned_agent_id IS NOT NULL
+       ORDER BY first_imported_at ASC LIMIT 1`,
+      [client_phone]
+    );
+    if (!earliest) continue;
+
+    const result = await db.execute(
+      `UPDATE callback_jobs SET assigned_agent_id = ?, updated_at = CURRENT_TIMESTAMP
+       WHERE client_phone = ? AND status = 'AMBER' AND assigned_agent_id != ?`,
+      [earliest.assigned_agent_id, client_phone, earliest.assigned_agent_id]
+    );
+    if (result.affectedRows > 0) {
+      clientsFixed++;
+      jobsUpdated += result.affectedRows;
+    }
+  }
+
+  console.log(`[RECONCILE] Fixed ${clientsFixed} split clients, updated ${jobsUpdated} open jobs`);
+  return { clientsFixed, jobsUpdated };
+}
+
+/**
  * Import callback jobs from parsed Excel rows
  */
 export async function importCallbackJobs(
@@ -158,7 +368,16 @@ export async function importCallbackJobs(
   let skippedOpenCount = 0;
   let skippedClosedCount = 0;
 
-  const newlyInsertedJobs: { id: number; client_phone: string }[] = [];
+  // Load existing partner allocations
+  const allocations = await db.queryAll<{ channel_partner: string; assigned_agent_id: number | null }>(
+    `SELECT channel_partner, assigned_agent_id FROM channel_partner_allocations`
+  );
+  const partnerAllocMap = new Map<string, number | null>();
+  for (const a of allocations) {
+    if (a.channel_partner) {
+      partnerAllocMap.set(a.channel_partner.trim().toLowerCase(), a.assigned_agent_id);
+    }
+  }
 
   for (const row of rows) {
     const rawReg = String(row.vehicle_reg || "").trim();
@@ -167,6 +386,7 @@ export async function importCallbackJobs(
     const channelPartner = row.channel_partner ? String(row.channel_partner).trim() : null;
     const initiatedDate = row.initiated_date ? String(row.initiated_date).trim() : null;
     const brianReason = row.reason ? String(row.reason).trim() : null;
+    const customerEmail = row.customer_email ? String(row.customer_email).trim() : null;
 
     const normReg = normalizeVehicleReg(rawReg);
     const normPhone = normalizePhone(rawPhone);
@@ -186,91 +406,64 @@ export async function importCallbackJobs(
         // Skip entirely. Do not update anything, including last_seen_in_import_at.
         skippedClosedCount++;
       } else {
-        // Still AMBER: update only last_seen_in_import_at to now. Do not touch status, assigned_agent_id, or any other field.
-        await db.execute(
-          `UPDATE callback_jobs SET last_seen_in_import_at = CURRENT_TIMESTAMP WHERE id = ?`,
-          [existing.id]
-        );
+        // Still AMBER: update last_seen_in_import_at to now. Update email if newly provided.
+        if (customerEmail) {
+          await db.execute(
+            `UPDATE callback_jobs SET last_seen_in_import_at = CURRENT_TIMESTAMP, customer_email = COALESCE(customer_email, ?) WHERE id = ?`,
+            [customerEmail, existing.id]
+          );
+        } else {
+          await db.execute(
+            `UPDATE callback_jobs SET last_seen_in_import_at = CURRENT_TIMESTAMP WHERE id = ?`,
+            [existing.id]
+          );
+        }
         skippedOpenCount++;
       }
     } else {
+      // Find assigned_agent_id:
+      // If this client already has a vehicle assigned to someone, keep every
+      // vehicle of theirs with that same agent, regardless of channel partner.
+      let assignedAgentId: number | null = null;
+
+      const existingClientAssignment = await db.queryOne<{ assigned_agent_id: number | null }>(
+        `SELECT assigned_agent_id FROM callback_jobs
+         WHERE client_phone = ? AND assigned_agent_id IS NOT NULL
+         ORDER BY first_imported_at ASC LIMIT 1`,
+        [normPhone]
+      );
+
+      if (existingClientAssignment?.assigned_agent_id) {
+        assignedAgentId = existingClientAssignment.assigned_agent_id;
+      } else if (channelPartner) {
+        const pKey = channelPartner.trim().toLowerCase();
+        if (partnerAllocMap.has(pKey)) {
+          assignedAgentId = partnerAllocMap.get(pKey) ?? null;
+        }
+      }
+
       // Insert new row at status = 'AMBER'
-      const insertResult = await db.execute(
+      await db.execute(
         `INSERT INTO callback_jobs (
-          vehicle_reg, vehicle_reg_raw, client_name, client_phone, client_phone_raw,
-          channel_partner, initiated_date, brian_reason, status,
+          vehicle_reg, vehicle_reg_raw, client_name, client_phone, client_phone_raw, customer_email,
+          channel_partner, initiated_date, brian_reason, status, assigned_agent_id,
           first_imported_at, last_seen_in_import_at, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'AMBER', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'AMBER', ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
         [
           normReg,
           rawReg,
           clientName,
           normPhone,
           rawPhone,
+          customerEmail,
           channelPartner,
           initiatedDate,
           brianReason,
+          assignedAgentId,
         ]
       );
 
-      const newId = insertResult.lastInsertId;
       newRecordsCount++;
-      newlyInsertedJobs.push({ id: newId, client_phone: normPhone });
-    }
-  }
-
-  // Assignment balancing across newly inserted rows in this batch
-  if (newlyInsertedJobs.length > 0) {
-    const settings = await getCallbackSettings(db);
-
-    // Load ALL active callback-team agents: agents WHERE tag = callback_team_tag AND archived_at IS NULL
-    const activeAgents = await db.queryAll<{ id: number; name: string }>(
-      `SELECT id, name FROM agents WHERE tag = ? AND (archived_at IS NULL) ORDER BY id ASC`,
-      [settings.callback_team_tag]
-    );
-
-    if (activeAgents.length > 0) {
-      // Count current open (status = 'AMBER') vehicles for each agent
-      const agentOpenCounts: Record<number, number> = {};
-      for (const agent of activeAgents) {
-        const countRow = await db.queryOne<{ cnt: number }>(
-          `SELECT COUNT(*) as cnt FROM callback_jobs WHERE status = 'AMBER' AND assigned_agent_id = ?`,
-          [agent.id]
-        );
-        agentOpenCounts[agent.id] = Number(countRow?.cnt || 0);
-      }
-
-      // Group new rows by normalized client_phone
-      const clientGroups = new Map<string, number[]>();
-      for (const job of newlyInsertedJobs) {
-        const group = clientGroups.get(job.client_phone) || [];
-        group.push(job.id);
-        clientGroups.set(job.client_phone, group);
-      }
-
-      // Assign each client group to agent with fewest open vehicles
-      for (const [, jobIds] of clientGroups.entries()) {
-        let selectedAgent = activeAgents[0];
-        let minOpen = agentOpenCounts[selectedAgent.id];
-
-        for (let i = 1; i < activeAgents.length; i++) {
-          const cand = activeAgents[i];
-          if (agentOpenCounts[cand.id] < minOpen) {
-            minOpen = agentOpenCounts[cand.id];
-            selectedAgent = cand;
-          }
-        }
-
-        for (const jobId of jobIds) {
-          await db.execute(
-            `UPDATE callback_jobs SET assigned_agent_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
-            [selectedAgent.id, jobId]
-          );
-        }
-
-        // Increment running count by the number of vehicles just assigned
-        agentOpenCounts[selectedAgent.id] += jobIds.length;
-      }
     }
   }
 
@@ -344,19 +537,19 @@ export async function closeMaturedCallbackJobs(db: DbAdapter, jobId?: number): P
   const settings = await getCallbackSettings(db);
   const maxAttempts = settings.max_attempts;
 
-  let query = `SELECT id, client_phone FROM callback_jobs WHERE status = 'AMBER'`;
+  let query = `SELECT id, client_phone, assigned_agent_id FROM callback_jobs WHERE status = 'AMBER'`;
   const params: any[] = [];
   if (jobId !== undefined && jobId !== null) {
     query += ` AND id = ?`;
     params.push(jobId);
   }
 
-  const openJobs = await db.queryAll<{ id: number; client_phone: string }>(query, params);
+  const openJobs = await db.queryAll<{ id: number; client_phone: string; assigned_agent_id: number | null }>(query, params);
   if (openJobs.length === 0) return;
 
   // Query events scoped to agents.tag = settings.callback_team_tag AND archived_at IS NULL
-  const events = await db.queryAll<{ target_phone: string; type: string }>(
-    `SELECT e.target_phone, e.type
+  const events = await db.queryAll<{ target_phone: string; type: string; agent_id: number }>(
+    `SELECT e.target_phone, e.type, e.agent_id
      FROM events e
      JOIN agents a ON e.agent_id = a.id
      WHERE a.tag = ? AND (a.archived_at IS NULL) AND e.type = 'CALL'`,
@@ -367,11 +560,12 @@ export async function closeMaturedCallbackJobs(db: DbAdapter, jobId?: number): P
   for (const ev of events) {
     const normP = normalizePhone(ev.target_phone);
     if (!normP) continue;
-    phoneAttemptMap.set(normP, (phoneAttemptMap.get(normP) || 0) + 1);
+    const key = `${normP}::${ev.agent_id}`;
+    phoneAttemptMap.set(key, (phoneAttemptMap.get(key) || 0) + 1);
   }
 
   for (const job of openJobs) {
-    const attempts = phoneAttemptMap.get(job.client_phone) || 0;
+    const attempts = phoneAttemptMap.get(`${job.client_phone}::${job.assigned_agent_id}`) || 0;
     if (attempts >= maxAttempts) {
       await db.execute(
         `UPDATE callback_jobs 
@@ -407,10 +601,6 @@ export async function logCallbackOutcome(
     throw new Error(`Invalid outcome '${outcome}'. Allowed values: ${Array.from(VALID_AGENT_OUTCOMES).join(", ")}`);
   }
 
-  if (!cleanComment) {
-    throw new Error("Comment is required for logging a callback outcome.");
-  }
-
   let resultingStatus: CallbackJobStatus = "AMBER";
   if (cleanOutcome === "SCHEDULED") {
     resultingStatus = "GREEN";
@@ -421,12 +611,12 @@ export async function logCallbackOutcome(
     resultingStatus = "AMBER";
   }
 
-  // Insert callback_job_logs
+  // Insert callback_job_logs (comment is optional, empty string if not provided)
   await db.execute(
     `INSERT INTO callback_job_logs (
       callback_job_id, outcome, comment, logged_by, resulting_status, created_at
     ) VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
-    [jobId, cleanOutcome, cleanComment, cleanLoggedBy, resultingStatus]
+    [jobId, cleanOutcome, cleanComment || "", cleanLoggedBy, resultingStatus]
   );
 
   // Update callback_jobs
@@ -500,6 +690,7 @@ export async function getCallbackJobs(
       j.client_name,
       j.client_phone,
       j.client_phone_raw,
+      j.customer_email,
       j.channel_partner,
       j.initiated_date,
       j.brian_reason,
@@ -559,12 +750,10 @@ export async function getCallbackJobs(
   const jobs = await db.queryAll<any>(query, params);
 
   // Scoped activity computation:
-  // Scoped to agents.tag = callback_settings.callback_team_tag AND agents.archived_at IS NULL:
-  // - attempt_count: count of events where type = 'CALL' and normalized target_phone equals job's client_phone
-  // - sms_count: count of events where type = 'SMS' and normalized target_phone equals job's client_phone
-  // - last_attempt_at: most recent matching CALL event timestamp
-  const events = await db.queryAll<{ target_phone: string; type: string; timestamp: string }>(
-    `SELECT e.target_phone, e.type, e.timestamp
+  // Scoped to agents.tag = callback_settings.callback_team_tag AND agents.archived_at IS NULL,
+  // matching the job's assigned_agent_id:
+  const events = await db.queryAll<{ target_phone: string; type: string; timestamp: string; agent_id: number }>(
+    `SELECT e.target_phone, e.type, e.timestamp, e.agent_id
      FROM events e
      JOIN agents a ON e.agent_id = a.id
      WHERE a.tag = ? AND (a.archived_at IS NULL)`,
@@ -576,11 +765,12 @@ export async function getCallbackJobs(
   for (const ev of events) {
     const normP = normalizePhone(ev.target_phone);
     if (!normP) continue;
+    const key = `${normP}::${ev.agent_id}`;
 
-    let act = phoneActivityMap.get(normP);
+    let act = phoneActivityMap.get(key);
     if (!act) {
       act = { attempt_count: 0, sms_count: 0, last_attempt_at: null };
-      phoneActivityMap.set(normP, act);
+      phoneActivityMap.set(key, act);
     }
 
     if (ev.type === "CALL") {
@@ -594,7 +784,7 @@ export async function getCallbackJobs(
   }
 
   return jobs.map((job) => {
-    const act = phoneActivityMap.get(job.client_phone) || {
+    const act = phoneActivityMap.get(`${job.client_phone}::${job.assigned_agent_id}`) || {
       attempt_count: 0,
       sms_count: 0,
       last_attempt_at: null,
@@ -607,6 +797,7 @@ export async function getCallbackJobs(
       client_name: job.client_name,
       client_phone: job.client_phone,
       client_phone_raw: job.client_phone_raw,
+      customer_email: job.customer_email || null,
       channel_partner: job.channel_partner,
       initiated_date: job.initiated_date,
       brian_reason: job.brian_reason,
@@ -629,7 +820,7 @@ export async function getCallbackJobs(
 }
 
 /**
- * Generate grouped Max Attempts Reached report by Channel Partner
+ * Generate grouped Max Attempts Reached report by Channel Partner with merged chronology
  */
 export async function getMaxAttemptsReport(db: DbAdapter): Promise<MaxAttemptsReportGroup[]> {
   await closeMaturedCallbackJobs(db);
@@ -638,15 +829,21 @@ export async function getMaxAttemptsReport(db: DbAdapter): Promise<MaxAttemptsRe
     id: number;
     vehicle_reg_raw: string;
     client_name: string | null;
+    client_phone: string;
     client_phone_raw: string;
+    customer_email: string | null;
     channel_partner: string | null;
     initiated_date: string | null;
+    first_imported_at: string;
     closed_at: string | null;
+    assigned_agent_id: number | null;
+    assigned_agent_name: string | null;
   }>(
-    `SELECT id, vehicle_reg_raw, client_name, client_phone_raw, channel_partner, initiated_date, closed_at 
-     FROM callback_jobs 
-     WHERE latest_outcome = 'MAX_ATTEMPTS_REACHED'
-     ORDER BY channel_partner ASC, closed_at DESC`
+    `SELECT j.id, j.vehicle_reg_raw, j.client_name, j.client_phone, j.client_phone_raw, j.customer_email, j.channel_partner, j.initiated_date, j.first_imported_at, j.closed_at, j.assigned_agent_id, a.name as assigned_agent_name 
+     FROM callback_jobs j
+     LEFT JOIN agents a ON j.assigned_agent_id = a.id
+     WHERE j.latest_outcome = 'MAX_ATTEMPTS_REACHED'
+     ORDER BY j.channel_partner ASC, j.closed_at DESC`
   );
 
   const groupsMap = new Map<string, MaxAttemptsReportRecord[]>();
@@ -654,6 +851,7 @@ export async function getMaxAttemptsReport(db: DbAdapter): Promise<MaxAttemptsRe
   for (const job of jobs) {
     const partner = String(job.channel_partner || "Unassigned Partner").trim() || "Unassigned Partner";
 
+    // 1. Fetch outcome logs
     const rawLogs = await db.queryAll<{
       id: number;
       outcome: string;
@@ -676,13 +874,87 @@ export async function getMaxAttemptsReport(db: DbAdapter): Promise<MaxAttemptsRe
       created_at: l.created_at,
     }));
 
+    const normP = job.client_phone || normalizePhone(job.client_phone_raw);
+
+    // 2. Fetch every CALL event for this phone, scoped to the job's own assigned agent
+    const callEvents = await db.queryAll<{
+      status: string;
+      timestamp: string;
+      agent_name: string | null;
+      agent_phone: string | null;
+    }>(
+      `SELECT e.status, e.timestamp, a.name as agent_name, a.phone_number as agent_phone
+       FROM events e
+       JOIN agents a ON e.agent_id = a.id
+       WHERE e.type = 'CALL'
+         AND (e.target_phone = ? OR e.target_phone LIKE ?)
+         AND a.id = ?`,
+      [normP, `%${normP}%`, job.assigned_agent_id]
+    );
+
+    // 3. Fetch every SMS event for this phone, scoped the same way, no date window,
+    // so nothing real gets silently excluded the way it was before.
+    const smsEvents = await db.queryAll<{
+      status: string;
+      timestamp: string;
+      agent_name: string | null;
+      agent_phone: string | null;
+    }>(
+      `SELECT e.status, e.timestamp, a.name as agent_name, a.phone_number as agent_phone
+       FROM events e
+       JOIN agents a ON e.agent_id = a.id
+       WHERE e.type = 'SMS'
+         AND (e.target_phone = ? OR e.target_phone LIKE ?)
+         AND a.id = ?`,
+      [normP, `%${normP}%`, job.assigned_agent_id]
+    );
+
+    // 4. Resolve a phone number for each outcome log's logged_by name too, "System" won't match, that's expected
+    const agentsByName = await db.queryAll<{ name: string; phone_number: string | null }>(
+      `SELECT name, phone_number FROM agents`
+    );
+    const agentPhoneByName = new Map(agentsByName.map((a) => [a.name, a.phone_number]));
+
+    // 5. Build the merged chronological trail, all three sources together
+    const chronology: MaxAttemptsChronologyEntry[] = [
+      ...rawLogs.map((l) => ({
+        kind: "OUTCOME" as const,
+        outcome: l.outcome,
+        comment: l.comment || "",
+        logged_by: l.logged_by,
+        logged_by_phone: agentPhoneByName.get(l.logged_by) || null,
+        timestamp: l.created_at,
+      })),
+      ...callEvents.map((c) => ({
+        kind: "CALL" as const,
+        status: c.status || "OUTGOING",
+        logged_by: c.agent_name || "Unknown",
+        logged_by_phone: c.agent_phone || null,
+        timestamp: c.timestamp,
+      })),
+      ...smsEvents.map((s) => ({
+        kind: "SMS" as const,
+        status: s.status || "SENT",
+        note: "SMS follow-up dispatched",
+        logged_by: s.agent_name || "System",
+        logged_by_phone: s.agent_phone || null,
+        timestamp: s.timestamp,
+      })),
+    ];
+
+    chronology.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+
     const record: MaxAttemptsReportRecord = {
       vehicle_reg_raw: job.vehicle_reg_raw,
       client_name: job.client_name,
       client_phone_raw: job.client_phone_raw,
+      customer_email: job.customer_email || null,
       initiated_date: job.initiated_date,
       closed_at: job.closed_at,
+      assigned_agent_id: job.assigned_agent_id,
+      assigned_agent_name: job.assigned_agent_name,
       attempts,
+      chronology,
     };
 
     if (!groupsMap.has(partner)) {

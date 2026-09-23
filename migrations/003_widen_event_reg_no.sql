@@ -1,2 +1,0 @@
-ALTER TABLE events
-  ALTER COLUMN reg_no TYPE VARCHAR(100);

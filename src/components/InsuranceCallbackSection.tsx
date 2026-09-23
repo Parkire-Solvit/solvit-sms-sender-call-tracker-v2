@@ -42,6 +42,7 @@ import {
   CallbackImportRow,
   CallbackJobLog,
   MaxAttemptsReportGroup,
+  ChannelPartnerAllocation,
 } from '../types/callbacks';
 import { CallSessionView } from './CallSessionView';
 import { OnboardingTour } from './OnboardingTour';
@@ -277,11 +278,299 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
   // Quick clipboard state
   const [copiedPhone, setCopiedPhone] = useState<string | null>(null);
 
+  // Overview Tiles Drilldown Modal State
+  type OverviewDrilldownType = 'TOTAL' | 'AMBER' | 'GREEN' | 'RED' | 'MAX_ATTEMPTS';
+  const [drilldownModalType, setDrilldownModalType] = useState<OverviewDrilldownType | null>(null);
+  const [drilldownJobs, setDrilldownJobs] = useState<CallbackJob[]>([]);
+  const [loadingDrilldown, setLoadingDrilldown] = useState(false);
+  const [drilldownSearchTerm, setDrilldownSearchTerm] = useState('');
+
+  const openDrilldown = async (type: OverviewDrilldownType) => {
+    setDrilldownModalType(type);
+    setDrilldownSearchTerm('');
+    setLoadingDrilldown(true);
+
+    try {
+      const params = new URLSearchParams();
+      if (type === 'AMBER') params.append('status', 'AMBER');
+      else if (type === 'GREEN') params.append('status', 'GREEN');
+      else if (type === 'RED' || type === 'MAX_ATTEMPTS') params.append('status', 'RED');
+
+      if (selectedAgent !== 'ALL' && selectedAgent !== '__unassigned__') {
+        params.append('assigned_agent_id', selectedAgent);
+      }
+
+      const res = await fetch(`/api/callback-jobs${params.toString() ? `?${params.toString()}` : ''}`);
+      if (res.ok) {
+        let list: CallbackJob[] = await res.json();
+
+        // Scope to selected agent if unassigned or name match needed
+        if (selectedAgent === '__unassigned__') {
+          list = list.filter((j) => !j.assigned_agent_name && !j.assigned_agent_id);
+        } else if (selectedAgent !== 'ALL') {
+          const target = selectedAgent.trim().toLowerCase();
+          list = list.filter((j) => {
+            const agentName = j.assigned_agent_name ? j.assigned_agent_name.trim().toLowerCase() : '';
+            return agentName === target || String(j.assigned_agent_id) === selectedAgent;
+          });
+        }
+
+        // For MAX_ATTEMPTS: filter to latest_outcome === 'MAX_ATTEMPTS_REACHED'
+        if (type === 'MAX_ATTEMPTS') {
+          list = list.filter((j) => j.latest_outcome === 'MAX_ATTEMPTS_REACHED');
+        }
+
+        setDrilldownJobs(list);
+      } else {
+        throw new Error('Failed to fetch callback jobs for drilldown');
+      }
+    } catch (err) {
+      console.warn('Drilldown fetch error, falling back to local jobs cache:', err);
+      let list = [...jobs];
+      if (selectedAgent === '__unassigned__') {
+        list = list.filter((j) => !j.assigned_agent_name && !j.assigned_agent_id);
+      } else if (selectedAgent !== 'ALL') {
+        const target = selectedAgent.trim().toLowerCase();
+        list = list.filter((j) => {
+          const agentName = j.assigned_agent_name ? j.assigned_agent_name.trim().toLowerCase() : '';
+          return agentName === target || String(j.assigned_agent_id) === selectedAgent;
+        });
+      }
+
+      if (type === 'AMBER') list = list.filter((j) => j.status === 'AMBER');
+      else if (type === 'GREEN') list = list.filter((j) => j.status === 'GREEN');
+      else if (type === 'RED') list = list.filter((j) => j.status === 'RED');
+      else if (type === 'MAX_ATTEMPTS') list = list.filter((j) => j.latest_outcome === 'MAX_ATTEMPTS_REACHED');
+
+      setDrilldownJobs(list);
+    } finally {
+      setLoadingDrilldown(false);
+    }
+  };
+
+  const filteredDrilldownJobs = useMemo(() => {
+    if (!drilldownSearchTerm.trim()) return drilldownJobs;
+    const term = drilldownSearchTerm.toLowerCase();
+    return drilldownJobs.filter((j) => {
+      const reg = (j.vehicle_reg_raw || j.vehicle_reg || '').toLowerCase();
+      const client = (j.client_name || '').toLowerCase();
+      const phone = (j.client_phone_raw || j.client_phone || '').toLowerCase();
+      const partner = (j.channel_partner || '').toLowerCase();
+      const agent = (j.assigned_agent_name || '').toLowerCase();
+      return (
+        reg.includes(term) ||
+        client.includes(term) ||
+        phone.includes(term) ||
+        partner.includes(term) ||
+        agent.includes(term)
+      );
+    });
+  }, [drilldownJobs, drilldownSearchTerm]);
+
+  const handleExportDrilldownToExcel = async () => {
+    if (!drilldownModalType || filteredDrilldownJobs.length === 0) return;
+
+    if (drilldownModalType === 'MAX_ATTEMPTS') {
+      try {
+        const params = new URLSearchParams();
+        if (selectedAgent !== 'ALL') params.set('assigned_agent_name', selectedAgent);
+        const res = await fetch(`/api/callback-jobs/max-attempts-report?${params.toString()}`);
+        if (!res.ok) throw new Error('Failed to fetch max attempts chronology');
+        const groups: MaxAttemptsReportGroup[] = await res.json();
+
+        // Build set of currently filtered vehicles in drilldown if user searched/filtered in modal
+        const filteredRegs = new Set(filteredDrilldownJobs.map((j) => (j.vehicle_reg_raw || j.vehicle_reg).toUpperCase()));
+
+        const rows: any[] = [];
+        for (const group of groups) {
+          for (const rec of group.records) {
+            // Respect the active drilldown filtering (search box and selected agent)
+            if (filteredRegs.size > 0 && !filteredRegs.has(rec.vehicle_reg_raw.toUpperCase())) {
+              continue;
+            }
+
+            const entries = rec.chronology && rec.chronology.length > 0
+              ? rec.chronology
+              : (rec.attempts || []).map((a) => ({
+                  timestamp: a.created_at,
+                  kind: 'OUTCOME' as const,
+                  outcome: a.outcome,
+                  comment: a.comment,
+                  logged_by: a.logged_by,
+                  logged_by_phone: null,
+                }));
+
+            if (entries.length === 0) {
+              rows.push({
+                'Vehicle Registration': rec.vehicle_reg_raw,
+                'Client Name': rec.client_name || 'N/A',
+                'Client Phone': rec.client_phone_raw || '',
+                'Channel Partner': group.channel_partner,
+                'Timestamp': '',
+                'Type': 'NONE',
+                'Status / Outcome': 'MAX_ATTEMPTS_REACHED',
+                'Notes': '',
+                'Agent Name': '',
+                'Agent Phone': '',
+              });
+            } else {
+              for (const entry of entries) {
+                const statusOutcome = entry.kind === 'OUTCOME' ? (entry.outcome || '') : ((entry as any).status || '');
+                const notes = entry.kind === 'OUTCOME' ? (entry.comment || '') : (entry.kind === 'SMS' ? ((entry as any).note || '') : '');
+                rows.push({
+                  'Vehicle Registration': rec.vehicle_reg_raw,
+                  'Client Name': rec.client_name || 'N/A',
+                  'Client Phone': rec.client_phone_raw || '',
+                  'Channel Partner': group.channel_partner,
+                  'Timestamp': entry.timestamp || '',
+                  'Type': entry.kind,
+                  'Status / Outcome': statusOutcome,
+                  'Notes': notes,
+                  'Agent Name': entry.logged_by || '',
+                  'Agent Phone': (entry as any).logged_by_phone || '',
+                });
+              }
+            }
+          }
+        }
+
+        const wb = XLSX.utils.book_new();
+        const wsRaw = XLSX.utils.json_to_sheet(rows);
+        XLSX.utils.book_append_sheet(wb, wsRaw, 'Raw Data');
+
+        // Sheet 2: Summary - deduplicated by timestamp|kind|status/outcome per client phone
+        type SummaryRow = {
+          clientName: string;
+          clientPhone: string;
+          channelPartners: Set<string>;
+          vehicles: Set<string>;
+          agent: string;
+          callKeys: Set<string>;
+          smsKeys: Set<string>;
+        };
+
+        const summaryByPhone = new Map<string, SummaryRow>();
+
+        for (const group of groups) {
+          for (const record of group.records) {
+            // Respect the active drilldown filtering
+            if (filteredRegs.size > 0 && !filteredRegs.has(record.vehicle_reg_raw.toUpperCase())) {
+              continue;
+            }
+
+            const phone = record.client_phone_raw;
+            let entry = summaryByPhone.get(phone);
+            if (!entry) {
+              entry = {
+                clientName: record.client_name || 'N/A',
+                clientPhone: phone,
+                channelPartners: new Set(),
+                vehicles: new Set(),
+                agent: (record as any).assigned_agent_name || 'Unassigned',
+                callKeys: new Set(),
+                smsKeys: new Set(),
+              };
+              summaryByPhone.set(phone, entry);
+            }
+            entry.channelPartners.add(group.channel_partner);
+            entry.vehicles.add(record.vehicle_reg_raw);
+            for (const chrono of record.chronology || []) {
+              const dedupeKey = `${chrono.timestamp}|${chrono.kind}|${'status' in chrono ? chrono.status : (chrono as any).outcome}`;
+              if (chrono.kind === 'CALL') entry.callKeys.add(dedupeKey);
+              if (chrono.kind === 'SMS') entry.smsKeys.add(dedupeKey);
+            }
+          }
+        }
+
+        const summaryRows = [...summaryByPhone.values()].map((e) => ({
+          'Client Name': e.clientName,
+          'Client Phone': e.clientPhone,
+          'Channel Partner(s)': [...e.channelPartners].join(', '),
+          'Vehicles': [...e.vehicles].join(', '),
+          'Vehicle Count': e.vehicles.size,
+          'Assigned Agent': e.agent,
+          'Total Contact Attempts': e.callKeys.size,
+          'Total SMSs Sent': e.smsKeys.size,
+        }));
+
+        const wsSummary = XLSX.utils.json_to_sheet(summaryRows);
+        XLSX.utils.book_append_sheet(wb, wsSummary, 'Summary');
+
+        const agentTag = selectedAgent !== 'ALL' ? `_${selectedAgent.replace(/\s+/g, '_')}` : '';
+        XLSX.writeFile(wb, `Max_Attempts_Chronology${agentTag}_${new Date().toISOString().split('T')[0]}.xlsx`);
+        return;
+      } catch (err) {
+        console.error('Error exporting max attempts chronology to Excel:', err);
+      }
+    }
+
+    // existing summary export for the other four tiles, unchanged below this line
+    const data = filteredDrilldownJobs.map((j) => ({
+      'Vehicle Registration': j.vehicle_reg_raw || j.vehicle_reg,
+      'Client Name': j.client_name || 'N/A',
+      'Client Phone': j.client_phone_raw || j.client_phone,
+      'Channel Partner': j.channel_partner || 'Unassigned',
+      'Status': j.status,
+      'Attempt Count': j.attempt_count ?? 0,
+      'Assigned Agent': j.assigned_agent_name || 'Unassigned',
+    }));
+
+    const wb = XLSX.utils.book_new();
+    const ws = XLSX.utils.json_to_sheet(data);
+    XLSX.utils.book_append_sheet(wb, ws, 'Callbacks');
+
+    const agentTag = selectedAgent !== 'ALL' ? `_${selectedAgent.replace(/\s+/g, '_')}` : '';
+    const typeTag = drilldownModalType.toLowerCase();
+    const fileName = `Callback_${typeTag}${agentTag}_${new Date().toISOString().split('T')[0]}.xlsx`;
+
+    XLSX.writeFile(wb, fileName);
+  };
+
   // Initial load
   useEffect(() => {
     fetchSettings();
     fetchJobs();
+    fetchAllocations();
   }, []);
+
+  const [partnerAllocations, setPartnerAllocations] = useState<ChannelPartnerAllocation[]>([]);
+  const [loadingAllocations, setLoadingAllocations] = useState(false);
+
+  const fetchAllocations = async () => {
+    setLoadingAllocations(true);
+    try {
+      const res = await fetch('/api/channel-partner-allocations');
+      if (res.ok) {
+        const raw = await res.json();
+        const list: ChannelPartnerAllocation[] = Array.isArray(raw)
+          ? raw
+          : (raw && Array.isArray(raw.allocations) ? raw.allocations : []);
+        setPartnerAllocations(list);
+      }
+    } catch (err) {
+      console.warn('Failed to load channel partner allocations', err);
+    } finally {
+      setLoadingAllocations(false);
+    }
+  };
+
+  const handleUpdateAllocation = async (partner: string, agentId: number | null) => {
+    try {
+      const res = await fetch('/api/channel-partner-allocations', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          channel_partner: partner,
+          assigned_agent_id: agentId,
+        }),
+      });
+      if (res.ok) {
+        fetchAllocations();
+      }
+    } catch (err) {
+      console.error('Failed to update allocation:', err);
+    }
+  };
 
   // Exit call session if agent filter resets to ALL
   useEffect(() => {
@@ -372,10 +661,7 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
       setOutcomeError('Please select a specific outcome.');
       return;
     }
-    if (!outcomeComment.trim()) {
-      setOutcomeError('Callback notes / comment are required for every attempt.');
-      return;
-    }
+    // Comment is now optional
 
     setIsSubmittingOutcome(true);
     setOutcomeError(null);
@@ -428,6 +714,126 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
       setReportError((err as Error).message);
     } finally {
       setLoadingReport(false);
+    }
+  };
+
+  // Export Max Attempts Report to Excel directly using XLSX
+  const handleExportMaxAttemptsReportToExcel = (partner?: string) => {
+    try {
+      const filteredGroups = partner && partner !== 'ALL'
+        ? reportData.filter((g) => g.channel_partner.toLowerCase() === partner.toLowerCase())
+        : reportData;
+
+      const rows: any[] = [];
+      for (const group of filteredGroups) {
+        for (const rec of group.records) {
+          const entries = rec.chronology && rec.chronology.length > 0
+            ? rec.chronology
+            : (rec.attempts || []).map((a) => ({
+                timestamp: a.created_at,
+                kind: 'OUTCOME' as const,
+                outcome: a.outcome,
+                comment: a.comment,
+                logged_by: a.logged_by,
+                logged_by_phone: null,
+              }));
+
+          if (entries.length === 0) {
+            rows.push({
+              'Vehicle Registration': rec.vehicle_reg_raw,
+              'Client Name': rec.client_name || 'N/A',
+              'Client Phone': rec.client_phone_raw || '',
+              'Channel Partner': group.channel_partner,
+              'Timestamp': rec.closed_at || '',
+              'Type': 'NONE',
+              'Status / Outcome': 'MAX_ATTEMPTS_REACHED',
+              'Notes': '',
+              'Agent Name': '',
+              'Agent Phone': '',
+            });
+          } else {
+            for (const item of entries) {
+              const statusOutcome = item.kind === 'OUTCOME' ? item.outcome : item.status;
+              const notes = item.kind === 'OUTCOME' ? item.comment : (item.kind === 'SMS' ? item.note : '');
+              rows.push({
+                'Vehicle Registration': rec.vehicle_reg_raw,
+                'Client Name': rec.client_name || 'N/A',
+                'Client Phone': rec.client_phone_raw || '',
+                'Channel Partner': group.channel_partner,
+                'Timestamp': item.timestamp || '',
+                'Type': item.kind,
+                'Status / Outcome': statusOutcome || '',
+                'Notes': notes || '',
+                'Agent Name': item.logged_by || '',
+                'Agent Phone': item.logged_by_phone || '',
+              });
+            }
+          }
+        }
+      }
+
+      const wb = XLSX.utils.book_new();
+      const wsRaw = XLSX.utils.json_to_sheet(rows);
+      XLSX.utils.book_append_sheet(wb, wsRaw, 'Raw Data');
+
+      // Sheet 2: Summary - deduplicated by timestamp|kind|status/outcome per client phone
+      type SummaryRow = {
+        clientName: string;
+        clientPhone: string;
+        channelPartners: Set<string>;
+        vehicles: Set<string>;
+        agent: string;
+        callKeys: Set<string>;
+        smsKeys: Set<string>;
+      };
+
+      const summaryByPhone = new Map<string, SummaryRow>();
+
+      for (const group of filteredGroups) {
+        for (const record of group.records) {
+          const phone = record.client_phone_raw;
+          let entry = summaryByPhone.get(phone);
+          if (!entry) {
+            entry = {
+              clientName: record.client_name || 'N/A',
+              clientPhone: phone,
+              channelPartners: new Set(),
+              vehicles: new Set(),
+              agent: (record as any).assigned_agent_name || 'Unassigned',
+              callKeys: new Set(),
+              smsKeys: new Set(),
+            };
+            summaryByPhone.set(phone, entry);
+          }
+          entry.channelPartners.add(group.channel_partner);
+          entry.vehicles.add(record.vehicle_reg_raw);
+          for (const chrono of record.chronology || []) {
+            const dedupeKey = `${chrono.timestamp}|${chrono.kind}|${'status' in chrono ? chrono.status : (chrono as any).outcome}`;
+            if (chrono.kind === 'CALL') entry.callKeys.add(dedupeKey);
+            if (chrono.kind === 'SMS') entry.smsKeys.add(dedupeKey);
+          }
+        }
+      }
+
+      const summaryRows = [...summaryByPhone.values()].map((e) => ({
+        'Client Name': e.clientName,
+        'Client Phone': e.clientPhone,
+        'Channel Partner(s)': [...e.channelPartners].join(', '),
+        'Vehicles': [...e.vehicles].join(', '),
+        'Vehicle Count': e.vehicles.size,
+        'Assigned Agent': e.agent,
+        'Total Contact Attempts': e.callKeys.size,
+        'Total SMSs Sent': e.smsKeys.size,
+      }));
+
+      const wsSummary = XLSX.utils.json_to_sheet(summaryRows);
+      XLSX.utils.book_append_sheet(wb, wsSummary, 'Summary');
+
+      const safePartner = partner && partner !== 'ALL' ? `_${partner.replace(/[^a-zA-Z0-9_-]/g, '_')}` : '';
+      const filename = `max_attempts_report${safePartner}_${new Date().toISOString().split('T')[0]}.xlsx`;
+      XLSX.writeFile(wb, filename);
+    } catch (err) {
+      console.error('Error generating Max Attempts Excel:', err);
     }
   };
 
@@ -499,6 +905,7 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
       // Aliases for header matching
       const regAliases = ['reg', 'vehiclereg', 'registration', 'regno', 'numberplate', 'plate', 'asset', 'vehreg', 'carreg'];
       const phoneAliases = ['phone', 'cell', 'cellno', 'mobile', 'telephone', 'clientcellno', 'clientphone', 'contact', 'mobilenumber'];
+      const emailAliases = ['email', 'customeremail', 'clientemail', 'emailaddress', 'mail'];
       const nameAliases = ['name', 'clientname', 'customername', 'client', 'customer', 'policyholder', 'insured'];
       const partnerAliases = ['partner', 'channelpartner', 'insurance', 'underwriter', 'channel', 'company', 'broker'];
       const dateAliases = ['date', 'initiateddate', 'dateinitiated', 'incidentdate', 'bookingdate', 'createddate'];
@@ -530,6 +937,7 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
 
         const regIdx = findColIdx(regAliases);
         const phoneIdx = findColIdx(phoneAliases);
+        const emailIdx = findColIdx(emailAliases);
         const nameIdx = findColIdx(nameAliases);
         const partnerIdx = findColIdx(partnerAliases);
         const dateIdx = findColIdx(dateAliases);
@@ -551,6 +959,7 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
 
           const vehicleReg = formatVal(regIdx);
           const clientPhone = formatVal(phoneIdx);
+          const customerEmail = formatVal(emailIdx);
           const clientName = formatVal(nameIdx);
           const channelPartner = formatVal(partnerIdx);
           const initiatedDate = formatVal(dateIdx);
@@ -561,6 +970,7 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
               vehicle_reg: vehicleReg,
               client_name: clientName || undefined,
               client_phone: clientPhone,
+              customer_email: customerEmail || undefined,
               channel_partner: channelPartner || 'Unassigned Partner',
               initiated_date: initiatedDate || undefined,
               reason: reason || undefined,
@@ -587,6 +997,7 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
 
           const vehicleReg = getVal(regAliases);
           const clientPhone = getVal(phoneAliases);
+          const customerEmail = getVal(emailAliases);
           const clientName = getVal(nameAliases);
           const channelPartner = getVal(partnerAliases);
           const initiatedDate = getVal(dateAliases);
@@ -597,6 +1008,7 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
               vehicle_reg: vehicleReg,
               client_name: clientName || undefined,
               client_phone: clientPhone,
+              customer_email: customerEmail || undefined,
               channel_partner: channelPartner || 'Unassigned Partner',
               initiated_date: initiatedDate || undefined,
               reason: reason || undefined,
@@ -808,11 +1220,13 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
     sourceJobs.forEach((j) => {
       if (j.status === 'AMBER') {
         amber++;
-        if (j.attempt_count >= maxAtt) needsAction++;
       } else if (j.status === 'GREEN') {
         green++;
       } else if (j.status === 'RED') {
         red++;
+      }
+      if (j.latest_outcome === 'MAX_ATTEMPTS_REACHED') {
+        needsAction++;
       }
     });
 
@@ -1153,29 +1567,83 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
             )}
           </div>
           <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-5 gap-3">
-            <div className="bg-slate-50/80 rounded-xl p-3 border border-slate-100">
-              <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">
-                {selectedAgent !== 'ALL' ? `${selectedAgent}'s Vehicles` : 'Total Vehicles'}
-              </span>
+            <div
+              id="tile-overview-total"
+              onClick={() => openDrilldown('TOTAL')}
+              role="button"
+              tabIndex={0}
+              title="Click to view and export all queued vehicles"
+              className="group bg-slate-50/80 hover:bg-slate-100/90 rounded-xl p-3 border border-slate-200/80 hover:border-slate-300 hover:shadow-md transition-all duration-200 cursor-pointer"
+            >
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wider block">
+                  {selectedAgent !== 'ALL' ? `${selectedAgent}'s Vehicles` : 'Total Vehicles'}
+                </span>
+                <ChevronRight className="w-3.5 h-3.5 text-slate-400 group-hover:translate-x-0.5 transition-transform" />
+              </div>
               <span className="text-2xl font-black text-slate-900 mt-0.5 block">{stats.total}</span>
             </div>
-            <div className="bg-amber-50/70 rounded-xl p-3 border border-amber-100/80">
-              <span className="text-[11px] font-bold text-amber-600 uppercase tracking-wider block">Open / Amber</span>
+
+            <div
+              id="tile-overview-amber"
+              onClick={() => openDrilldown('AMBER')}
+              role="button"
+              tabIndex={0}
+              title="Click to view and export open amber callback vehicles"
+              className="group bg-amber-50/70 hover:bg-amber-100/80 rounded-xl p-3 border border-amber-200/80 hover:border-amber-300 hover:shadow-md transition-all duration-200 cursor-pointer"
+            >
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] font-bold text-amber-700 uppercase tracking-wider block">Open / Amber</span>
+                <ChevronRight className="w-3.5 h-3.5 text-amber-500 group-hover:translate-x-0.5 transition-transform" />
+              </div>
               <span className="text-2xl font-black text-amber-700 mt-0.5 block">{stats.amber}</span>
             </div>
-            <div className="bg-emerald-50/70 rounded-xl p-3 border border-emerald-100/80">
-              <span className="text-[11px] font-bold text-emerald-600 uppercase tracking-wider block">Closed / Green</span>
+
+            <div
+              id="tile-overview-green"
+              onClick={() => openDrilldown('GREEN')}
+              role="button"
+              tabIndex={0}
+              title="Click to view and export completed green callback vehicles"
+              className="group bg-emerald-50/70 hover:bg-emerald-100/80 rounded-xl p-3 border border-emerald-200/80 hover:border-emerald-300 hover:shadow-md transition-all duration-200 cursor-pointer"
+            >
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] font-bold text-emerald-700 uppercase tracking-wider block">Closed / Green</span>
+                <ChevronRight className="w-3.5 h-3.5 text-emerald-500 group-hover:translate-x-0.5 transition-transform" />
+              </div>
               <span className="text-2xl font-black text-emerald-700 mt-0.5 block">{stats.green}</span>
             </div>
-            <div className="bg-rose-50/70 rounded-xl p-3 border border-rose-100/80">
-              <span className="text-[11px] font-bold text-rose-600 uppercase tracking-wider block">Closed / Red</span>
+
+            <div
+              id="tile-overview-red"
+              onClick={() => openDrilldown('RED')}
+              role="button"
+              tabIndex={0}
+              title="Click to view and export closed red callback vehicles"
+              className="group bg-rose-50/70 hover:bg-rose-100/80 rounded-xl p-3 border border-rose-200/80 hover:border-rose-300 hover:shadow-md transition-all duration-200 cursor-pointer"
+            >
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] font-bold text-rose-700 uppercase tracking-wider block">Closed / Red</span>
+                <ChevronRight className="w-3.5 h-3.5 text-rose-500 group-hover:translate-x-0.5 transition-transform" />
+              </div>
               <span className="text-2xl font-black text-rose-700 mt-0.5 block">{stats.red}</span>
             </div>
-            <div className="col-span-2 sm:col-span-4 lg:col-span-1 bg-red-50/50 rounded-xl p-3 border border-red-100">
-              <span className="text-[11px] font-bold text-red-600 uppercase tracking-wider block flex items-center gap-1">
-                <OctagonAlert className="w-3.5 h-3.5" />
-                <span>Max Attempts Hit</span>
-              </span>
+
+            <div
+              id="tile-overview-max-attempts"
+              onClick={() => openDrilldown('MAX_ATTEMPTS')}
+              role="button"
+              tabIndex={0}
+              title="Click to view and export vehicles that hit maximum call attempts"
+              className="group col-span-2 sm:col-span-4 lg:col-span-1 bg-red-50/60 hover:bg-red-100/70 rounded-xl p-3 border border-red-200/80 hover:border-red-300 hover:shadow-md transition-all duration-200 cursor-pointer"
+            >
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] font-bold text-red-700 uppercase tracking-wider block flex items-center gap-1">
+                  <OctagonAlert className="w-3.5 h-3.5 text-red-600" />
+                  <span>Max Attempts Hit</span>
+                </span>
+                <ChevronRight className="w-3.5 h-3.5 text-red-500 group-hover:translate-x-0.5 transition-transform" />
+              </div>
               <span className="text-2xl font-black text-red-700 mt-0.5 block">{stats.needsAction}</span>
             </div>
           </div>
@@ -1214,6 +1682,8 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
           selectedAgent={selectedAgent}
           settings={settings}
           callbackAgents={callbackAgents}
+          initialPartner={selectedPartner}
+          availablePartners={channelPartners}
           onClose={() => {
             setIsCallSessionActive(false);
             fetchJobs();
@@ -1846,14 +2316,13 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 pt-0.5">
                   <div className="sm:col-span-2">
                     <label className="text-[11px] font-bold text-slate-700 block mb-1">
-                      Callback Notes & Summary <span className="text-red-500">*</span>
+                      Callback Notes & Summary <span className="text-slate-400 font-normal">(Optional)</span>
                     </label>
                     <textarea
-                      required
                       rows={2}
                       value={outcomeComment}
                       onChange={(e) => setOutcomeComment(e.target.value)}
-                      placeholder="Notes (e.g. callback requested tomorrow 2pm)..."
+                      placeholder="Notes (e.g. callback requested tomorrow 2pm, optional)..."
                       className="w-full px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-800 font-medium placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-[#ff353e]/20 focus:border-[#ff353e] resize-none"
                     />
                   </div>
@@ -1881,7 +2350,7 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
                 </button>
                 <button
                   type="submit"
-                  disabled={isSubmittingOutcome || !outcomeComment.trim()}
+                  disabled={isSubmittingOutcome || !selectedOutcome}
                   className="px-4 py-1.5 rounded-xl text-xs font-bold bg-[#ff353e] hover:bg-[#e0262f] text-white shadow-sm disabled:opacity-50 transition-all flex items-center gap-1.5 cursor-pointer"
                 >
                   {isSubmittingOutcome ? (
@@ -1904,15 +2373,16 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
 
       {/* Attempt History & Notes Modal */}
       {historyJob && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs animate-in fade-in duration-150">
-          <div className="bg-white rounded-3xl max-w-lg w-full p-6 shadow-2xl border border-slate-100 space-y-4">
-            <div className="flex items-center justify-between">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-slate-900/60 backdrop-blur-xs animate-in fade-in duration-150 overflow-y-auto">
+          <div className="bg-white rounded-2xl sm:rounded-3xl max-w-lg w-full max-h-[88vh] flex flex-col shadow-2xl border border-slate-100 overflow-hidden my-auto">
+            {/* Pinned Header */}
+            <div className="p-4 sm:p-5 border-b border-slate-100 flex items-center justify-between flex-shrink-0 bg-white">
               <div className="flex items-center gap-2.5">
-                <div className="w-10 h-10 rounded-xl bg-slate-100 text-slate-700 flex items-center justify-center">
+                <div className="w-10 h-10 rounded-xl bg-slate-100 text-slate-700 flex items-center justify-center flex-shrink-0">
                   <History className="w-5 h-5" />
                 </div>
                 <div>
-                  <h3 className="text-base font-black text-slate-900">Attempt History & Notes</h3>
+                  <h3 className="text-base font-black text-slate-900 leading-tight">Attempt History & Notes</h3>
                   <p className="text-xs text-slate-500">
                     Vehicle: <span className="font-mono font-bold text-slate-800">{historyJob.vehicle_reg_raw}</span> • {historyJob.client_name || 'Client'}
                   </p>
@@ -1920,61 +2390,66 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
               </div>
               <button
                 onClick={() => setHistoryJob(null)}
-                className="text-slate-400 hover:text-slate-600 p-1.5 rounded-xl hover:bg-slate-100"
+                className="text-slate-400 hover:text-slate-600 p-1.5 rounded-xl hover:bg-slate-100 transition-colors cursor-pointer"
+                title="Close"
               >
                 <X className="w-5 h-5" />
               </button>
             </div>
 
-            {loadingLogs ? (
-              <div className="py-10 text-center text-xs text-slate-500 flex items-center justify-center gap-2">
-                <RefreshCw className="w-4 h-4 animate-spin text-[#ff353e]" />
-                <span>Loading log history...</span>
-              </div>
-            ) : historyLogs.length === 0 ? (
-              <div className="py-8 text-center text-xs text-slate-400 bg-slate-50 rounded-2xl border border-slate-100">
-                No outcome notes logged for this vehicle yet. Click &ldquo;Log Outcome&rdquo; to add call notes.
-              </div>
-            ) : (
-              <div className="max-h-80 overflow-y-auto space-y-2.5 pr-1">
-                {historyLogs.map((log, idx) => (
-                  <div key={log.id} className="p-3 bg-slate-50 rounded-xl border border-slate-200/80 space-y-1">
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-1.5">
-                        <span className="text-xs font-black text-slate-800">
-                          Attempt #{historyLogs.length - idx}: {log.outcome}
-                        </span>
-                        <span
-                          className={`text-[9px] px-1.5 py-0.2 rounded font-black ${
-                            log.resulting_status === 'GREEN'
-                              ? 'bg-emerald-100 text-emerald-800'
-                              : log.resulting_status === 'RED'
-                              ? 'bg-rose-100 text-rose-800'
-                              : 'bg-amber-100 text-amber-800'
-                          }`}
-                        >
-                          {log.resulting_status}
+            {/* Scrollable Body */}
+            <div className="flex-1 overflow-y-auto min-h-0 p-4 sm:p-5 space-y-3">
+              {loadingLogs ? (
+                <div className="py-10 text-center text-xs text-slate-500 flex items-center justify-center gap-2">
+                  <RefreshCw className="w-4 h-4 animate-spin text-[#ff353e]" />
+                  <span>Loading log history...</span>
+                </div>
+              ) : historyLogs.length === 0 ? (
+                <div className="py-8 text-center text-xs text-slate-400 bg-slate-50 rounded-2xl border border-slate-100">
+                  No outcome notes logged for this vehicle yet. Click &ldquo;Log Outcome&rdquo; to add call notes.
+                </div>
+              ) : (
+                <div className="space-y-2.5">
+                  {historyLogs.map((log, idx) => (
+                    <div key={log.id} className="p-3 bg-slate-50 rounded-xl border border-slate-200/80 space-y-1">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-xs font-black text-slate-800">
+                            Attempt #{historyLogs.length - idx}: {log.outcome}
+                          </span>
+                          <span
+                            className={`text-[9px] px-1.5 py-0.2 rounded font-black ${
+                              log.resulting_status === 'GREEN'
+                                ? 'bg-emerald-100 text-emerald-800'
+                                : log.resulting_status === 'RED'
+                                ? 'bg-rose-100 text-rose-800'
+                                : 'bg-amber-100 text-amber-800'
+                            }`}
+                          >
+                            {log.resulting_status}
+                          </span>
+                        </div>
+                        <span className="text-[10px] text-slate-400 font-mono">
+                          {new Date(log.created_at).toLocaleString()}
                         </span>
                       </div>
-                      <span className="text-[10px] text-slate-400 font-mono">
-                        {new Date(log.created_at).toLocaleString()}
-                      </span>
+                      <p className="text-xs text-slate-700 italic bg-white p-2 rounded-lg border border-slate-200/50">
+                        &ldquo;{log.comment}&rdquo;
+                      </p>
+                      <div className="text-[10px] text-slate-500 flex items-center justify-between pt-0.5">
+                        <span>Logged by: <strong className="text-slate-700">{log.logged_by}</strong></span>
+                      </div>
                     </div>
-                    <p className="text-xs text-slate-700 italic bg-white p-2 rounded-lg border border-slate-200/50">
-                      &ldquo;{log.comment}&rdquo;
-                    </p>
-                    <div className="text-[10px] text-slate-500 flex items-center justify-between pt-0.5">
-                      <span>Logged by: <strong className="text-slate-700">{log.logged_by}</strong></span>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
+                  ))}
+                </div>
+              )}
+            </div>
 
-            <div className="flex items-center justify-end pt-2 border-t border-slate-100">
+            {/* Pinned Footer */}
+            <div className="p-3 sm:px-5 sm:py-3 bg-slate-50 border-t border-slate-200/80 flex items-center justify-end flex-shrink-0">
               <button
                 onClick={() => setHistoryJob(null)}
-                className="px-4 py-2 rounded-xl text-xs font-bold bg-slate-100 hover:bg-slate-200 text-slate-700 transition-colors"
+                className="px-4 py-2 rounded-xl text-xs font-bold bg-white border border-slate-200 hover:bg-slate-100 text-slate-700 transition-colors shadow-2xs cursor-pointer"
               >
                 Close
               </button>
@@ -1997,7 +2472,10 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
                     Max Attempts Reached — Channel Partner Report
                   </h3>
                   <p className="text-xs text-slate-500">
-                    Vehicles closed Red due to hitting maximum contact attempts without booking
+                    Vehicles closed Red due to hitting maximum contact attempts without booking • Total Records:{' '}
+                    <span className="font-bold text-slate-900 bg-slate-100 px-2 py-0.5 rounded-md">
+                      {reportData.reduce((acc, g) => acc + g.records.length, 0)}
+                    </span>
                   </p>
                 </div>
               </div>
@@ -2029,23 +2507,32 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
               ) : (
                 reportData.map((group) => (
                   <div key={group.channel_partner} className="bg-slate-50 rounded-2xl p-4 border border-slate-200">
-                    <div className="flex items-center justify-between mb-3">
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-3">
                       <div className="flex items-center gap-2">
                         <Building2 className="w-4 h-4 text-[#ff353e]" />
                         <h4 className="text-xs font-black text-slate-900 uppercase">
                           {group.channel_partner}
                         </h4>
+                        <span className="text-[11px] font-bold font-mono px-2 py-0.5 rounded-md bg-white border border-slate-200 text-slate-700">
+                          {group.records.length} {group.records.length === 1 ? 'record' : 'records'}
+                        </span>
                       </div>
-                      <span className="text-[11px] font-bold font-mono px-2 py-0.5 rounded-md bg-white border border-slate-200 text-slate-700">
-                        {group.records.length} {group.records.length === 1 ? 'record' : 'records'}
-                      </span>
+                      <button
+                        onClick={() => handleExportMaxAttemptsReportToExcel(group.channel_partner)}
+                        type="button"
+                        className="px-2.5 py-1 rounded-lg text-[11px] font-bold bg-white hover:bg-slate-100 text-slate-700 border border-slate-200 shadow-2xs flex items-center gap-1 transition-colors w-fit cursor-pointer"
+                        title={`Download Excel for ${group.channel_partner}`}
+                      >
+                        <Download className="w-3 h-3 text-slate-500" />
+                        <span>Download {group.channel_partner} Excel</span>
+                      </button>
                     </div>
 
                     <div className="space-y-2.5">
                       {group.records.map((rec) => (
                         <div key={rec.vehicle_reg_raw} className="bg-white rounded-xl p-3 border border-slate-200 shadow-2xs space-y-2">
                           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1">
-                            <div className="flex items-center gap-2">
+                            <div className="flex items-center gap-2 flex-wrap">
                               <span className="px-2.5 py-1 rounded-md bg-slate-900 text-white font-mono font-bold text-xs">
                                 {rec.vehicle_reg_raw}
                               </span>
@@ -2055,13 +2542,47 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
                               <span className="text-xs font-mono text-slate-500">
                                 {rec.client_phone_raw}
                               </span>
+                              {rec.customer_email && (
+                                <span className="text-xs font-mono text-slate-500 bg-slate-100 px-1.5 py-0.5 rounded">
+                                  {rec.customer_email}
+                                </span>
+                              )}
                             </div>
                             <span className="text-[10px] text-slate-400 font-mono">
                               Closed: {rec.closed_at ? new Date(rec.closed_at).toLocaleDateString() : 'N/A'}
                             </span>
                           </div>
 
-                          {rec.attempts.length > 0 ? (
+                          {rec.chronology && rec.chronology.length > 0 ? (
+                            <div className="bg-slate-50 rounded-lg p-2 text-[11px] space-y-1 border border-slate-100">
+                              <span className="font-bold text-slate-600 block text-[10px]">
+                                Chronological Attempt &amp; SMS History ({rec.chronology.length} events):
+                              </span>
+                              {rec.chronology.map((entry, idx) => (
+                                <div key={idx} className="text-slate-700 flex items-baseline gap-1.5 flex-wrap">
+                                  {entry.kind === 'SMS' ? (
+                                    <span className="font-bold text-indigo-700 bg-indigo-50 px-1 py-0.2 rounded text-[10px]">
+                                      SMS ({entry.status}):
+                                    </span>
+                                  ) : entry.kind === 'CALL' ? (
+                                    <span className="font-bold text-amber-700 bg-amber-50 px-1 py-0.2 rounded text-[10px]">
+                                      Call ({entry.status}):
+                                    </span>
+                                  ) : (
+                                    <span className="font-bold text-slate-800 text-[10px]">
+                                      Outcome ({entry.outcome}):
+                                    </span>
+                                  )}
+                                  <span className="italic text-slate-600">
+                                    {entry.kind === 'SMS' ? entry.note : entry.kind === 'OUTCOME' ? (entry.comment ? `“${entry.comment}”` : '(No comment)') : ''}
+                                  </span>
+                                  <span className="text-slate-400 text-[10px] ml-auto font-mono">
+                                    {entry.logged_by}{entry.logged_by_phone ? ` (${entry.logged_by_phone})` : ''} • {new Date(entry.timestamp).toLocaleDateString()}
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
+                          ) : rec.attempts.length > 0 ? (
                             <div className="bg-slate-50 rounded-lg p-2 text-[11px] space-y-1 border border-slate-100">
                               <span className="font-bold text-slate-600 block text-[10px]">
                                 Attempt Trail ({rec.attempts.length} attempts):
@@ -2089,7 +2610,7 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
 
             <div className="flex items-center justify-between pt-3 border-t border-slate-100">
               <span className="text-xs text-slate-400">
-                CSV contains full attempt details per vehicle for partner reconciliation.
+                Excel (.xlsx) contains full attempt details per vehicle for partner reconciliation.
               </span>
               <div className="flex items-center gap-2">
                 <button
@@ -2098,14 +2619,14 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
                 >
                   Close
                 </button>
-                <a
-                  href="/api/callback-jobs/max-attempts-report/csv"
-                  download
+                <button
+                  onClick={() => handleExportMaxAttemptsReportToExcel()}
+                  type="button"
                   className="px-5 py-2 rounded-xl text-xs font-bold bg-[#ff353e] hover:bg-[#e0262f] text-white shadow-sm transition-all flex items-center gap-1.5 cursor-pointer"
                 >
                   <Download className="w-3.5 h-3.5" />
-                  <span>Download CSV Report</span>
-                </a>
+                  <span>Download Excel Report</span>
+                </button>
               </div>
             </div>
           </div>
@@ -2114,55 +2635,52 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
 
       {/* Upload latest pending scheduling list Modal */}
       {isUploadOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs animate-in fade-in duration-150">
-          <div className="bg-white rounded-3xl max-w-lg w-full p-6 shadow-2xl border border-slate-100 space-y-5">
-            <div className="flex items-center justify-between">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-slate-900/60 backdrop-blur-xs animate-in fade-in duration-150 overflow-y-auto">
+          <div className="bg-white rounded-2xl sm:rounded-3xl max-w-lg w-full max-h-[88vh] flex flex-col shadow-2xl border border-slate-100 overflow-hidden my-auto">
+            {/* Pinned Header */}
+            <div className="p-4 sm:p-5 border-b border-slate-100 flex items-center justify-between flex-shrink-0 bg-white">
               <div className="flex items-center gap-2.5">
-                <div className="w-10 h-10 rounded-xl bg-red-50 text-[#ff353e] flex items-center justify-center">
+                <div className="w-10 h-10 rounded-xl bg-red-50 text-[#ff353e] flex items-center justify-center flex-shrink-0">
                   <FileSpreadsheet className="w-5 h-5" />
                 </div>
                 <div>
-                  <h3 className="text-base font-black text-slate-900">Upload latest pending scheduling list</h3>
+                  <h3 className="text-base font-black text-slate-900 leading-tight">Upload latest pending scheduling list</h3>
                   <p className="text-xs text-slate-500">Excel (.xlsx) daily list from Brian</p>
                 </div>
               </div>
               <button
                 onClick={() => setIsUploadOpen(false)}
-                className="text-slate-400 hover:text-slate-600 p-1.5 rounded-xl hover:bg-slate-100"
+                className="text-slate-400 hover:text-slate-600 p-1.5 rounded-xl hover:bg-slate-100 transition-colors cursor-pointer"
+                title="Close"
               >
                 <X className="w-5 h-5" />
               </button>
             </div>
 
-            {uploadError && (
-              <div className="p-3 bg-red-50 border border-red-200 rounded-xl text-xs text-red-700 flex items-start gap-2">
-                <AlertCircle className="w-4 h-4 text-red-500 flex-shrink-0 mt-0.5" />
-                <span>{uploadError}</span>
-              </div>
-            )}
+            {/* Scrollable Body */}
+            <div className="flex-1 overflow-y-auto min-h-0 p-4 sm:p-5 space-y-4">
+              {uploadError && (
+                <div className="p-3 bg-red-50 border border-red-200 rounded-xl text-xs text-red-700 flex items-start gap-2">
+                  <AlertCircle className="w-4 h-4 text-red-500 flex-shrink-0 mt-0.5" />
+                  <span>{uploadError}</span>
+                </div>
+              )}
 
-            {uploadSummary ? (
-              <div className="flex flex-col items-center text-center py-4 gap-3">
-                <div className="w-12 h-12 rounded-full bg-emerald-500 text-white flex items-center justify-center">
-                  <Check className="w-6 h-6" />
+              {uploadSummary ? (
+                <div className="flex flex-col items-center text-center py-4 gap-3">
+                  <div className="w-12 h-12 rounded-full bg-emerald-500 text-white flex items-center justify-center">
+                    <Check className="w-6 h-6" />
+                  </div>
+                  <div>
+                    <h4 className="text-sm font-bold text-emerald-950">Daily Export Successfully Processed</h4>
+                    <p className="text-xs text-slate-600 mt-1">
+                      <span className="font-bold text-emerald-700">{uploadSummary.new_records_count}</span> new vehicles queued •{' '}
+                      <span className="font-bold text-emerald-700">{uploadSummary.skipped_open_count}</span> already open •{' '}
+                      <span className="font-bold text-emerald-700">{uploadSummary.skipped_closed_count}</span> already completed.
+                    </p>
+                  </div>
                 </div>
-                <div>
-                  <h4 className="text-sm font-bold text-emerald-950">Daily Export Successfully Processed</h4>
-                  <p className="text-xs text-slate-600 mt-1">
-                    <span className="font-bold text-emerald-700">{uploadSummary.new_records_count}</span> new vehicles queued •{' '}
-                    <span className="font-bold text-emerald-700">{uploadSummary.skipped_open_count}</span> already open •{' '}
-                    <span className="font-bold text-emerald-700">{uploadSummary.skipped_closed_count}</span> already completed.
-                  </p>
-                </div>
-                <button
-                  onClick={() => setIsUploadOpen(false)}
-                  className="px-5 py-2 rounded-xl text-xs font-bold bg-emerald-600 hover:bg-emerald-700 text-white cursor-pointer"
-                >
-                  Done
-                </button>
-              </div>
-            ) : (
-              <>
+              ) : (
                 <div className="space-y-4">
                   <div>
                     <label className="text-xs font-bold text-slate-700 block mb-1">Imported By (Staff Name)</label>
@@ -2215,11 +2733,23 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
                     <p>• New vehicles will be balanced equally across active callback staff.</p>
                   </div>
                 </div>
+              )}
+            </div>
 
-                <div className="flex items-center justify-end gap-2.5 pt-2 border-t border-slate-100">
+            {/* Pinned Footer */}
+            <div className="p-3 sm:px-5 sm:py-3.5 bg-slate-50 border-t border-slate-200/80 flex items-center justify-end gap-2.5 flex-shrink-0">
+              {uploadSummary ? (
+                <button
+                  onClick={() => setIsUploadOpen(false)}
+                  className="px-5 py-2 rounded-xl text-xs font-bold bg-emerald-600 hover:bg-emerald-700 text-white cursor-pointer"
+                >
+                  Done
+                </button>
+              ) : (
+                <>
                   <button
                     onClick={() => setIsUploadOpen(false)}
-                    className="px-4 py-2 rounded-xl text-xs font-bold text-slate-600 hover:bg-slate-100 transition-colors cursor-pointer"
+                    className="px-4 py-2 rounded-xl text-xs font-bold text-slate-600 hover:bg-slate-200/70 transition-colors cursor-pointer"
                   >
                     Cancel
                   </button>
@@ -2241,43 +2771,46 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
                       </>
                     )}
                   </button>
-                </div>
-              </>
-            )}
+                </>
+              )}
+            </div>
           </div>
         </div>
       )}
 
       {/* Team Settings Modal */}
       {isSettingsOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs animate-in fade-in duration-150">
-          <div className="bg-white rounded-3xl max-w-md w-full p-6 shadow-2xl border border-slate-100 space-y-5">
-            <div className="flex items-center justify-between">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-slate-900/60 backdrop-blur-xs animate-in fade-in duration-150 overflow-y-auto">
+          <div className="bg-white rounded-2xl sm:rounded-3xl max-w-lg w-full max-h-[88vh] flex flex-col shadow-2xl border border-slate-100 overflow-hidden my-auto">
+            {/* Pinned Modal Header (Always visible at top) */}
+            <div className="p-4 sm:p-5 border-b border-slate-100 flex items-center justify-between flex-shrink-0 bg-white">
               <div className="flex items-center gap-2.5">
-                <div className="w-10 h-10 rounded-xl bg-slate-100 text-slate-700 flex items-center justify-center">
+                <div className="w-10 h-10 rounded-xl bg-slate-100 text-slate-700 flex items-center justify-center flex-shrink-0">
                   <SettingsIcon className="w-5 h-5" />
                 </div>
                 <div>
-                  <h3 className="text-base font-black text-slate-900">Callback Team Settings</h3>
+                  <h3 className="text-base font-black text-slate-900 leading-tight">Callback Team Settings</h3>
                   <p className="text-xs text-slate-500">Workload distribution & SLA thresholds</p>
                 </div>
               </div>
               <button
                 onClick={() => setIsSettingsOpen(false)}
-                className="text-slate-400 hover:text-slate-600 p-1.5 rounded-xl hover:bg-slate-100"
+                className="text-slate-400 hover:text-slate-600 p-1.5 rounded-xl hover:bg-slate-100 transition-colors cursor-pointer"
+                title="Close settings"
               >
                 <X className="w-5 h-5" />
               </button>
             </div>
 
-            {settingsSuccess && (
-              <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-xl text-xs text-emerald-800 font-bold flex items-center gap-2">
-                <CheckCircle2 className="w-4 h-4 text-emerald-600" />
-                <span>Callback team settings saved successfully!</span>
-              </div>
-            )}
+            {/* Scrollable Content Body */}
+            <div className="flex-1 overflow-y-auto min-h-0 p-4 sm:p-5 space-y-4">
+              {settingsSuccess && (
+                <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-xl text-xs text-emerald-800 font-bold flex items-center gap-2">
+                  <CheckCircle2 className="w-4 h-4 text-emerald-600 flex-shrink-0" />
+                  <span>Callback team settings saved successfully!</span>
+                </div>
+              )}
 
-            <div className="space-y-4">
               <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl">
                 <div className="flex items-center justify-between mb-1.5">
                   <div className="flex items-center gap-1.5">
@@ -2341,12 +2874,70 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
                   When reached without scheduling, the vehicle automatically transitions to Red with the outcome &ldquo;MAX_ATTEMPTS_REACHED&rdquo;.
                 </span>
               </div>
+
+              {/* Channel Partner Allocations Section */}
+              <div className="pt-3 border-t border-slate-200">
+                <div className="flex items-center justify-between mb-2">
+                  <label className="text-xs font-black text-slate-800 uppercase tracking-wide flex items-center gap-1.5">
+                    <Building2 className="w-3.5 h-3.5 text-[#ff353e]" />
+                    <span>Channel Partner Agent Allocations</span>
+                  </label>
+                  <span className="text-[10px] font-semibold text-slate-500">
+                    Auto-assigned on import
+                  </span>
+                </div>
+                <p className="text-[11px] text-slate-500 mb-2">
+                  Map each underwriter or channel partner to a designated callback agent.
+                </p>
+
+                {loadingAllocations ? (
+                  <div className="p-3 text-center text-xs text-slate-400 flex items-center justify-center gap-1.5">
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin text-[#ff353e]" />
+                    <span>Loading allocations...</span>
+                  </div>
+                ) : (!Array.isArray(partnerAllocations) || partnerAllocations.length === 0) ? (
+                  <p className="text-[11px] text-slate-400 italic p-2 bg-slate-50 rounded-lg">
+                    No channel partner allocations mapped yet.
+                  </p>
+                ) : (
+                  <div className="max-h-52 overflow-y-auto space-y-1.5 pr-1 divide-y divide-slate-100">
+                    {(partnerAllocations || []).map((alloc) => (
+                      <div
+                        key={alloc.channel_partner}
+                        className="flex items-center justify-between p-2 bg-slate-50 rounded-xl border border-slate-200 text-xs"
+                      >
+                        <span className="font-bold text-slate-800 text-[11px] pr-2 truncate">
+                          {alloc.channel_partner}
+                        </span>
+                        <select
+                          value={alloc.assigned_agent_id ?? ''}
+                          onChange={(e) => {
+                            const val = e.target.value === '' ? null : Number(e.target.value);
+                            handleUpdateAllocation(alloc.channel_partner, val);
+                          }}
+                          className="px-2 py-1 bg-white border border-slate-200 rounded-lg text-xs font-semibold text-slate-700 outline-none cursor-pointer shrink-0"
+                        >
+                          <option value="">Unassigned</option>
+                          {callbackAgents
+                            .filter((a) => a.id !== undefined)
+                            .map((a) => (
+                              <option key={a.id} value={a.id}>
+                                {a.name}
+                              </option>
+                            ))}
+                        </select>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
             </div>
 
-            <div className="flex items-center justify-end gap-2.5 pt-2 border-t border-slate-100">
+            {/* Pinned Modal Footer (Always visible at bottom) */}
+            <div className="p-3 sm:px-5 sm:py-3.5 bg-slate-50 border-t border-slate-200/80 flex items-center justify-end gap-2.5 flex-shrink-0">
               <button
                 onClick={() => setIsSettingsOpen(false)}
-                className="px-4 py-2 rounded-xl text-xs font-bold text-slate-600 hover:bg-slate-100 transition-colors"
+                className="px-4 py-2 rounded-xl text-xs font-bold text-slate-600 hover:bg-slate-200/70 transition-colors cursor-pointer"
               >
                 Cancel
               </button>
@@ -2367,6 +2958,195 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
                     <span>Save Settings</span>
                   </>
                 )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Team Callback Overview Drilldown Modal */}
+      {drilldownModalType && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-6 bg-slate-900/60 backdrop-blur-xs animate-in fade-in duration-150">
+          <div className="bg-white rounded-2xl sm:rounded-3xl max-w-4xl w-full max-h-[90vh] flex flex-col shadow-2xl border border-slate-100 overflow-hidden">
+            {/* Modal Header */}
+            <div className="p-4 sm:p-5 border-b border-slate-100 flex items-center justify-between flex-shrink-0 bg-white gap-3">
+              <div className="flex items-center gap-3">
+                <div
+                  className={`w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0 ${
+                    drilldownModalType === 'AMBER'
+                      ? 'bg-amber-100 text-amber-700'
+                      : drilldownModalType === 'GREEN'
+                      ? 'bg-emerald-100 text-emerald-700'
+                      : drilldownModalType === 'RED'
+                      ? 'bg-rose-100 text-rose-700'
+                      : drilldownModalType === 'MAX_ATTEMPTS'
+                      ? 'bg-red-100 text-red-700'
+                      : 'bg-slate-100 text-slate-700'
+                  }`}
+                >
+                  {drilldownModalType === 'AMBER' && <Clock className="w-5 h-5" />}
+                  {drilldownModalType === 'GREEN' && <CheckCircle2 className="w-5 h-5" />}
+                  {drilldownModalType === 'RED' && <AlertCircle className="w-5 h-5" />}
+                  {drilldownModalType === 'MAX_ATTEMPTS' && <OctagonAlert className="w-5 h-5" />}
+                  {drilldownModalType === 'TOTAL' && <Car className="w-5 h-5" />}
+                </div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <h3 className="text-base sm:text-lg font-black text-slate-900 leading-tight">
+                      {drilldownModalType === 'TOTAL' &&
+                        (selectedAgent !== 'ALL' ? `${selectedAgent}'s Vehicles` : 'Total Vehicles')}
+                      {drilldownModalType === 'AMBER' && 'Open / Amber Vehicles'}
+                      {drilldownModalType === 'GREEN' && 'Closed / Green Vehicles'}
+                      {drilldownModalType === 'RED' && 'Closed / Red Vehicles'}
+                      {drilldownModalType === 'MAX_ATTEMPTS' && 'Max Attempts Hit Vehicles'}
+                    </h3>
+                    <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-slate-100 text-slate-700 font-mono">
+                      {filteredDrilldownJobs.length} {filteredDrilldownJobs.length === 1 ? 'record' : 'records'}
+                    </span>
+                  </div>
+                  <p className="text-xs text-slate-500 mt-0.5">
+                    {selectedAgent !== 'ALL'
+                      ? `Filtered by agent: ${selectedAgent}`
+                      : 'Team-wide callback overview'}
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <button
+                  id="btn-download-drilldown-excel"
+                  onClick={() => handleExportDrilldownToExcel()}
+                  disabled={filteredDrilldownJobs.length === 0}
+                  className="px-3 py-1.5 rounded-xl text-xs font-bold bg-emerald-600 hover:bg-emerald-700 text-white transition-colors flex items-center gap-1.5 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed shadow-xs"
+                  title="Export these filtered callback records to Excel (.xlsx)"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  <span className="hidden sm:inline">Download Excel</span>
+                  <span className="sm:hidden">Excel</span>
+                </button>
+                <button
+                  onClick={() => setDrilldownModalType(null)}
+                  className="text-slate-400 hover:text-slate-600 p-1.5 rounded-xl hover:bg-slate-100 transition-colors cursor-pointer"
+                  title="Close modal"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+            </div>
+
+            {/* Filter Search Bar */}
+            <div className="p-3 sm:px-5 bg-slate-50 border-b border-slate-100 flex items-center gap-2">
+              <div className="relative flex-1">
+                <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                <input
+                  type="text"
+                  placeholder="Filter within list (registration, client, phone, partner, agent)..."
+                  value={drilldownSearchTerm}
+                  onChange={(e) => setDrilldownSearchTerm(e.target.value)}
+                  className="w-full pl-8 pr-3 py-1.5 bg-white border border-slate-200 rounded-lg text-xs text-slate-800 placeholder:text-slate-400 focus:outline-none focus:ring-1 focus:ring-[#ff353e]"
+                />
+              </div>
+              {drilldownSearchTerm && (
+                <button
+                  onClick={() => setDrilldownSearchTerm('')}
+                  className="text-xs text-slate-500 hover:text-slate-700 font-semibold px-2 py-1 hover:bg-slate-200 rounded cursor-pointer"
+                >
+                  Clear
+                </button>
+              )}
+            </div>
+
+            {/* Records List Table */}
+            <div className="flex-1 overflow-y-auto min-h-0 p-3 sm:p-5">
+              {loadingDrilldown ? (
+                <div className="py-16 text-center space-y-3">
+                  <RefreshCw className="w-6 h-6 text-[#ff353e] animate-spin mx-auto" />
+                  <p className="text-xs font-bold text-slate-500">Loading records...</p>
+                </div>
+              ) : filteredDrilldownJobs.length === 0 ? (
+                <div className="py-16 text-center space-y-2">
+                  <p className="text-sm font-bold text-slate-700">No records found</p>
+                  <p className="text-xs text-slate-400">There are no records matching this overview category.</p>
+                </div>
+              ) : (
+                <div className="border border-slate-200 rounded-xl overflow-hidden shadow-2xs">
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left text-xs">
+                      <thead className="bg-slate-50/80 border-b border-slate-200 text-slate-500 font-bold uppercase tracking-wider text-[10px]">
+                        <tr>
+                          <th className="py-2.5 px-3">Vehicle Reg</th>
+                          <th className="py-2.5 px-3">Client Name</th>
+                          <th className="py-2.5 px-3">Phone</th>
+                          <th className="py-2.5 px-3">Channel Partner</th>
+                          <th className="py-2.5 px-3">Status</th>
+                          <th className="py-2.5 px-3 text-center">Attempts</th>
+                          <th className="py-2.5 px-3">Assigned Agent</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {filteredDrilldownJobs.map((j) => (
+                          <tr key={j.id} className="hover:bg-slate-50/80 transition-colors">
+                            <td className="py-2.5 px-3 font-mono font-bold text-slate-900 whitespace-nowrap">
+                              {j.vehicle_reg_raw || j.vehicle_reg}
+                            </td>
+                            <td className="py-2.5 px-3 font-medium text-slate-800">
+                              {j.client_name || '—'}
+                            </td>
+                            <td className="py-2.5 px-3 font-mono text-slate-600 whitespace-nowrap">
+                              {j.client_phone_raw || j.client_phone}
+                            </td>
+                            <td className="py-2.5 px-3 font-semibold text-slate-700">
+                              {j.channel_partner || 'Unassigned'}
+                            </td>
+                            <td className="py-2.5 px-3 whitespace-nowrap">
+                              <span
+                                className={`inline-flex items-center px-2 py-0.5 rounded-md text-[10px] font-bold border ${
+                                  j.status === 'GREEN'
+                                    ? 'bg-emerald-100 text-emerald-800 border-emerald-300'
+                                    : j.status === 'RED'
+                                    ? 'bg-rose-100 text-rose-800 border-rose-300'
+                                    : 'bg-amber-100 text-amber-800 border-amber-300'
+                                }`}
+                              >
+                                {j.status === 'AMBER'
+                                  ? 'Open (Amber)'
+                                  : j.status === 'GREEN'
+                                  ? 'Closed (Green)'
+                                  : 'Closed (Red)'}
+                              </span>
+                            </td>
+                            <td className="py-2.5 px-3 text-center font-mono font-bold text-slate-700">
+                              {j.attempt_count ?? 0}
+                            </td>
+                            <td className="py-2.5 px-3 font-semibold text-slate-800 whitespace-nowrap">
+                              {j.assigned_agent_name ? (
+                                <span className="inline-flex items-center gap-1 text-slate-800">
+                                  <User className="w-3 h-3 text-slate-400" />
+                                  <span>{j.assigned_agent_name}</span>
+                                </span>
+                              ) : (
+                                <span className="text-slate-400 italic">Unassigned</span>
+                              )}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Modal Footer */}
+            <div className="p-3 sm:px-5 border-t border-slate-100 bg-slate-50 flex items-center justify-between text-xs text-slate-500">
+              <span>
+                Showing {filteredDrilldownJobs.length} of {drilldownJobs.length} records
+              </span>
+              <button
+                onClick={() => setDrilldownModalType(null)}
+                className="px-4 py-1.5 rounded-xl bg-white border border-slate-200 text-xs font-bold text-slate-700 hover:bg-slate-100 transition-colors cursor-pointer shadow-2xs"
+              >
+                Close
               </button>
             </div>
           </div>
