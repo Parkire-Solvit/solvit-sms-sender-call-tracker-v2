@@ -1142,7 +1142,7 @@ function computeActivitySummary(events: any[], totalAgents: number = 0) {
   // POST /api/callback-jobs/import
   app.post("/api/callback-jobs/import", requireAdmin, async (req, res) => {
     try {
-      const { file_name, imported_by, rows } = req.body;
+      const { file_name, imported_by, rows, confirmed } = req.body;
       if (!Array.isArray(rows)) {
         return res.status(400).json({ error: "Invalid rows payload. Expected an array of rows." });
       }
@@ -1150,6 +1150,7 @@ function computeActivitySummary(events: any[], totalAgents: number = 0) {
         file_name: file_name || "import.xlsx",
         imported_by: imported_by || "Admin",
         rows,
+        confirmed: !!confirmed,
       });
       res.json(summary);
     } catch (err) {

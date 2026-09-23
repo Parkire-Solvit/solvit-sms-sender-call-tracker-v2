@@ -110,11 +110,18 @@ export interface CallbackSettings {
   staff_count: number;
   callback_team_tag: string;
   max_attempts: number;
+  disappearance_alert_fixed_count?: number;
+  disappearance_alert_percentage?: number;
   active_agents?: Array<{ id: number; name: string }>;
   updated_at?: string;
 }
 
 export interface CallbackImportSummary {
+  requiresConfirmation?: boolean;
+  wouldCloseCount?: number;
+  wouldClosePercentage?: number;
+  totalCurrentlyOpen?: number;
+  filenameWarning?: string | null;
   row_count_total: number;
   new_records_count: number;
   skipped_open_count: number;
@@ -136,5 +143,6 @@ export interface CallbackImportPayload {
   file_name: string;
   imported_by: string;
   rows: CallbackImportRow[];
+  confirmed?: boolean;
 }
 

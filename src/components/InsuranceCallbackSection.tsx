@@ -159,6 +159,11 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
   const [isUploading, setIsUploading] = useState(false);
   const [uploadSummary, setUploadSummary] = useState<CallbackImportSummary | null>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
+  const [pendingConfirmation, setPendingConfirmation] = useState<{
+    summary: CallbackImportSummary;
+    mappedRows: CallbackImportRow[];
+    fileName: string;
+  } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Auto-close upload modal 2.5s after successful import
@@ -200,6 +205,7 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
     setUploadFile(null);
     setUploadError(null);
     setUploadSummary(null);
+    setPendingConfirmation(null);
     setIsUploadOpen(true);
   };
 
@@ -1047,12 +1053,65 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
       }
 
       const summary: CallbackImportSummary = await res.json();
+
+      if (summary.requiresConfirmation) {
+        setPendingConfirmation({
+          summary,
+          mappedRows,
+          fileName: uploadFile.name,
+        });
+        return;
+      }
+
       setUploadSummary(summary);
       setUploadFile(null);
       if (fileInputRef.current) fileInputRef.current.value = '';
       fetchJobs();
     } catch (err) {
       console.error('Import error:', err);
+      setUploadError((err as Error).message);
+    } finally {
+      setIsUploading(false);
+    }
+  };
+
+  const handleConfirmImport = async () => {
+    if (!pendingConfirmation) return;
+    setIsUploading(true);
+    setUploadError(null);
+
+    try {
+      const res = await fetch('/api/callback-jobs/import', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          file_name: pendingConfirmation.fileName,
+          imported_by: importedBy.trim() || 'Caroline',
+          rows: pendingConfirmation.mappedRows,
+          confirmed: true,
+        }),
+      });
+
+      if (!res.ok) {
+        let errorMsg = 'Failed to confirm and import callback jobs.';
+        try {
+          const errData = await res.json();
+          if (errData.error) errorMsg = errData.error;
+        } catch (_) {
+          const text = await res.text();
+          errorMsg = `Server error (${res.status}): ${text || res.statusText}`;
+        }
+        throw new Error(errorMsg);
+      }
+
+      const summary: CallbackImportSummary = await res.json();
+      setPendingConfirmation(null);
+      setUploadSummary(summary);
+      setUploadFile(null);
+      if (fileInputRef.current) fileInputRef.current.value = '';
+      fetchJobs();
+    } catch (err) {
+      console.error('Confirm import error:', err);
       setUploadError((err as Error).message);
     } finally {
       setIsUploading(false);
@@ -2189,13 +2248,13 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
 
       {/* Outcome Logging Modal */}
       {outcomeJob && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-slate-900/60 backdrop-blur-xs animate-in fade-in duration-150">
-          <div className="bg-white rounded-2xl sm:rounded-3xl max-w-lg w-full max-h-[92vh] flex flex-col shadow-2xl border border-slate-100 overflow-hidden">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-2 sm:p-4 bg-slate-900/60 backdrop-blur-xs animate-in fade-in duration-150 overflow-y-auto">
+          <div className="bg-white rounded-2xl sm:rounded-3xl max-w-lg w-full max-h-[85vh] flex flex-col shadow-2xl border border-slate-100 overflow-hidden my-auto">
             {/* Modal Header */}
-            <div className="p-4 sm:p-5 border-b border-slate-100 flex items-center justify-between flex-shrink-0 bg-white">
+            <div className="p-3.5 sm:p-5 border-b border-slate-100 flex items-center justify-between flex-shrink-0 bg-white">
               <div className="flex items-center gap-2.5">
-                <div className="w-9 h-9 rounded-xl bg-red-50 text-[#ff353e] flex items-center justify-center flex-shrink-0">
-                  <CheckCircle2 className="w-5 h-5" />
+                <div className="w-8 h-8 sm:w-9 sm:h-9 rounded-xl bg-red-50 text-[#ff353e] flex items-center justify-center flex-shrink-0">
+                  <CheckCircle2 className="w-4 h-4 sm:w-5 sm:h-5" />
                 </div>
                 <div>
                   <h3 className="text-sm sm:text-base font-black text-slate-900 leading-tight">Log Call Outcome & Notes</h3>
@@ -2205,8 +2264,10 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
                 </div>
               </div>
               <button
+                type="button"
                 onClick={() => setOutcomeJob(null)}
                 className="text-slate-400 hover:text-slate-600 p-1.5 rounded-xl hover:bg-slate-100 transition-colors cursor-pointer"
+                title="Close"
               >
                 <X className="w-5 h-5" />
               </button>
@@ -2214,7 +2275,7 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
 
             {/* Scrollable Form Body */}
             <form onSubmit={handleSubmitOutcome} className="flex flex-col flex-1 min-h-0 overflow-hidden">
-              <div className="p-4 sm:p-5 overflow-y-auto space-y-3 flex-1">
+              <div className="p-3.5 sm:p-5 overflow-y-auto space-y-3 flex-1 min-h-0">
                 {outcomeError && (
                   <div className="p-2.5 bg-red-50 border border-red-200 rounded-xl text-xs text-red-700 flex items-start gap-2">
                     <AlertCircle className="w-4 h-4 text-red-500 flex-shrink-0 mt-0.5" />
@@ -2460,15 +2521,15 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
 
       {/* Max Attempts Reached Report Modal */}
       {isReportOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs animate-in fade-in duration-150">
-          <div className="bg-white rounded-3xl max-w-3xl w-full p-6 shadow-2xl border border-slate-100 space-y-5 max-h-[90vh] flex flex-col">
-            <div className="flex items-center justify-between border-b border-slate-100 pb-4">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-slate-900/60 backdrop-blur-xs animate-in fade-in duration-150 overflow-y-auto">
+          <div className="bg-white rounded-2xl sm:rounded-3xl max-w-3xl w-full p-4 sm:p-6 shadow-2xl border border-slate-100 space-y-4 sm:space-y-5 max-h-[88vh] flex flex-col my-auto overflow-hidden">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3 sm:pb-4 flex-shrink-0">
               <div className="flex items-center gap-2.5">
-                <div className="w-10 h-10 rounded-xl bg-red-50 text-[#ff353e] flex items-center justify-center">
+                <div className="w-9 h-9 sm:w-10 sm:h-10 rounded-xl bg-red-50 text-[#ff353e] flex items-center justify-center flex-shrink-0">
                   <FileText className="w-5 h-5" />
                 </div>
                 <div>
-                  <h3 className="text-base font-black text-slate-900">
+                  <h3 className="text-sm sm:text-base font-black text-slate-900">
                     Max Attempts Reached — Channel Partner Report
                   </h3>
                   <p className="text-xs text-slate-500">
@@ -2480,8 +2541,10 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
                 </div>
               </div>
               <button
+                type="button"
                 onClick={() => setIsReportOpen(false)}
-                className="text-slate-400 hover:text-slate-600 p-1.5 rounded-xl hover:bg-slate-100"
+                className="text-slate-400 hover:text-slate-600 p-1.5 rounded-xl hover:bg-slate-100 transition-colors cursor-pointer"
+                title="Close"
               >
                 <X className="w-5 h-5" />
               </button>
@@ -2676,8 +2739,44 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
                     <p className="text-xs text-slate-600 mt-1">
                       <span className="font-bold text-emerald-700">{uploadSummary.new_records_count}</span> new vehicles queued •{' '}
                       <span className="font-bold text-emerald-700">{uploadSummary.skipped_open_count}</span> already open •{' '}
-                      <span className="font-bold text-emerald-700">{uploadSummary.skipped_closed_count}</span> already completed.
+                      <span className="font-bold text-emerald-700">{uploadSummary.skipped_closed_count}</span> already completed
+                      {uploadSummary.auto_closed_absent_count !== undefined && (
+                        <> • <span className="font-bold text-emerald-700">{uploadSummary.auto_closed_absent_count}</span> absent closed</>
+                      )}.
                     </p>
+                  </div>
+                </div>
+              ) : pendingConfirmation ? (
+                <div className="space-y-4">
+                  <div className="p-4 bg-rose-50 border border-rose-200 rounded-2xl space-y-3">
+                    <div className="flex items-start gap-3">
+                      <div className="p-2 rounded-xl bg-rose-100 text-rose-700 flex-shrink-0">
+                        <AlertCircle className="w-5 h-5 text-rose-600" />
+                      </div>
+                      <div className="space-y-1">
+                        <h4 className="text-sm font-bold text-rose-950">Safety Confirmation Required</h4>
+                        <p className="text-xs text-rose-900 leading-relaxed">
+                          This file would mark <strong className="font-bold text-rose-950">{pendingConfirmation.summary.wouldCloseCount} of {pendingConfirmation.summary.totalCurrentlyOpen}</strong> currently open vehicles ({pendingConfirmation.summary.wouldClosePercentage}%) as Scheduled.
+                        </p>
+                      </div>
+                    </div>
+
+                    {pendingConfirmation.summary.filenameWarning && (
+                      <div className="p-3 bg-white/90 border border-rose-300 rounded-xl text-xs text-rose-900 flex items-start gap-2">
+                        <AlertCircle className="w-4 h-4 text-rose-600 flex-shrink-0 mt-0.5" />
+                        <div>
+                          <span className="font-bold block">File Date Warning:</span>
+                          <span>{pendingConfirmation.summary.filenameWarning}</span>
+                        </div>
+                      </div>
+                    )}
+
+                    <div className="bg-white/80 p-3 rounded-xl border border-rose-200/70 text-xs text-slate-700 space-y-1">
+                      <div className="font-bold text-slate-900">Import Progress:</div>
+                      <div>• {pendingConfirmation.summary.new_records_count} new vehicles have been added to the callback queue</div>
+                      <div>• {pendingConfirmation.summary.skipped_open_count} already open vehicles have had their timestamps refreshed</div>
+                      <div>• {pendingConfirmation.summary.wouldCloseCount} vehicles absent from this sheet are pending closure as Scheduled</div>
+                    </div>
                   </div>
                 </div>
               ) : (
@@ -2745,6 +2844,40 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
                 >
                   Done
                 </button>
+              ) : pendingConfirmation ? (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setPendingConfirmation(null);
+                      setUploadFile(null);
+                      if (fileInputRef.current) fileInputRef.current.value = '';
+                      setIsUploadOpen(false);
+                      fetchJobs();
+                    }}
+                    className="px-4 py-2 rounded-xl text-xs font-bold text-slate-600 hover:bg-slate-200/70 transition-colors cursor-pointer"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    disabled={isUploading}
+                    onClick={handleConfirmImport}
+                    className="px-5 py-2 rounded-xl text-xs font-bold bg-rose-600 hover:bg-rose-700 text-white shadow-sm disabled:opacity-50 transition-all flex items-center gap-2 cursor-pointer"
+                  >
+                    {isUploading ? (
+                      <>
+                        <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                        <span>Processing Confirmation...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Check className="w-3.5 h-3.5" />
+                        <span>Yes, this is correct, proceed</span>
+                      </>
+                    )}
+                  </button>
+                </>
               ) : (
                 <>
                   <button
