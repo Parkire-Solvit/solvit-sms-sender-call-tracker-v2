@@ -24,6 +24,7 @@ import {
   setChannelPartnerAllocation,
 } from "./insuranceCallbacks";
 import * as XLSX from "xlsx";
+import { seedDefaultAdmin, hashPassword, verifyPassword } from "./auth";
 
 // SSE Clients for real-time agent name push
 const agentClients = new Map<number, any>();
@@ -59,6 +60,9 @@ async function startServer() {
   // Seed channel-partner → agent allocations for the callbacks feature
   await seedChannelPartnerAllocations(db);
 
+  // Seed the initial admin user (from ADMIN_USERNAME/ADMIN_PASSWORD) if none exists
+  await seedDefaultAdmin(db);
+
   const emailRuntime = configuredEmailRuntime();
   if (emailRuntime) {
     const migration = await db.queryOne('SELECT version FROM schema_migrations WHERE version = 14');
@@ -90,23 +94,42 @@ async function startServer() {
 
   const loginAttempts = new Map<string, { count: number; resetAt: number }>();
 
-  // Admin Login
-  app.post("/api/login", (req, res) => {
-    const { username, password } = req.body || {};
+  // Admin Login — validates against the users table, then sets the admin session
+  // cookie (unchanged session mechanism, so Email SLA / cs_member auth is untouched).
+  app.post("/api/login", async (req, res) => {
     const key = req.ip || 'unknown';
     const now = Date.now();
     const current = loginAttempts.get(key);
     const attempt = current && current.resetAt > now ? current : { count: 0, resetAt: now + 15 * 60_000 };
     if (attempt.count >= 30) return res.status(429).json({ error: 'Too many login attempts' });
 
-    if (credentialsMatch(username, password)) {
+    try {
+      const { username, password } = req.body || {};
+      const submittedUser = (username || "").trim();
+      const submittedPass = (password || "").trim();
+      if (!submittedUser || !submittedPass) {
+        return res.status(400).json({ error: "Username and password are required" });
+      }
+
+      const user = await db.queryOne<{ id: number; username: string; password_hash: string; display_name: string; active: any }>(
+        `SELECT id, username, password_hash, display_name, active FROM users WHERE LOWER(username) = LOWER(?)`,
+        [submittedUser]
+      );
+      const isActive = user && (user.active === true || user.active === 1);
+      const isValid = isActive ? await verifyPassword(submittedPass, user!.password_hash) : false;
+
+      if (!isValid) {
+        attempt.count++;
+        loginAttempts.set(key, attempt);
+        return res.status(401).json({ error: "Invalid credentials or inactive account" });
+      }
+
       loginAttempts.delete(key);
       setAdminSession(req, res);
-      res.json({ success: true, role: 'admin' });
-    } else {
-      attempt.count++;
-      loginAttempts.set(key, attempt);
-      res.status(401).json({ error: "Invalid credentials" });
+      res.json({ success: true, role: 'admin', display_name: user!.display_name });
+    } catch (err) {
+      console.error("[AUTH] Login error:", err);
+      res.status(500).json({ error: "Authentication failed" });
     }
   });
 
@@ -126,6 +149,133 @@ async function startServer() {
     res.json({ authenticated: false, role: null, emailLoginAvailable: Boolean(emailRuntime) && microsoftEmailLoginAvailable() });
   });
   app.post('/api/logout', (req, res) => { clearAdminSession(req, res); clearEmailMemberSession(req, res); res.json({ success: true }); });
+
+  // GET /api/users - returns all accounts omitting password_hash
+  app.get("/api/users", requireAdmin, async (req, res) => {
+    try {
+      const users = await db.queryAll<{ id: number; username: string; display_name: string; active: any; created_at: string }>(
+        `SELECT id, username, display_name, active, created_at FROM users ORDER BY id ASC`
+      );
+      const normalized = users.map((u) => ({
+        id: u.id,
+        username: u.username,
+        display_name: u.display_name,
+        active: Boolean(u.active),
+        created_at: u.created_at,
+      }));
+      res.json(normalized);
+    } catch (err) {
+      console.error("[API] Error fetching users:", err);
+      res.status(500).json({ error: "Failed to fetch users" });
+    }
+  });
+
+  // POST /api/users - creates an account
+  app.post("/api/users", requireAdmin, async (req, res) => {
+    try {
+      const { username, display_name, password } = req.body || {};
+      const cleanUser = (username || "").trim();
+      const cleanName = (display_name || "").trim() || cleanUser;
+      const cleanPass = (password || "").trim();
+
+      if (!cleanUser || !cleanPass) {
+        return res.status(400).json({ error: "Username and password are required" });
+      }
+
+      const existing = await db.queryOne<{ id: number }>(
+        `SELECT id FROM users WHERE LOWER(username) = LOWER(?)`,
+        [cleanUser]
+      );
+      if (existing) {
+        return res.status(409).json({ error: `Username "${cleanUser}" already exists` });
+      }
+
+      const passwordHash = await hashPassword(cleanPass);
+      const result = await db.execute(
+        `INSERT INTO users (username, password_hash, display_name, active, created_at, updated_at)
+         VALUES (?, ?, ?, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+        [cleanUser, passwordHash, cleanName]
+      );
+
+      res.status(201).json({
+        id: result.lastInsertId,
+        username: cleanUser,
+        display_name: cleanName,
+        active: true,
+      });
+    } catch (err) {
+      console.error("[API] Error creating user:", err);
+      res.status(500).json({ error: "Failed to create user" });
+    }
+  });
+
+  // PATCH /api/users/:id - updates display_name and/or active flag
+  app.patch("/api/users/:id", requireAdmin, async (req, res) => {
+    try {
+      const id = parseInt(req.params.id, 10);
+      const { display_name, active } = req.body || {};
+
+      const user = await db.queryOne<{ id: number }>(`SELECT id FROM users WHERE id = ?`, [id]);
+      if (!user) return res.status(404).json({ error: "User not found" });
+
+      const updates: string[] = [];
+      const params: any[] = [];
+
+      if (display_name !== undefined) {
+        updates.push("display_name = ?");
+        params.push(String(display_name).trim());
+      }
+      if (active !== undefined) {
+        updates.push("active = ?");
+        params.push(active ? 1 : 0);
+      }
+
+      if (updates.length > 0) {
+        updates.push("updated_at = CURRENT_TIMESTAMP");
+        params.push(id);
+        await db.execute(`UPDATE users SET ${updates.join(", ")} WHERE id = ?`, params);
+      }
+
+      const updated = await db.queryOne<{ id: number; username: string; display_name: string; active: any; created_at: string }>(
+        `SELECT id, username, display_name, active, created_at FROM users WHERE id = ?`,
+        [id]
+      );
+      res.json({
+        ...updated,
+        active: Boolean(updated?.active),
+      });
+    } catch (err) {
+      console.error("[API] Error updating user:", err);
+      res.status(500).json({ error: "Failed to update user" });
+    }
+  });
+
+  // POST /api/users/:id/reset-password - sets a new password
+  app.post("/api/users/:id/reset-password", requireAdmin, async (req, res) => {
+    try {
+      const id = parseInt(req.params.id, 10);
+      const { new_password } = req.body || {};
+      const cleanPass = (new_password || "").trim();
+
+      if (!cleanPass) {
+        return res.status(400).json({ error: "New password is required" });
+      }
+
+      const user = await db.queryOne<{ id: number }>(`SELECT id FROM users WHERE id = ?`, [id]);
+      if (!user) return res.status(404).json({ error: "User not found" });
+
+      const passwordHash = await hashPassword(cleanPass);
+      await db.execute(
+        `UPDATE users SET password_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+        [passwordHash, id]
+      );
+
+      res.json({ success: true, message: "Password updated successfully" });
+    } catch (err) {
+      console.error("[API] Error resetting password:", err);
+      res.status(500).json({ error: "Failed to reset password" });
+    }
+  });
 
   // Log Installation / Heartbeat
   app.post("/api/log-agent", async (req, res) => {
