@@ -193,7 +193,7 @@ async function startServer() {
       const passwordHash = await hashPassword(cleanPass);
       const result = await db.execute(
         `INSERT INTO users (username, password_hash, display_name, active, created_at, updated_at)
-         VALUES (?, ?, ?, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+         VALUES (?, ?, ?, TRUE, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
         [cleanUser, passwordHash, cleanName]
       );
 
@@ -227,7 +227,7 @@ async function startServer() {
       }
       if (active !== undefined) {
         updates.push("active = ?");
-        params.push(active ? 1 : 0);
+        params.push(active ? true : false);
       }
 
       if (updates.length > 0) {
