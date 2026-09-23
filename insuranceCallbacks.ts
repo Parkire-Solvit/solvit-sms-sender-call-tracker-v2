@@ -217,7 +217,8 @@ export async function seedChannelPartnerAllocations(db: DbAdapter): Promise<void
       await db.execute(
         `INSERT INTO channel_partner_allocations (channel_partner, assigned_agent_id, updated_at)
          VALUES (?, ?, CURRENT_TIMESTAMP)
-         ON CONFLICT (channel_partner) DO UPDATE SET assigned_agent_id = EXCLUDED.assigned_agent_id, updated_at = CURRENT_TIMESTAMP`,
+         ON CONFLICT (channel_partner) DO UPDATE SET assigned_agent_id = EXCLUDED.assigned_agent_id, updated_at = CURRENT_TIMESTAMP
+         RETURNING channel_partner`,
         [alloc.partner, alloc.agentId]
       );
     }
@@ -300,7 +301,7 @@ export async function setChannelPartnerAllocation(
     );
   } else {
     await db.execute(
-      `INSERT INTO channel_partner_allocations (channel_partner, assigned_agent_id, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)`,
+      `INSERT INTO channel_partner_allocations (channel_partner, assigned_agent_id, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP) RETURNING channel_partner`,
       [partner, assignedAgentId]
     );
   }
