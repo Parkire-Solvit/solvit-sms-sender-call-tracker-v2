@@ -2,7 +2,7 @@ name: Web Build Check
 
 on:
   push:
-    branches: [feat/v3-alignment]
+    branches: [feat/v3-alignment, fix/callbacks-migration-renumber]
   pull_request:
     branches: [main]
   workflow_dispatch:
