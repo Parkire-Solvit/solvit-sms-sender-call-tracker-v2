@@ -10,6 +10,7 @@ import { resolveEmailThreadSql } from './emailResolution';
 import { replyConversationCandidatesSql } from './replyFallback';
 import { emailExclusionReason } from './emailActionability';
 import { lockAssignableEmailSql } from './emailAssignmentAuthorization';
+import { normalizedReplySubject } from './replySubjectFallback';
 
 type Client = pg.PoolClient;
 type SqlRow = Record<string, any>;
@@ -226,6 +227,21 @@ export async function storeOutbound(sourceMailbox: string, message: GraphMessage
       if (candidates.rows.length === 1) { threadId = Number(candidates.rows[0].id); matchMethod = 'MAILBOX_CONVERSATION'; }
     }
     if (!threadId && ancestorThreadId) { threadId=ancestorThreadId; matchMethod='RFC_REFERENCES'; }
+    if (!threadId && address(message.from?.emailAddress?.address) === address(sourceMailbox)) {
+      const subject = normalizedReplySubject(message.subject);
+      if (subject) {
+        const candidates = await client.query<SqlRow>(
+          `SELECT id,subject FROM email_threads
+           WHERE first_response_at IS NULL AND sla_exclusion_reason IS NULL
+             AND received_at <= $1 AND received_at >= $1::timestamptz - interval '14 days'
+             AND customer_email=ANY($2::text[]) AND root_internet_message_id <> $3
+           ORDER BY received_at DESC LIMIT 100`,
+          [sentAt, recipients(message), identity.internetMessageId],
+        );
+        const exact = candidates.rows.filter((candidate) => normalizedReplySubject(candidate.subject) === subject);
+        if (exact.length === 1) { threadId = Number(exact[0].id); matchMethod = 'SUBJECT_CUSTOMER'; }
+      }
+    }
     if (!threadId) return null;
     await client.query<SqlRow>(
       `INSERT INTO email_messages (email_thread_id,graph_message_id,internet_message_id,graph_conversation_id,
