@@ -1,4 +1,4 @@
--- 017_users.sql
+-- 022_users.sql
 CREATE TABLE IF NOT EXISTS users (
   id BIGSERIAL PRIMARY KEY,
   username VARCHAR(64) UNIQUE NOT NULL,
