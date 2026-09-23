@@ -287,7 +287,6 @@ export function EmailSlaSection({ employeeEmail }: { employeeEmail?: string }) {
             <div className="min-w-0 space-y-3">
               <div className="flex flex-wrap items-center gap-2">
                 <button type="button" onClick={() => void openOutlook(thread)} title={`Open in Outlook signed in as ${thread.owner_email || 'the assigned agent'}`} aria-label={`Open ${thread.subject || 'email'} in Outlook`} className="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100 focus-visible:ring-2 focus-visible:ring-blue-500"><Mail aria-hidden="true" className="h-4 w-4" /></button>
-                {thread.status !== 'RESOLVED' && <button disabled={busy} onClick={() => void action(`/api/email/threads/${thread.id}/no-response-required`)} className="rounded-lg border border-slate-300 px-3 py-2 text-xs text-slate-700">No response needed</button>}
               </div>
               <details className="text-xs text-slate-600"><summary className="cursor-pointer font-medium">Details{thread.status !== 'RESOLVED' ? ' / reassign' : ''}</summary>
                 <div className="mt-2 space-y-2 break-words">
