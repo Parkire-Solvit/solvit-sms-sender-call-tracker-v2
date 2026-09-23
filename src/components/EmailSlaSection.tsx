@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { AlertTriangle, ChevronDown, Mail, RefreshCw, Settings2 } from 'lucide-react';
 import { emailDeadlineLabel } from '../../shared/emailDeadlineLabel';
 import { emailCompletionOutcome, emailCompletionTime } from '../../shared/emailCompletionLabel';
@@ -62,7 +62,11 @@ const filters = [
 ] as const;
 
 async function api<T>(url: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(url, { ...init, headers: { 'Content-Type': 'application/json', ...init?.headers } });
+  const response = await fetch(url, {
+    ...init,
+    cache: 'no-store',
+    headers: { 'Content-Type': 'application/json', ...init?.headers },
+  });
   const data = await response.json();
   if (!response.ok) throw new Error(data.error || `Request failed (${response.status})`);
   return data as T;
@@ -108,8 +112,11 @@ export function EmailSlaSection({ employeeEmail }: { employeeEmail?: string }) {
   const [showSettings, setShowSettings] = useState(false);
   const [showAlerts, setShowAlerts] = useState(false);
   const [now, setNow] = useState(Date.now());
+  const [lastUpdatedAt, setLastUpdatedAt] = useState<number | null>(null);
+  const refreshSequence = useRef(0);
 
   const refresh = useCallback(async () => {
+    const sequence = ++refreshSequence.current;
     try {
       const status = await api<{ enabled: boolean }>('/api/email/status');
       setEnabled(status.enabled);
@@ -125,17 +132,28 @@ export function EmailSlaSection({ employeeEmail }: { employeeEmail?: string }) {
         api<Alert[]>('/api/email/alerts'), api<Summary>('/api/email/summary'), api<Settings>('/api/email/settings'),
         isEmployee ? api<AssignmentNotice[]>('/api/email/assignment-notifications') : Promise.resolve([] as AssignmentNotice[]),
       ]);
+      // A slower older request must never overwrite a newer refresh.
+      if (sequence !== refreshSequence.current) return;
       setThreads(nextThreads); setMembers(nextMembers); setAlerts(nextAlerts);
       setSummary(nextSummary); setSettings(nextSettings); setAssignmentNotices(nextNotices);
-      setError('');
-    } catch (cause) { setError((cause as Error).message); }
+      setLastUpdatedAt(Date.now()); setError('');
+    } catch (cause) { if (sequence === refreshSequence.current) setError((cause as Error).message); }
   }, [filter, owner, receivedFrom, receivedTo, isEmployee]);
 
   useEffect(() => {
     void refresh();
-    const interval = setInterval(() => { void refresh(); }, 30_000);
+    const interval = setInterval(() => { if (!document.hidden) void refresh(); }, 15_000);
     const clock = setInterval(() => setNow(Date.now()), 30_000);
-    return () => { clearInterval(interval); clearInterval(clock); };
+    const resume = () => { if (!document.hidden) void refresh(); };
+    window.addEventListener('focus', resume);
+    window.addEventListener('pageshow', resume);
+    document.addEventListener('visibilitychange', resume);
+    return () => {
+      clearInterval(interval); clearInterval(clock);
+      window.removeEventListener('focus', resume);
+      window.removeEventListener('pageshow', resume);
+      document.removeEventListener('visibilitychange', resume);
+    };
   }, [refresh]);
 
   async function action(url: string, payload?: unknown) {
@@ -245,7 +263,7 @@ export function EmailSlaSection({ employeeEmail }: { employeeEmail?: string }) {
             <label className="flex items-center gap-1"><input type="checkbox" checked={member.round_robin_enabled} disabled={busy} onChange={(event) => void updateMember(member, 'roundRobinEnabled', event.target.checked)} />Rotation</label></span>
         </div>)}</div>
       </section>}
-      <section className="p-5 rounded-2xl border border-slate-200 bg-white shadow-sm"><div className="flex flex-wrap items-center justify-between gap-3 mb-4"><div><h3 className="font-semibold">CS emails</h3><p className="mt-1 text-xs text-slate-500">All times are Nairobi time (UTC+3). SLA counts Mon–Fri, 08:00–17:00, excluding configured holidays. Auto-refreshes every 30 seconds.</p></div><div className="flex flex-wrap gap-2">
+      <section className="p-5 rounded-2xl border border-slate-200 bg-white shadow-sm"><div className="flex flex-wrap items-center justify-between gap-3 mb-4"><div><h3 className="font-semibold">CS emails</h3><p className="mt-1 text-xs text-slate-500">All times are Nairobi time (UTC+3). SLA counts Mon–Fri, 08:00–17:00, excluding configured holidays. Auto-refreshes every 15 seconds and when you return to this tab.{lastUpdatedAt ? ` Last updated ${new Date(lastUpdatedAt).toLocaleTimeString('en-KE', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}.` : ''}</p></div><div className="flex flex-wrap gap-2">
         <select aria-label="Email status filter" value={filter} onChange={(event) => setFilter(event.target.value)} className="border rounded-lg px-2 py-1.5 text-sm">{filters.filter(([value]) => !isEmployee || value !== 'unassigned').map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select>
         {!isEmployee && <select aria-label="Email owner filter" value={owner} onChange={(event) => setOwner(event.target.value)} className="border rounded-lg px-2 py-1.5 text-sm"><option value="">All owners</option>{members.map((member) => <option key={member.id} value={member.email}>{member.display_name}</option>)}</select>}
         <label className="flex items-center gap-2 text-xs text-slate-500"><span>From</span><input aria-label="Emails received from" title="Start of received-date range" type="date" value={receivedFrom} max={receivedTo || undefined} onChange={(event) => setReceivedFrom(event.target.value)} className="border rounded-lg px-2 py-1.5 text-sm text-slate-800" /></label>
