@@ -38,6 +38,7 @@ const emptyMetrics = (): FolderSyncMetrics => ({
 
 const reconciliationIntervalMs = 5 * 60_000;
 const reconciliationLookbackMs = 48 * 60 * 60_000;
+const recentSentLookbackMs = 15 * 60_000;
 let lastInboxReconciliationAt = 0;
 
 function addMetrics(total: FolderSyncMetrics, next: FolderSyncMetrics): void {
@@ -160,9 +161,13 @@ async function reconcileRecentInbox(config: EmailRuntimeConfig, mailbox: string)
   return metrics;
 }
 
-async function reconcileRecentSent(config: EmailRuntimeConfig, mailbox: string): Promise<FolderSyncMetrics> {
+async function reconcileRecentSent(
+  config: EmailRuntimeConfig,
+  mailbox: string,
+  lookbackMs = reconciliationLookbackMs,
+): Promise<FolderSyncMetrics> {
   const metrics = emptyMetrics();
-  const since = new Date(Math.max(config.monitoringStart.getTime(), Date.now() - reconciliationLookbackMs));
+  const since = new Date(Math.max(config.monitoringStart.getTime(), Date.now() - lookbackMs));
   const items = await config.graph.getRecentFolderMessages(mailbox, 'sentitems', since);
   for (const item of items) {
     metrics.sentScanned++;
@@ -230,13 +235,19 @@ export async function runEmailSync(config: EmailRuntimeConfig): Promise<EmailSyn
         await recordSyncFailure(mailbox, 'sentitems', code).catch(() => undefined);
         console.error('[EMAIL] Sent Items sync failure', { mailbox, code });
       }
-      if (shouldReconcileInbox) {
-        try { addMetrics(metrics, await reconcileRecentSent(config, mailbox)); }
-        catch (error) {
-          const code = error instanceof Error ? error.message : 'Unknown reconciliation error';
-          await recordSyncFailure(mailbox, 'sentitems-reconciliation', code).catch(() => undefined);
-          console.error('[EMAIL] Sent Items reconciliation failure', { mailbox, code });
-        }
+      // Delta updates can be delayed or missed by Graph. Always scan the small
+      // recent window so a sent reply closes its ticket within one poll cycle;
+      // retain the broader recovery pass every five minutes for older gaps.
+      try {
+        addMetrics(metrics, await reconcileRecentSent(
+          config,
+          mailbox,
+          shouldReconcileInbox ? reconciliationLookbackMs : recentSentLookbackMs,
+        ));
+      } catch (error) {
+        const code = error instanceof Error ? error.message : 'Unknown reconciliation error';
+        await recordSyncFailure(mailbox, 'sentitems-reconciliation', code).catch(() => undefined);
+        console.error('[EMAIL] Sent Items reconciliation failure', { mailbox, code });
       }
     }
     const alerts = await emitDueAlerts(await getEmailSettings());
