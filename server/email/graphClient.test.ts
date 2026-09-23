@@ -130,6 +130,7 @@ test('reconciles recent Inbox messages without requesting bodies or attachments'
   assert.equal(messages[0].id, 'recent-id');
   assert.match(calls[1], /mailFolders\/inbox\/messages\?/);
   assert.equal(new URL(calls[1]).searchParams.get('$filter'), 'receivedDateTime ge 2026-09-15T12:00:00.000Z');
+  assert.equal(new URL(calls[1]).searchParams.get('$orderby'), 'receivedDateTime desc');
   assert.doesNotMatch(calls[1], /attachments/i);
   assert.doesNotMatch(calls[1], /body,/i);
 });
@@ -159,5 +160,27 @@ test('Sent Items recovery queries original sent timestamps', async () => {
   }) as typeof fetch);
   await client.getRecentFolderMessages('mercy@example.com', 'sentitems', new Date('2026-09-16T00:00:00Z'));
   assert.equal(new URL(requested).searchParams.get('$filter'), 'sentDateTime ge 2026-09-16T00:00:00.000Z');
-  assert.equal(new URL(requested).searchParams.get('$orderby'), 'sentDateTime asc');
+  assert.equal(new URL(requested).searchParams.get('$orderby'), 'sentDateTime desc');
+});
+
+test('bounded recovery keeps newest pages and returns them chronologically', async () => {
+  let requests = 0;
+  const client = new GraphClient(config, (async (input) => {
+    if (String(input).includes('/token')) return new Response(JSON.stringify({ access_token: 'mock', expires_in: 3600 }));
+    requests++;
+    const next = "https://graph.microsoft.com/v1.0/users('mercy@example.com')/mailfolders('inbox')/messages?$skiptoken=" + requests;
+    return new Response(JSON.stringify({
+      value: [{ id: `message-${requests}`, receivedDateTime: `2026-09-23T12:${String(11-requests).padStart(2,'0')}:00Z` }],
+      '@odata.nextLink': next,
+    }));
+  }) as typeof fetch);
+  const originalWarn = console.warn;
+  console.warn = () => undefined;
+  try {
+    const messages = await client.getRecentFolderMessages('mercy@example.com','inbox',new Date('2026-09-21T00:00:00Z'));
+    assert.equal(requests,10);
+    assert.equal(messages.length,10);
+    assert.equal(messages[0].id,'message-10');
+    assert.equal(messages[9].id,'message-1');
+  } finally { console.warn = originalWarn; }
 });

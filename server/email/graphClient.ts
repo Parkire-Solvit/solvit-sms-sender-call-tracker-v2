@@ -140,7 +140,11 @@ export class GraphClient {
     const params = new URLSearchParams({
       '$select': 'id,conversationId,internetMessageId,subject,from,toRecipients,ccRecipients,bodyPreview,webLink,receivedDateTime,sentDateTime',
       '$filter': `${timeField} ge ${since.toISOString()}`,
-      '$orderby': `${timeField} asc`,
+      // Recovery is deliberately newest-first. At Solvit volumes a 48-hour
+      // window can exceed Graph's bounded recovery scan, so oldest-first can
+      // exhaust the page budget before reaching the messages we most need to
+      // recover (new inbound tickets and their replies).
+      '$orderby': `${timeField} desc`,
       '$top': '100',
     });
     let url: string | undefined = `${base}?${params}`;
@@ -161,8 +165,21 @@ export class GraphClient {
       messages.push(...page.value);
       url = page['@odata.nextLink'];
     }
-    if (url) throw new Error('Graph recent-message recovery exceeded page limit; scan incomplete');
-    return messages;
+    if (url) {
+      // The newest messages are already present. Returning the bounded result
+      // is safer than throwing and discarding the entire recovery scan.
+      console.warn('[EMAIL] Graph recent-message recovery reached page limit', {
+        mailbox: mailbox.trim().toLowerCase(), folder: folder.toLowerCase(), messages: messages.length,
+      });
+    }
+    // Consumers process chronologically so the earliest qualifying response
+    // remains the recorded first response.
+    return messages.sort((left, right) => {
+      const leftAt = Date.parse((folder.toLowerCase() === 'sentitems' ? left.sentDateTime : left.receivedDateTime) || '');
+      const rightAt = Date.parse((folder.toLowerCase() === 'sentitems' ? right.sentDateTime : right.receivedDateTime) || '');
+      return (Number.isFinite(leftAt) ? leftAt : Number.MAX_SAFE_INTEGER) -
+        (Number.isFinite(rightAt) ? rightAt : Number.MAX_SAFE_INTEGER);
+    });
   }
 
   async getMessageHeaders(mailbox: string, messageId: string): Promise<GraphMessage> {
