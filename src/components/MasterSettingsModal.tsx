@@ -12,9 +12,24 @@ import {
   History, 
   X,
   Info,
-  ShieldCheck
+  ShieldCheck,
+  Car,
+  Users,
+  Mail,
+  Send,
+  Trash2,
+  Plus,
+  Lock,
+  Building2,
+  UserPlus,
+  Key,
+  Power,
+  UserCheck,
+  UserX,
+  RefreshCw,
 } from 'lucide-react';
 import { SystemSettings, SettingsChangeLog, DEFAULT_SETTINGS } from '../types/compliance';
+import { CallbackSettings, UserAccount, ChannelPartnerAllocation } from '../types/callbacks';
 
 interface MasterSettingsModalProps {
   isOpen: boolean;
@@ -37,19 +52,221 @@ export const MasterSettingsModal: React.FC<MasterSettingsModalProps> = ({
   onClose,
   onSettingsSaved,
 }) => {
-  const [activeTab, setActiveTab] = useState<'rules' | 'schedule' | 'logs' | 'sms'>('rules');
+  const [activeTab, setActiveTab] = useState<'rules' | 'schedule' | 'logs' | 'insurance' | 'users'>('rules');
   const [settings, setSettings] = useState<SystemSettings>(DEFAULT_SETTINGS);
+  const [callbackSettings, setCallbackSettings] = useState<CallbackSettings>({
+    id: 1,
+    staff_count: 2,
+    callback_team_tag: 'Callback Team',
+    max_attempts: 4,
+  });
   const [logs, setLogs] = useState<SettingsChangeLog[]>([]);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
 
+  // Team Accounts (Users) state
+  const [users, setUsers] = useState<UserAccount[]>([]);
+  const [loadingUsers, setLoadingUsers] = useState(false);
+  const [userError, setUserError] = useState<string | null>(null);
+  const [userSuccess, setUserSuccess] = useState<string | null>(null);
+  const [newUsername, setNewUsername] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [newDisplayName, setNewDisplayName] = useState('');
+  const [isCreatingUser, setIsCreatingUser] = useState(false);
+  const [editingUserId, setEditingUserId] = useState<number | null>(null);
+  const [editingDisplayName, setEditingDisplayName] = useState('');
+  const [resettingUserId, setResettingUserId] = useState<number | null>(null);
+  const [resetNewPassword, setResetNewPassword] = useState('');
+  const [isResettingPassword, setIsResettingPassword] = useState(false);
+
+  // Channel Partner Allocations state
+  const [partnerAllocations, setPartnerAllocations] = useState<ChannelPartnerAllocation[]>([]);
+  const [loadingAllocations, setLoadingAllocations] = useState(false);
+
+  // (Daily-summary/Gmail email settings intentionally omitted — Email SLA is a
+  // separate feature owned elsewhere and is not part of this settings modal.)
+
   useEffect(() => {
     if (isOpen) {
       fetchSettings();
+      fetchCallbackSettings();
+      fetchUsers();
+      fetchAllocations();
     }
   }, [isOpen]);
+
+  const fetchUsers = async () => {
+    setLoadingUsers(true);
+    setUserError(null);
+    try {
+      const res = await fetch('/api/users');
+      if (res.ok) {
+        const data = await res.json();
+        setUsers(data);
+      } else {
+        setUserError('Failed to fetch team accounts');
+      }
+    } catch (err) {
+      setUserError('Network error loading team accounts');
+    } finally {
+      setLoadingUsers(false);
+    }
+  };
+
+  const handleCreateUser = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newUsername.trim() || !newPassword.trim() || !newDisplayName.trim()) {
+      setUserError('Please fill in all fields (username, display name, and password).');
+      return;
+    }
+    setIsCreatingUser(true);
+    setUserError(null);
+    setUserSuccess(null);
+    try {
+      const res = await fetch('/api/users', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          username: newUsername.trim(),
+          password: newPassword.trim(),
+          display_name: newDisplayName.trim(),
+        }),
+      });
+      if (res.ok) {
+        setNewUsername('');
+        setNewPassword('');
+        setNewDisplayName('');
+        setUserSuccess('Team user account created successfully.');
+        fetchUsers();
+      } else {
+        const data = await res.json().catch(() => ({}));
+        setUserError(data.error || 'Failed to create user account');
+      }
+    } catch (err) {
+      setUserError('Network error while creating user');
+    } finally {
+      setIsCreatingUser(false);
+    }
+  };
+
+  const handleToggleUserActive = async (u: UserAccount) => {
+    setUserError(null);
+    setUserSuccess(null);
+    try {
+      const res = await fetch(`/api/users/${u.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ active: !u.active }),
+      });
+      if (res.ok) {
+        setUserSuccess(`Account "${u.username}" status updated to ${!u.active ? 'Active' : 'Disabled'}.`);
+        fetchUsers();
+      } else {
+        const data = await res.json().catch(() => ({}));
+        setUserError(data.error || 'Failed to update user status');
+      }
+    } catch (err) {
+      setUserError('Network error updating user status');
+    }
+  };
+
+  const handleSaveDisplayName = async (userId: number) => {
+    if (!editingDisplayName.trim()) return;
+    try {
+      const res = await fetch(`/api/users/${userId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ display_name: editingDisplayName.trim() }),
+      });
+      if (res.ok) {
+        setEditingUserId(null);
+        setEditingDisplayName('');
+        setUserSuccess('Display name updated successfully.');
+        fetchUsers();
+      } else {
+        const data = await res.json().catch(() => ({}));
+        setUserError(data.error || 'Failed to update display name');
+      }
+    } catch (err) {
+      setUserError('Network error updating display name');
+    }
+  };
+
+  const handleResetPassword = async (userId: number) => {
+    if (!resetNewPassword.trim()) {
+      setUserError('Please provide a new password.');
+      return;
+    }
+    setIsResettingPassword(true);
+    setUserError(null);
+    setUserSuccess(null);
+    try {
+      const res = await fetch(`/api/users/${userId}/reset-password`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ new_password: resetNewPassword.trim() }),
+      });
+      if (res.ok) {
+        setUserSuccess('Password updated successfully.');
+        setResettingUserId(null);
+        setResetNewPassword('');
+      } else {
+        const data = await res.json().catch(() => ({}));
+        setUserError(data.error || 'Failed to reset password');
+      }
+    } catch (err) {
+      setUserError('Network error resetting password');
+    } finally {
+      setIsResettingPassword(false);
+    }
+  };
+
+  const fetchAllocations = async () => {
+    setLoadingAllocations(true);
+    try {
+      const res = await fetch('/api/channel-partner-allocations');
+      if (res.ok) {
+        const raw = await res.json();
+        const list: ChannelPartnerAllocation[] = Array.isArray(raw)
+          ? raw
+          : (raw && Array.isArray(raw.allocations) ? raw.allocations : []);
+        setPartnerAllocations(list);
+      }
+    } catch (err) {
+      console.warn('Failed to load allocations:', err);
+    } finally {
+      setLoadingAllocations(false);
+    }
+  };
+
+  const handleUpdateAllocation = async (partner: string, agentId: number | null) => {
+    try {
+      const res = await fetch('/api/channel-partner-allocations', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ channel_partner: partner, assigned_agent_id: agentId }),
+      });
+      if (res.ok) {
+        fetchAllocations();
+      }
+    } catch (err) {
+      console.error('Failed to update allocation:', err);
+    }
+  };
+
+  const fetchCallbackSettings = async () => {
+    try {
+      const res = await fetch('/api/callback-settings');
+      if (res.ok) {
+        const data = await res.json();
+        setCallbackSettings(data);
+      }
+    } catch (err) {
+      console.warn('Failed to load callback settings in master modal', err);
+    }
+  };
 
   const fetchSettings = async () => {
     setLoading(true);
@@ -66,7 +283,7 @@ export const MasterSettingsModal: React.FC<MasterSettingsModalProps> = ({
         }
       }
     } catch (err) {
-      console.error('Failed to load settings:', err);
+      console.warn('Failed to load settings:', err);
       setSaveError('Could not load current settings from server.');
     } finally {
       setLoading(false);
@@ -78,22 +295,38 @@ export const MasterSettingsModal: React.FC<MasterSettingsModalProps> = ({
     setSaveSuccess(false);
     setSaveError(null);
     try {
-      const res = await fetch('/api/settings', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          settings,
-          changed_by: 'Admin Portal User',
-        }),
-      });
+      const settingsPayload: any = {
+        ...settings,
+      };
 
-      if (res.ok) {
+      const [resSettings, resCallback] = await Promise.all([
+        fetch('/api/settings', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            settings: settingsPayload,
+            changed_by: 'Admin Portal User',
+          }),
+        }),
+        fetch('/api/callback-settings', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            staff_count: callbackSettings.staff_count,
+            callback_team_tag: callbackSettings.callback_team_tag,
+            max_attempts: callbackSettings.max_attempts,
+          }),
+        }),
+      ]);
+
+      if (resSettings.ok && resCallback.ok) {
         setSaveSuccess(true);
         setTimeout(() => setSaveSuccess(false), 3500);
         if (onSettingsSaved) onSettingsSaved();
         fetchSettings(); // Refresh logs
+        fetchCallbackSettings();
       } else {
-        const errData = await res.json();
+        const errData = !resSettings.ok ? await resSettings.json() : await resCallback.json();
         setSaveError(errData.error || 'Failed to save settings.');
       }
     } catch (err) {
@@ -105,7 +338,7 @@ export const MasterSettingsModal: React.FC<MasterSettingsModalProps> = ({
 
   const handleResetDefaults = () => {
     if (confirm('Are you sure you want to reset all compliance settings to system defaults?')) {
-      setSettings({ ...DEFAULT_SETTINGS, sms_template: settings.sms_template });
+      setSettings(DEFAULT_SETTINGS);
     }
   };
 
@@ -181,16 +414,31 @@ export const MasterSettingsModal: React.FC<MasterSettingsModalProps> = ({
             Audit &amp; Change Log ({logs.length})
           </button>
           <button
-            id="tab-sms-template-btn"
-            onClick={() => setActiveTab('sms')}
+            id="tab-insurance-callbacks-btn"
+            onClick={() => setActiveTab('insurance')}
             className={`flex items-center gap-2 py-3 px-4 text-xs font-semibold border-b-2 transition-all ${
-              activeTab === 'sms'
+              activeTab === 'insurance'
                 ? 'border-amber-600 text-amber-700 bg-white shadow-xs rounded-t-lg'
                 : 'border-transparent text-slate-500 hover:text-slate-700'
             }`}
           >
-            <MessageSquare className="w-4 h-4" />
-            SMS Template
+            <Car className="w-4 h-4 text-[#ff353e]" />
+            Callbacks
+          </button>
+          <button
+            id="tab-team-accounts-btn"
+            onClick={() => {
+              setActiveTab('users');
+              fetchUsers();
+            }}
+            className={`flex items-center gap-2 py-3 px-4 text-xs font-semibold border-b-2 transition-all ${
+              activeTab === 'users'
+                ? 'border-indigo-600 text-indigo-700 bg-white shadow-xs rounded-t-lg'
+                : 'border-transparent text-slate-500 hover:text-slate-700'
+            }`}
+          >
+            <Users className="w-4 h-4 text-indigo-600" />
+            Team Accounts ({users.length})
           </button>
         </div>
 
@@ -328,28 +576,26 @@ export const MasterSettingsModal: React.FC<MasterSettingsModalProps> = ({
                     </div>
 
                     {settings.sms_followup_enabled && (
-                      <div className="pt-3 border-t border-slate-100">
-                        <div className="flex items-center justify-between">
-                          <span className="text-xs font-semibold text-slate-700">
-                            SMS Follow-up Deadline (after failed outgoing call):
-                          </span>
-                          <div className="flex items-center gap-2">
-                            <input
-                              id="input-sms-deadline-minutes"
-                              type="number"
-                              min="1"
-                              max="1440"
-                              value={settings.sms_deadline_minutes}
-                              onChange={(e) =>
-                                setSettings({
-                                  ...settings,
-                                  sms_deadline_minutes: Math.max(1, parseInt(e.target.value) || 1),
-                                })
-                              }
-                              className="w-24 px-3 py-1.5 text-right font-mono font-bold text-slate-900 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-amber-500 focus:border-amber-500 outline-none"
-                            />
-                            <span className="text-xs font-semibold text-slate-500">minutes</span>
-                          </div>
+                      <div className="pt-3 border-t border-slate-100 flex items-center justify-between">
+                        <span className="text-xs font-semibold text-slate-700">
+                          SMS Follow-up Deadline (after failed outgoing call):
+                        </span>
+                        <div className="flex items-center gap-2">
+                          <input
+                            id="input-sms-deadline-minutes"
+                            type="number"
+                            min="1"
+                            max="1440"
+                            value={settings.sms_deadline_minutes}
+                            onChange={(e) =>
+                              setSettings({
+                                ...settings,
+                                sms_deadline_minutes: Math.max(1, parseInt(e.target.value) || 1),
+                              })
+                            }
+                            className="w-24 px-3 py-1.5 text-right font-mono font-bold text-slate-900 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-amber-500 focus:border-amber-500 outline-none"
+                          />
+                          <span className="text-xs font-semibold text-slate-500">minutes</span>
                         </div>
                       </div>
                     )}
@@ -613,35 +859,467 @@ export const MasterSettingsModal: React.FC<MasterSettingsModalProps> = ({
                 </div>
               )}
 
-              {/* TAB 4: SMS TEMPLATE */}
-              {activeTab === 'sms' && (
-                <div className="space-y-4">
-                  <div>
-                    <h3 className="text-sm font-bold text-slate-900">App SMS Message Template</h3>
-                    <p className="text-xs text-slate-500 mt-1">
-                      This database-backed message is the single source of truth for SMS sent by the app.
-                    </p>
+              {/* TAB 4: CALLBACKS */}
+              {activeTab === 'insurance' && (
+                <div className="space-y-6">
+                  <div className="bg-gradient-to-r from-red-50 to-orange-50 border border-red-200/70 p-4.5 rounded-2xl flex items-start gap-3">
+                    <div className="p-2 rounded-xl bg-white text-[#ff353e] shadow-xs">
+                      <Car className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <h4 className="text-xs font-bold text-slate-900">Callback Configuration</h4>
+                      <p className="text-[11px] text-slate-600 mt-0.5">
+                        Controls load balancing across active callback staff, tag-based activity scoping, and max attempt prompt thresholds.
+                      </p>
+                    </div>
                   </div>
-                  <div className="p-5 rounded-xl border border-slate-200 bg-white shadow-xs">
-                    <div className="flex items-center justify-between mb-2">
-                      <label htmlFor="input-sms-template" className="text-xs font-semibold text-slate-700">
-                        SMS Message
-                      </label>
-                      <span className="text-[11px] text-slate-400">{settings.sms_template.length}/1000</span>
+
+                  {/* Active Staff Count (Auto-assigned) */}
+                  <div className="p-5 rounded-xl border border-slate-200 bg-white shadow-xs space-y-3">
+                    <div className="flex items-start justify-between">
+                      <div className="flex items-center gap-2.5">
+                        <div className="p-2 rounded-lg bg-red-50 text-[#ff353e]">
+                          <Users className="w-4 h-4" />
+                        </div>
+                        <div>
+                          <div className="flex items-center gap-2">
+                            <h3 className="text-sm font-bold text-slate-900">Active Staff Count (Workload Balancing)</h3>
+                            <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200">
+                              Auto-Assigned
+                            </span>
+                          </div>
+                          <p className="text-xs text-slate-500 mt-0.5">
+                            Automatically determined by the number of active agents tagged with &ldquo;{callbackSettings.callback_team_tag}&rdquo;.
+                          </p>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <div className="px-3.5 py-1.5 rounded-lg bg-slate-50 border border-slate-200 text-right">
+                          <span className="font-mono font-bold text-base text-slate-900 mr-1.5">
+                            {callbackSettings.staff_count}
+                          </span>
+                          <span className="text-xs font-semibold text-slate-500">active staff</span>
+                        </div>
+                      </div>
                     </div>
-                    <textarea
-                      id="input-sms-template"
-                      rows={7}
-                      maxLength={1000}
-                      required={settings.sms_followup_enabled}
-                      value={settings.sms_template}
-                      onChange={(e) => setSettings({ ...settings, sms_template: e.target.value })}
-                      placeholder="Enter the message sent by the app. Use {agent_name} where the agent's name should appear."
-                      className="w-full px-3.5 py-2.5 text-sm text-slate-900 border border-slate-300 rounded-lg focus:ring-2 focus:ring-amber-500 focus:border-amber-500 outline-none resize-y"
-                    />
-                    <div className="mt-3 p-3 bg-amber-50 border border-amber-100 rounded-lg text-xs text-amber-900">
-                      Use <code className="font-mono font-bold">{'{agent_name}'}</code> where the current agent name should appear. The Android app must fetch this value from <code className="font-mono">/api/app-config/{'{agent_id}'}</code>.
+
+                    {callbackSettings.active_agents && callbackSettings.active_agents.length > 0 ? (
+                      <div className="text-[11px] text-slate-600 bg-slate-50 p-2.5 rounded-lg flex flex-wrap items-center gap-1.5 border border-slate-100">
+                        <span className="font-semibold text-slate-700">Tagged Agents:</span>
+                        {callbackSettings.active_agents.map((agent) => (
+                          <span
+                            key={agent.id}
+                            className="inline-flex items-center px-2 py-0.5 rounded-md bg-white border border-slate-200 text-slate-800 font-medium text-[10px]"
+                          >
+                            {agent.name}
+                          </span>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="text-[11px] text-amber-700 bg-amber-50/70 p-2.5 rounded-lg flex items-center gap-2 border border-amber-200/60">
+                        <Info className="w-3.5 h-3.5 text-amber-600 flex-shrink-0" />
+                        <span>
+                          No agents currently have the &ldquo;{callbackSettings.callback_team_tag}&rdquo; tag. Assign this tag in the Agent Table to auto-include agents in workload balancing.
+                        </span>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Callback Team Tag */}
+                  <div className="p-5 rounded-xl border border-slate-200 bg-white shadow-xs space-y-3">
+                    <div className="flex items-start justify-between">
+                      <div className="flex items-center gap-2.5">
+                        <div className="p-2 rounded-lg bg-slate-100 text-slate-700">
+                          <ShieldCheck className="w-4 h-4" />
+                        </div>
+                        <div>
+                          <h3 className="text-sm font-bold text-slate-900">Callback Team Agent Tag</h3>
+                          <p className="text-xs text-slate-500">
+                            Tag assigned to agents participating in insurance valuation callbacks.
+                          </p>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <input
+                          id="input-callback-team-tag"
+                          type="text"
+                          value={callbackSettings.callback_team_tag}
+                          onChange={(e) =>
+                            setCallbackSettings({
+                              ...callbackSettings,
+                              callback_team_tag: e.target.value,
+                            })
+                          }
+                          className="w-64 px-3 py-1.5 text-right font-semibold text-slate-900 border border-slate-300 rounded-lg text-xs focus:ring-2 focus:ring-[#ff353e] focus:border-[#ff353e] outline-none"
+                        />
+                      </div>
                     </div>
+                    <div className="text-[11px] text-slate-500 bg-slate-50 p-2.5 rounded-lg flex items-center gap-2">
+                      <Info className="w-3.5 h-3.5 text-slate-400 flex-shrink-0" />
+                      <span>Only agents with this tag are assigned imported callback jobs, and only CALL/SMS events logged by these agents count toward attempt counts.</span>
+                    </div>
+                  </div>
+
+                  {/* Max Attempts Threshold */}
+                  <div className="p-5 rounded-xl border border-slate-200 bg-white shadow-xs space-y-3">
+                    <div className="flex items-start justify-between">
+                      <div className="flex items-center gap-2.5">
+                        <div className="p-2 rounded-lg bg-amber-50 text-amber-600">
+                          <PhoneCall className="w-4 h-4" />
+                        </div>
+                        <div>
+                          <h3 className="text-sm font-bold text-slate-900">Max Call Attempts Threshold</h3>
+                          <p className="text-xs text-slate-500">
+                            Threshold after which a visual prompt flag encourages the agent to close the record.
+                          </p>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <input
+                          id="input-max-attempts"
+                          type="number"
+                          min="1"
+                          max="20"
+                          value={callbackSettings.max_attempts}
+                          onChange={(e) =>
+                            setCallbackSettings({
+                              ...callbackSettings,
+                              max_attempts: Math.max(1, parseInt(e.target.value) || 1),
+                            })
+                          }
+                          className="w-20 px-3 py-1.5 text-right font-mono font-bold text-slate-900 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-amber-500 focus:border-amber-500 outline-none"
+                        />
+                        <span className="text-xs font-semibold text-slate-500">attempts</span>
+                      </div>
+                    </div>
+                    <div className="text-[11px] text-slate-500 bg-slate-50 p-2.5 rounded-lg flex items-center gap-2">
+                      <Info className="w-3.5 h-3.5 text-slate-400 flex-shrink-0" />
+                      <span>Default is 4. When attempt count reaches or exceeds this number, a visual flag prompts the staff member to close the record, but never changes status automatically.</span>
+                    </div>
+                  </div>
+
+                  {/* Channel Partner Allocations */}
+                  <div className="p-5 rounded-xl border border-slate-200 bg-white shadow-xs space-y-3">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2.5">
+                        <div className="p-2 rounded-lg bg-indigo-50 text-indigo-600">
+                          <Building2 className="w-4 h-4" />
+                        </div>
+                        <div>
+                          <h3 className="text-sm font-bold text-slate-900">Channel Partner Agent Allocations</h3>
+                          <p className="text-xs text-slate-500">
+                            Predefined mapping used to auto-assign incoming valuation jobs to designated team members on Excel import.
+                          </p>
+                        </div>
+                      </div>
+                      <span className="text-[11px] font-bold text-slate-600 font-mono bg-slate-100 px-2 py-0.5 rounded-md">
+                        {Array.isArray(partnerAllocations) ? partnerAllocations.length : 0} Partners Configured
+                      </span>
+                    </div>
+
+                    {loadingAllocations ? (
+                      <div className="py-8 text-center text-xs text-slate-400 flex items-center justify-center gap-2">
+                        <RefreshCw className="w-4 h-4 animate-spin text-indigo-600" />
+                        <span>Loading partner allocations...</span>
+                      </div>
+                    ) : (
+                      <div className="max-h-48 overflow-y-auto grid grid-cols-1 sm:grid-cols-2 gap-1.5 pr-1 border border-slate-100 rounded-xl p-2 bg-slate-50/50">
+                        {(Array.isArray(partnerAllocations) ? partnerAllocations : []).map((alloc) => (
+                          <div
+                            key={alloc.channel_partner}
+                            className="flex items-center justify-between gap-2 p-2 bg-white rounded-lg border border-slate-200 text-xs shadow-2xs"
+                          >
+                            <span className="font-bold text-slate-800 truncate" title={alloc.channel_partner}>
+                              {alloc.channel_partner}
+                            </span>
+                            <select
+                              value={alloc.assigned_agent_id ?? ''}
+                              onChange={(e) => {
+                                const val = e.target.value === '' ? null : Number(e.target.value);
+                                handleUpdateAllocation(alloc.channel_partner, val);
+                              }}
+                              className="px-2 py-1 bg-slate-50 border border-slate-200 rounded-lg text-[11px] font-semibold text-slate-800 outline-none cursor-pointer focus:ring-1 focus:ring-indigo-500 shrink-0"
+                            >
+                              <option value="">Unassigned</option>
+                              {callbackSettings.active_agents &&
+                                callbackSettings.active_agents.map((agent) => (
+                                  <option key={agent.id} value={agent.id}>
+                                    {agent.name}
+                                  </option>
+                                ))}
+                            </select>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* TAB 5: DAILY PERFORMANCE SUMMARY EMAIL */}
+
+              {/* TAB 6: TEAM ACCOUNTS (USERS) */}
+              {activeTab === 'users' && (
+                <div className="space-y-6">
+                  {/* Banner */}
+                  <div className="bg-gradient-to-r from-indigo-50 to-blue-50 border border-indigo-200/80 p-4.5 rounded-2xl flex items-start gap-3.5">
+                    <div className="p-2.5 rounded-xl bg-white text-indigo-600 shadow-xs border border-indigo-200/60">
+                      <Users className="w-5 h-5 text-indigo-600" />
+                    </div>
+                    <div>
+                      <h4 className="text-sm font-bold text-slate-900">Dashboard Team Accounts</h4>
+                      <p className="text-xs text-slate-600 mt-1 leading-relaxed">
+                        Manage login credentials for compliance portal team members. Accounts are stored in the database with secure <code>scrypt</code> password hashing. These accounts are separate from telephony agent caller IDs.
+                      </p>
+                    </div>
+                  </div>
+
+                  {/* Feedback alerts */}
+                  {userError && (
+                    <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-700 flex items-start gap-2">
+                      <AlertCircle className="w-4 h-4 text-rose-500 flex-shrink-0 mt-0.5" />
+                      <span>{userError}</span>
+                    </div>
+                  )}
+                  {userSuccess && (
+                    <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-xl text-xs text-emerald-700 flex items-start gap-2">
+                      <CheckCircle2 className="w-4 h-4 text-emerald-500 flex-shrink-0 mt-0.5" />
+                      <span>{userSuccess}</span>
+                    </div>
+                  )}
+
+                  {/* Create User Form */}
+                  <div className="p-5 rounded-xl border border-slate-200 bg-white shadow-xs space-y-4">
+                    <div className="flex items-center gap-2">
+                      <UserPlus className="w-4 h-4 text-indigo-600" />
+                      <h3 className="text-sm font-bold text-slate-900">Add New Team Member Account</h3>
+                    </div>
+
+                    <form onSubmit={handleCreateUser} className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                      <div>
+                        <label className="text-[11px] font-bold text-slate-700 block mb-1">Username / Login ID</label>
+                        <input
+                          type="text"
+                          required
+                          placeholder="e.g. mercy, brian"
+                          value={newUsername}
+                          onChange={(e) => setNewUsername(e.target.value)}
+                          className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none font-medium"
+                        />
+                      </div>
+                      <div>
+                        <label className="text-[11px] font-bold text-slate-700 block mb-1">Display Name</label>
+                        <input
+                          type="text"
+                          required
+                          placeholder="e.g. Mercy W., Brian O."
+                          value={newDisplayName}
+                          onChange={(e) => setNewDisplayName(e.target.value)}
+                          className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none font-medium"
+                        />
+                      </div>
+                      <div>
+                        <label className="text-[11px] font-bold text-slate-700 block mb-1">Temporary Password</label>
+                        <div className="flex gap-2">
+                          <input
+                            type="password"
+                            required
+                            placeholder="Password"
+                            value={newPassword}
+                            onChange={(e) => setNewPassword(e.target.value)}
+                            className="flex-1 px-3 py-2 text-xs border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none font-mono"
+                          />
+                          <button
+                            type="submit"
+                            disabled={isCreatingUser}
+                            className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-xs font-bold shadow-xs transition-colors flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                          >
+                            <Plus className="w-3.5 h-3.5" />
+                            <span>Create</span>
+                          </button>
+                        </div>
+                      </div>
+                    </form>
+                  </div>
+
+                  {/* Users Table */}
+                  <div className="p-5 rounded-xl border border-slate-200 bg-white shadow-xs space-y-3">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <h3 className="text-sm font-bold text-slate-900">Existing Team Accounts</h3>
+                        <p className="text-xs text-slate-500">
+                          Accounts currently authorized to log in to the dashboard.
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={fetchUsers}
+                        className="px-2.5 py-1 text-xs text-slate-600 hover:text-slate-900 bg-slate-100 hover:bg-slate-200 rounded-lg flex items-center gap-1 transition-colors"
+                      >
+                        <RefreshCw className="w-3 h-3" />
+                        <span>Refresh</span>
+                      </button>
+                    </div>
+
+                    {loadingUsers ? (
+                      <div className="py-12 text-center text-xs text-slate-400 flex items-center justify-center gap-2">
+                        <RefreshCw className="w-4 h-4 animate-spin text-indigo-600" />
+                        <span>Loading team accounts...</span>
+                      </div>
+                    ) : users.length === 0 ? (
+                      <p className="text-xs text-slate-400 italic py-6 text-center">No accounts found.</p>
+                    ) : (
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-left border-collapse text-xs">
+                          <thead>
+                            <tr className="border-b border-slate-200 bg-slate-50/70 text-slate-500 font-bold uppercase tracking-wider text-[10px]">
+                              <th className="py-2.5 px-3">User</th>
+                              <th className="py-2.5 px-3">Display Name</th>
+                              <th className="py-2.5 px-3">Status</th>
+                              <th className="py-2.5 px-3">Created</th>
+                              <th className="py-2.5 px-3 text-right">Actions</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-slate-100 font-medium text-slate-700">
+                            {users.map((u) => (
+                              <React.Fragment key={u.id}>
+                                <tr className="hover:bg-slate-50/60 transition-colors">
+                                  <td className="py-2.5 px-3 font-mono font-bold text-slate-900">
+                                    {u.username}
+                                  </td>
+                                  <td className="py-2.5 px-3">
+                                    {editingUserId === u.id ? (
+                                      <div className="flex items-center gap-1">
+                                        <input
+                                          type="text"
+                                          value={editingDisplayName}
+                                          onChange={(e) => setEditingDisplayName(e.target.value)}
+                                          className="px-2 py-1 text-xs border border-indigo-300 rounded font-medium outline-none"
+                                        />
+                                        <button
+                                          type="button"
+                                          onClick={() => handleSaveDisplayName(u.id)}
+                                          className="px-2 py-1 bg-indigo-600 text-white rounded text-[11px] font-bold"
+                                        >
+                                          Save
+                                        </button>
+                                        <button
+                                          type="button"
+                                          onClick={() => setEditingUserId(null)}
+                                          className="px-1.5 py-1 text-slate-400 hover:text-slate-600 text-[11px]"
+                                        >
+                                          Cancel
+                                        </button>
+                                      </div>
+                                    ) : (
+                                      <div className="flex items-center gap-1.5">
+                                        <span>{u.display_name}</span>
+                                        <button
+                                          type="button"
+                                          onClick={() => {
+                                            setEditingUserId(u.id);
+                                            setEditingDisplayName(u.display_name);
+                                          }}
+                                          className="text-slate-400 hover:text-indigo-600 text-[10px] underline"
+                                        >
+                                          Edit
+                                        </button>
+                                      </div>
+                                    )}
+                                  </td>
+                                  <td className="py-2.5 px-3">
+                                    <span
+                                      className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold border ${
+                                        u.active
+                                          ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                                          : 'bg-slate-100 text-slate-600 border-slate-200'
+                                      }`}
+                                    >
+                                      {u.active ? (
+                                        <>
+                                          <UserCheck className="w-2.5 h-2.5" /> Active
+                                        </>
+                                      ) : (
+                                        <>
+                                          <UserX className="w-2.5 h-2.5" /> Disabled
+                                        </>
+                                      )}
+                                    </span>
+                                  </td>
+                                  <td className="py-2.5 px-3 text-slate-400 font-mono text-[11px]">
+                                    {u.created_at ? new Date(u.created_at).toLocaleDateString() : 'N/A'}
+                                  </td>
+                                  <td className="py-2.5 px-3 text-right">
+                                    <div className="flex items-center justify-end gap-1.5">
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          if (resettingUserId === u.id) {
+                                            setResettingUserId(null);
+                                          } else {
+                                            setResettingUserId(u.id);
+                                            setResetNewPassword('');
+                                          }
+                                        }}
+                                        className="px-2 py-1 rounded bg-slate-100 hover:bg-slate-200 text-slate-700 text-[11px] font-semibold flex items-center gap-1 transition-colors"
+                                      >
+                                        <Key className="w-3 h-3 text-amber-600" />
+                                        <span>Reset Password</span>
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => handleToggleUserActive(u)}
+                                        className={`px-2 py-1 rounded text-[11px] font-semibold flex items-center gap-1 transition-colors ${
+                                          u.active
+                                            ? 'bg-rose-50 text-rose-700 hover:bg-rose-100'
+                                            : 'bg-emerald-50 text-emerald-700 hover:bg-emerald-100'
+                                        }`}
+                                      >
+                                        <Power className="w-3 h-3" />
+                                        <span>{u.active ? 'Disable' : 'Enable'}</span>
+                                      </button>
+                                    </div>
+                                  </td>
+                                </tr>
+                                {resettingUserId === u.id && (
+                                  <tr className="bg-amber-50/50">
+                                    <td colSpan={5} className="py-2.5 px-3">
+                                      <div className="flex items-center gap-2 justify-end">
+                                        <span className="text-[11px] text-slate-600 font-semibold">
+                                          New Password for {u.username}:
+                                        </span>
+                                        <input
+                                          type="password"
+                                          placeholder="Enter new password"
+                                          value={resetNewPassword}
+                                          onChange={(e) => setResetNewPassword(e.target.value)}
+                                          className="px-2.5 py-1 text-xs border border-amber-300 rounded-lg outline-none font-mono bg-white"
+                                        />
+                                        <button
+                                          type="button"
+                                          disabled={isResettingPassword}
+                                          onClick={() => handleResetPassword(u.id)}
+                                          className="px-3 py-1 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-xs font-bold transition-colors disabled:opacity-50"
+                                        >
+                                          {isResettingPassword ? 'Updating...' : 'Update Password'}
+                                        </button>
+                                        <button
+                                          type="button"
+                                          onClick={() => setResettingUserId(null)}
+                                          className="px-2 py-1 text-slate-500 hover:text-slate-700 text-xs"
+                                        >
+                                          Cancel
+                                        </button>
+                                      </div>
+                                    </td>
+                                  </tr>
+                                )}
+                              </React.Fragment>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
                   </div>
                 </div>
               )}
