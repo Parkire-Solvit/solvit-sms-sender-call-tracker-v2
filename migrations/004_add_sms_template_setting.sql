@@ -1,2 +1,0 @@
-ALTER TABLE system_settings
-  ADD COLUMN IF NOT EXISTS sms_template TEXT NOT NULL DEFAULT '';

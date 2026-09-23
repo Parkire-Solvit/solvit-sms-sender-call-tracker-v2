@@ -19,6 +19,7 @@ import {
   MessageSquare,
   History,
   ChevronDown,
+  Mail,
 } from 'lucide-react';
 import { CallbackJob, CallbackSettings, CallbackJobLog } from '../types/callbacks';
 
@@ -26,6 +27,7 @@ export interface CallSessionClientGroup {
   client_phone: string;
   client_phone_raw: string;
   client_name: string | null;
+  customer_email?: string | null;
   channel_partners: string[];
   vehicles: CallbackJob[];
   earliestDate: number;
@@ -135,6 +137,8 @@ export interface CallSessionViewProps {
   callbackAgents: { id?: number; name: string }[];
   onClose: () => void;
   onJobUpdated?: (updatedJob: CallbackJob) => void;
+  initialPartner?: string;
+  availablePartners?: string[];
 }
 
 export const CallSessionView: React.FC<CallSessionViewProps> = ({
@@ -143,11 +147,17 @@ export const CallSessionView: React.FC<CallSessionViewProps> = ({
   callbackAgents,
   onClose,
   onJobUpdated,
+  initialPartner = 'ALL',
+  availablePartners = [],
 }) => {
   const [loading, setLoading] = useState<boolean>(true);
   const [refreshing, setRefreshing] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const [copiedPhone, setCopiedPhone] = useState<string | null>(null);
+
+  // Channel partner filter
+  const [selectedPartner, setSelectedPartner] = useState<string>(initialPartner);
+  const [allAmberJobs, setAllAmberJobs] = useState<CallbackJob[]>([]);
 
   // Queue state
   const [queue, setQueue] = useState<CallSessionClientGroup[]>([]);
@@ -204,6 +214,22 @@ export const CallSessionView: React.FC<CallSessionViewProps> = ({
     }
   };
 
+  // Distinct channel partners from availablePartners and loaded jobs
+  const channelPartners = useMemo(() => {
+    const set = new Set<string>();
+    if (availablePartners && availablePartners.length > 0) {
+      availablePartners.forEach((p) => {
+        if (p && p.trim()) set.add(p.trim());
+      });
+    }
+    allAmberJobs.forEach((j) => {
+      if (j.channel_partner && j.channel_partner.trim()) {
+        set.add(j.channel_partner.trim());
+      }
+    });
+    return Array.from(set).sort();
+  }, [availablePartners, allAmberJobs]);
+
   // Helper to build and sort client groups
   const buildClientQueue = (jobs: CallbackJob[]): CallSessionClientGroup[] => {
     const clientMap = new Map<string, CallSessionClientGroup>();
@@ -218,12 +244,16 @@ export const CallSessionView: React.FC<CallSessionViewProps> = ({
           client_phone: job.client_phone,
           client_phone_raw: job.client_phone_raw,
           client_name: job.client_name,
+          customer_email: job.customer_email,
           channel_partners: [],
           vehicles: [],
           earliestDate: Infinity,
         });
       }
       const group = clientMap.get(phoneKey)!;
+      if (!group.customer_email && job.customer_email) {
+        group.customer_email = job.customer_email;
+      }
       if (job.channel_partner && !group.channel_partners.includes(job.channel_partner)) {
         group.channel_partners.push(job.channel_partner);
       }
@@ -295,7 +325,13 @@ export const CallSessionView: React.FC<CallSessionViewProps> = ({
         return matchName || matchId;
       });
 
-      const groups = buildClientQueue(filteredForAgent);
+      setAllAmberJobs(filteredForAgent);
+
+      const filteredByPartner = selectedPartner === 'ALL'
+        ? filteredForAgent
+        : filteredForAgent.filter((j) => j.channel_partner === selectedPartner);
+
+      const groups = buildClientQueue(filteredByPartner);
       setQueue(groups);
 
       if (!isManualRefresh) {
@@ -323,6 +359,25 @@ export const CallSessionView: React.FC<CallSessionViewProps> = ({
     fetchCallingQueue(false);
   }, [selectedAgent]);
 
+  // When partner filter changes, re-filter the amber jobs queue
+  const handlePartnerChange = (newPartner: string) => {
+    setSelectedPartner(newPartner);
+    const filteredByPartner = newPartner === 'ALL'
+      ? allAmberJobs
+      : allAmberJobs.filter((j) => j.channel_partner === newPartner);
+
+    const groups = buildClientQueue(filteredByPartner);
+    setQueue(groups);
+    setInitialTotal(groups.length);
+    setCompletedCount(0);
+
+    if (groups.length > 0) {
+      initializeClientForm(groups[0]);
+    } else {
+      setVehicleForm({});
+    }
+  };
+
   const copyToClipboard = (text: string) => {
     navigator.clipboard.writeText(text);
     setCopiedPhone(text);
@@ -331,15 +386,12 @@ export const CallSessionView: React.FC<CallSessionViewProps> = ({
 
   const currentClient = queue[0];
 
-  // Validate that every vehicle on screen has an outcome selected and non-empty comment
+  // Validate that every vehicle on screen has an outcome selected (comment is now optional)
   const isFormValid = useMemo(() => {
     if (!currentClient || currentClient.vehicles.length === 0) return false;
     return currentClient.vehicles.every((v) => {
       const data = vehicleForm[v.id];
-      return (
-        Boolean(data?.outcome && data.outcome.trim() !== '') &&
-        Boolean(data?.comment && data.comment.trim().length > 0)
-      );
+      return Boolean(data?.outcome && data.outcome.trim() !== '');
     });
   }, [currentClient, vehicleForm]);
 
@@ -377,7 +429,7 @@ export const CallSessionView: React.FC<CallSessionViewProps> = ({
           ? selectedAgent
           : 'Agent';
 
-      // Submit one POST /api/callback-jobs/:id/log per vehicle
+      // Submit one POST /api/callback-jobs/:id/log per vehicle (comment is optional)
       const promises = currentClient.vehicles.map(async (v) => {
         const formData = vehicleForm[v.id];
         const res = await fetch(`/api/callback-jobs/${v.id}/log`, {
@@ -385,7 +437,7 @@ export const CallSessionView: React.FC<CallSessionViewProps> = ({
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             outcome: formData.outcome,
-            comment: formData.comment.trim(),
+            comment: (formData.comment || '').trim(),
             logged_by: loggedBy,
           }),
         });
@@ -412,6 +464,10 @@ export const CallSessionView: React.FC<CallSessionViewProps> = ({
       const nextQueue = queue.slice(1);
       setQueue(nextQueue);
       setCompletedCount((prev) => prev + 1);
+
+      // Keep allAmberJobs updated
+      const completedIds = new Set(currentClient.vehicles.map((v) => v.id));
+      setAllAmberJobs((prev) => prev.filter((j) => !completedIds.has(j.id)));
 
       if (nextQueue.length > 0) {
         initializeClientForm(nextQueue[0]);
@@ -530,7 +586,26 @@ export const CallSessionView: React.FC<CallSessionViewProps> = ({
             </div>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap sm:flex-nowrap">
+            {/* Channel Partner Selector */}
+            <div className="flex items-center gap-1.5 bg-slate-50 px-2.5 py-1.5 border border-slate-200 rounded-xl">
+              <Building2 className="w-3.5 h-3.5 text-slate-400" />
+              <select
+                id="select-session-channel-partner"
+                value={selectedPartner}
+                onChange={(e) => handlePartnerChange(e.target.value)}
+                className="bg-transparent text-xs font-semibold text-slate-700 outline-none cursor-pointer"
+                title="Filter call session by channel partner"
+              >
+                <option value="ALL">All Partners ({channelPartners.length})</option>
+                {channelPartners.map((p) => (
+                  <option key={p} value={p}>
+                    {p}
+                  </option>
+                ))}
+              </select>
+            </div>
+
             <button
               id="btn-refresh-session-queue"
               onClick={() => fetchCallingQueue(true)}
@@ -610,6 +685,14 @@ export const CallSessionView: React.FC<CallSessionViewProps> = ({
                       </span>
                     ))}
                   </div>
+
+                  {/* Customer email display if available */}
+                  {currentClient.customer_email && (
+                    <div className="flex items-center gap-1.5 text-xs text-slate-600 font-medium mt-1">
+                      <Mail className="w-3.5 h-3.5 text-slate-400" />
+                      <span className="font-mono">{currentClient.customer_email}</span>
+                    </div>
+                  )}
 
                   {/* Enlarged Phone Number with tel: link and copy button */}
                   <div className="flex items-center gap-2 mt-2">
@@ -884,24 +967,19 @@ export const CallSessionView: React.FC<CallSessionViewProps> = ({
                       </div>
                     </div>
 
-                    {/* Required Comment Field */}
+                    {/* Optional Comment Field */}
                     <div>
                       <div className="flex items-center justify-between mb-1">
                         <label className="text-[11px] font-bold text-slate-700">
-                          Callback Notes & Summary <span className="text-red-500">*</span>
+                          Callback Notes &amp; Summary <span className="text-slate-400 font-normal">(Optional)</span>
                         </label>
-                        {formData.comment.trim().length === 0 && (
-                          <span className="text-[10px] text-amber-600 font-semibold">
-                            Notes required
-                          </span>
-                        )}
                       </div>
                       <textarea
                         id={`textarea-comment-${vehicle.id}`}
                         rows={2}
                         value={formData.comment}
                         onChange={(e) => handleCommentChange(vehicle.id, e.target.value)}
-                        placeholder={`e.g. Spoke with customer regarding ${vehicle.vehicle_reg_raw}; appointment scheduled / callback requested tomorrow at 10am...`}
+                        placeholder={`e.g. Spoke with customer regarding ${vehicle.vehicle_reg_raw}; appointment scheduled / callback requested... (optional)`}
                         className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-800 font-medium placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-[#ff353e]/20 focus:border-[#ff353e] resize-none"
                       />
                     </div>
@@ -918,15 +996,15 @@ export const CallSessionView: React.FC<CallSessionViewProps> = ({
                 <div className="flex items-center gap-1.5 text-amber-700 font-semibold">
                   <AlertCircle className="w-4 h-4 text-amber-500 flex-shrink-0" />
                   <span>
-                    Log an outcome and notes for all{' '}
+                    Select an outcome for all{' '}
                     <span className="font-bold text-amber-900">{currentClient.vehicles.length}</span>{' '}
-                    vehicle{currentClient.vehicles.length === 1 ? '' : 's'} to enable Save & Next.
+                    vehicle{currentClient.vehicles.length === 1 ? '' : 's'} to enable Save &amp; Next.
                   </span>
                 </div>
               ) : (
                 <div className="flex items-center gap-1.5 text-emerald-700 font-semibold">
                   <CheckCircle2 className="w-4 h-4 text-emerald-600 flex-shrink-0" />
-                  <span>All vehicle outcomes and notes ready to save.</span>
+                  <span>All vehicle outcomes selected and ready to save.</span>
                 </div>
               )}
             </div>

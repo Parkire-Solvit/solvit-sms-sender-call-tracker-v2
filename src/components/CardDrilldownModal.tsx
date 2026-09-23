@@ -204,7 +204,7 @@ export const CardDrilldownModal: React.FC<CardDrilldownModalProps> = ({
           'Returned Within SLA': a.incoming_returned_within_sla_count ?? a.incoming_callback_met,
           'Returned Outside SLA': a.incoming_returned_outside_sla_count ?? 0,
           'Not Returned': a.incoming_not_returned_count ?? (a.carried_over_incoming_count || 0),
-          'Open Obligations': a.open_obligations_count,
+          'Open Obligations': a.open_incoming_count,
           'Avg Callback TAT (min)': agentTat?.overall_callback_turnaround?.mean ?? 'N/A',
           'Median TAT (min)': agentTat?.overall_callback_turnaround?.median ?? 'N/A',
         };
@@ -225,11 +225,11 @@ export const CardDrilldownModal: React.FC<CardDrilldownModalProps> = ({
         'Agent Name': a.agent_name,
         'Department Tag': a.tag,
         'Phone': a.phone_number || '',
-        'Eligible Missed Calls': a.calls_not_picked,
+        'Eligible for SMS': a.sms_followup_total,
         'Total SMS Sent': a.sms_count,
         'Returned within period': a.sms_followup_met,
         'Carried over to next period': a.carried_over_sms_count || 0,
-        'Open Obligations': a.open_obligations_count,
+        'Open Obligations': a.open_sms_count,
         'Avg Time to SMS (min)': agentTat?.failed_outgoing_to_sms?.mean ?? 'N/A',
         'Median TAT (min)': agentTat?.failed_outgoing_to_sms?.median ?? 'N/A',
       };
