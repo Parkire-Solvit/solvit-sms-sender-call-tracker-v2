@@ -59,6 +59,8 @@ export const MasterSettingsModal: React.FC<MasterSettingsModalProps> = ({
     staff_count: 2,
     callback_team_tag: 'Callback Team',
     max_attempts: 4,
+    disappearance_alert_fixed_count: 50,
+    disappearance_alert_percentage: 30,
   });
   const [logs, setLogs] = useState<SettingsChangeLog[]>([]);
   const [loading, setLoading] = useState(false);
@@ -315,6 +317,8 @@ export const MasterSettingsModal: React.FC<MasterSettingsModalProps> = ({
             staff_count: callbackSettings.staff_count,
             callback_team_tag: callbackSettings.callback_team_tag,
             max_attempts: callbackSettings.max_attempts,
+            disappearance_alert_fixed_count: callbackSettings.disappearance_alert_fixed_count,
+            disappearance_alert_percentage: callbackSettings.disappearance_alert_percentage,
           }),
         }),
       ]);
@@ -995,6 +999,71 @@ export const MasterSettingsModal: React.FC<MasterSettingsModalProps> = ({
                     <div className="text-[11px] text-slate-500 bg-slate-50 p-2.5 rounded-lg flex items-center gap-2">
                       <Info className="w-3.5 h-3.5 text-slate-400 flex-shrink-0" />
                       <span>Default is 4. When attempt count reaches or exceeds this number, a visual flag prompts the staff member to close the record, but never changes status automatically.</span>
+                    </div>
+                  </div>
+
+                  {/* Auto-Close Alert Thresholds */}
+                  <div className="p-5 rounded-xl border border-slate-200 bg-white shadow-xs space-y-3">
+                    <div className="flex items-center gap-2.5">
+                      <div className="p-2 rounded-lg bg-rose-50 text-rose-600">
+                        <AlertCircle className="w-4 h-4" />
+                      </div>
+                      <div>
+                        <h3 className="text-sm font-bold text-slate-900">Auto-Close Confirmation Safeguards</h3>
+                        <p className="text-xs text-slate-500">
+                          A daily import that would close more vehicles than either of these limits asks for confirmation before proceeding.
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-2">
+                      <div className="flex items-center justify-between p-3 bg-slate-50/70 border border-slate-200/80 rounded-xl">
+                        <div>
+                          <label className="text-xs font-bold text-slate-800 block">Auto-Close Alert: Fixed Count</label>
+                          <span className="text-[11px] text-slate-500">Vehicles threshold</span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <input
+                            id="input-disappearance-fixed-count"
+                            type="number"
+                            min="1"
+                            max="1000"
+                            value={callbackSettings.disappearance_alert_fixed_count ?? 50}
+                            onChange={(e) =>
+                              setCallbackSettings({
+                                ...callbackSettings,
+                                disappearance_alert_fixed_count: Math.max(1, parseInt(e.target.value) || 1),
+                              })
+                            }
+                            className="w-20 px-3 py-1.5 text-right font-mono font-bold text-slate-900 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-rose-500 focus:border-rose-500 outline-none"
+                          />
+                          <span className="text-xs font-semibold text-slate-500">vehicles</span>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center justify-between p-3 bg-slate-50/70 border border-slate-200/80 rounded-xl">
+                        <div>
+                          <label className="text-xs font-bold text-slate-800 block">Auto-Close Alert: Percentage</label>
+                          <span className="text-[11px] text-slate-500">Of currently open list</span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <input
+                            id="input-disappearance-percentage"
+                            type="number"
+                            min="1"
+                            max="100"
+                            value={callbackSettings.disappearance_alert_percentage ?? 30}
+                            onChange={(e) =>
+                              setCallbackSettings({
+                                ...callbackSettings,
+                                disappearance_alert_percentage: Math.max(1, parseInt(e.target.value) || 1),
+                              })
+                            }
+                            className="w-20 px-3 py-1.5 text-right font-mono font-bold text-slate-900 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-rose-500 focus:border-rose-500 outline-none"
+                          />
+                          <span className="text-xs font-semibold text-slate-500">%</span>
+                        </div>
+                      </div>
                     </div>
                   </div>
 

@@ -23,6 +23,29 @@ const VALID_AGENT_OUTCOMES = new Set<string>([
   "UNREACHABLE",
 ]);
 
+const MONTHS: Record<string, number> = {
+  JANUARY: 0, FEBRUARY: 1, MARCH: 2, APRIL: 3, MAY: 4, JUNE: 5,
+  JULY: 6, AUGUST: 7, SEPTEMBER: 8, OCTOBER: 9, NOVEMBER: 10, DECEMBER: 11,
+};
+
+export function parseFileNameEndDate(fileName: string): Date | null {
+  const cleaned = fileName.toUpperCase();
+  const yearMatch = cleaned.match(/(\d{4})/);
+  if (!yearMatch) return null;
+  const year = Number(yearMatch[1]);
+
+  const dateMatches = [...cleaned.matchAll(/(\d{1,2})(?:ST|ND|RD|TH)_([A-Z]+)/g)];
+  if (dateMatches.length === 0) return null;
+
+  const last = dateMatches[dateMatches.length - 1];
+  const day = Number(last[1]);
+  const month = MONTHS[last[2]];
+  if (month === undefined || !day) return null;
+
+  const date = new Date(Date.UTC(year, month, day));
+  return isNaN(date.getTime()) ? null : date;
+}
+
 /**
  * Normalization Rules:
  * Phone number:
@@ -50,12 +73,14 @@ export function normalizeVehicleReg(raw: string | null | undefined): string {
  * Fetch callback settings or initialize defaults
  */
 export async function getCallbackSettings(db: DbAdapter): Promise<CallbackSettings> {
-  const row = await db.queryOne<CallbackSettings>(
-    `SELECT id, staff_count, callback_team_tag, max_attempts, updated_at FROM callback_settings WHERE id = 1`
+  const row = await db.queryOne<CallbackSettings & { disappearance_alert_fixed_count?: number; disappearance_alert_percentage?: number }>(
+    `SELECT id, staff_count, callback_team_tag, max_attempts, disappearance_alert_fixed_count, disappearance_alert_percentage, updated_at FROM callback_settings WHERE id = 1`
   );
 
   let teamTag = "Callback Team";
   let maxAttempts = 4;
+  let fixedCount = 50;
+  let percentage = 30;
 
   if (row) {
     teamTag = String(row.callback_team_tag || "Callback Team").trim();
@@ -68,10 +93,12 @@ export async function getCallbackSettings(db: DbAdapter): Promise<CallbackSettin
       } catch (_) {}
     }
     maxAttempts = Number(row.max_attempts || 4);
+    fixedCount = row.disappearance_alert_fixed_count !== undefined && row.disappearance_alert_fixed_count !== null ? Number(row.disappearance_alert_fixed_count) : 50;
+    percentage = row.disappearance_alert_percentage !== undefined && row.disappearance_alert_percentage !== null ? Number(row.disappearance_alert_percentage) : 30;
   } else {
     // Insert default if row 1 is missing
     await db.execute(
-      `INSERT INTO callback_settings (id, staff_count, callback_team_tag, max_attempts) VALUES (1, 0, 'Callback Team', 4) ON CONFLICT (id) DO NOTHING`
+      `INSERT INTO callback_settings (id, staff_count, callback_team_tag, max_attempts, disappearance_alert_fixed_count, disappearance_alert_percentage) VALUES (1, 0, 'Callback Team', 4, 50, 30) ON CONFLICT (id) DO NOTHING`
     );
   }
 
@@ -107,6 +134,8 @@ export async function getCallbackSettings(db: DbAdapter): Promise<CallbackSettin
     staff_count: autoStaffCount,
     callback_team_tag: teamTag,
     max_attempts: maxAttempts,
+    disappearance_alert_fixed_count: fixedCount,
+    disappearance_alert_percentage: percentage,
     active_agents: activeAgents,
     updated_at: row?.updated_at,
   };
@@ -117,12 +146,14 @@ export async function getCallbackSettings(db: DbAdapter): Promise<CallbackSettin
  */
 export async function updateCallbackSettings(
   db: DbAdapter,
-  updates: Partial<Pick<CallbackSettings, "staff_count" | "callback_team_tag" | "max_attempts">>
+  updates: Partial<Pick<CallbackSettings, "staff_count" | "callback_team_tag" | "max_attempts" | "disappearance_alert_fixed_count" | "disappearance_alert_percentage">>
 ): Promise<CallbackSettings> {
   const current = await getCallbackSettings(db);
 
   const teamTag = updates.callback_team_tag !== undefined ? String(updates.callback_team_tag).trim() : current.callback_team_tag;
   const maxAttempts = updates.max_attempts !== undefined ? Number(updates.max_attempts) : current.max_attempts;
+  const fixedCount = updates.disappearance_alert_fixed_count !== undefined ? Number(updates.disappearance_alert_fixed_count) : (current.disappearance_alert_fixed_count ?? 50);
+  const percentage = updates.disappearance_alert_percentage !== undefined ? Number(updates.disappearance_alert_percentage) : (current.disappearance_alert_percentage ?? 30);
 
   // Count active agents who have this tag
   const activeAgents = await db.queryAll<{ id: number; name: string }>(
@@ -132,8 +163,8 @@ export async function updateCallbackSettings(
   const autoStaffCount = activeAgents.length;
 
   await db.execute(
-    `UPDATE callback_settings SET staff_count = ?, callback_team_tag = ?, max_attempts = ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1`,
-    [autoStaffCount, teamTag, maxAttempts]
+    `UPDATE callback_settings SET staff_count = ?, callback_team_tag = ?, max_attempts = ?, disappearance_alert_fixed_count = ?, disappearance_alert_percentage = ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1`,
+    [autoStaffCount, teamTag, maxAttempts, fixedCount, percentage]
   );
 
   return {
@@ -141,6 +172,8 @@ export async function updateCallbackSettings(
     staff_count: autoStaffCount,
     callback_team_tag: teamTag,
     max_attempts: maxAttempts,
+    disappearance_alert_fixed_count: fixedCount,
+    disappearance_alert_percentage: percentage,
     active_agents: activeAgents,
   };
 }
@@ -468,46 +501,73 @@ export async function importCallbackJobs(
     }
   }
 
-  // Disappearance check:
-  // 1. Build the set of normalized vehicle_reg values present in this upload's rows
+  // Disappearance check
   const uploadRegs = new Set(
     rows.map((r) => normalizeVehicleReg(r.vehicle_reg)).filter(Boolean)
   );
 
   let autoClosedAbsentCount = 0;
+  let missingJobs: { id: number; vehicle_reg: string }[] = [];
 
-  // 2. Query all currently AMBER callback_jobs rows
   if (uploadRegs.size > 0) {
     const openJobs = await db.queryAll<{ id: number; vehicle_reg: string }>(
       `SELECT id, vehicle_reg FROM callback_jobs WHERE status = 'AMBER'`
     );
+    missingJobs = openJobs.filter((job) => !uploadRegs.has(job.vehicle_reg));
+  }
 
-    // 3. For any whose vehicle_reg is not in that set: set status = 'GREEN', closed_at = now(),
-    // latest_outcome = 'ABSENT_FROM_LATEST_EXPORT', and insert callback_job_logs row
-    for (const job of openJobs) {
-      if (!uploadRegs.has(job.vehicle_reg)) {
-        await db.execute(
-          `UPDATE callback_jobs 
-           SET status = 'GREEN', closed_at = CURRENT_TIMESTAMP, latest_outcome = 'ABSENT_FROM_LATEST_EXPORT', updated_at = CURRENT_TIMESTAMP 
-           WHERE id = ?`,
-          [job.id]
-        );
-        await db.execute(
-          `INSERT INTO callback_job_logs (
-            callback_job_id, outcome, comment, logged_by, resulting_status, created_at
-          ) VALUES (?, 'ABSENT_FROM_LATEST_EXPORT', 'Vehicle no longer present in Brian''s latest export; assumed scheduled.', 'System', 'GREEN', CURRENT_TIMESTAMP)`,
-          [job.id]
-        );
-        autoClosedAbsentCount++;
-      }
+  const settings = await getCallbackSettings(db);
+  const totalOpenRow = await db.queryOne<{ cnt: number }>(
+    `SELECT COUNT(*) as cnt FROM callback_jobs WHERE status = 'AMBER'`
+  );
+  const totalCurrentlyOpen = Number(totalOpenRow?.cnt || 0);
+  const wouldCloseCount = missingJobs.length;
+  const wouldClosePercentage = totalCurrentlyOpen > 0 ? Math.round((wouldCloseCount / totalCurrentlyOpen) * 100) : 0;
+
+  const fixedAlertLimit = settings.disappearance_alert_fixed_count ?? 50;
+  const percentageAlertLimit = settings.disappearance_alert_percentage ?? 30;
+
+  const exceedsCount = wouldCloseCount > fixedAlertLimit;
+  const exceedsPercentage = wouldClosePercentage > percentageAlertLimit;
+
+  const parsedEndDate = parseFileNameEndDate(fileName);
+  let filenameWarning: string | null = null;
+  if (parsedEndDate) {
+    const lastImport = await db.queryOne<{ parsed_end_date: string | null; file_name: string }>(
+      `SELECT parsed_end_date, file_name FROM callback_imports WHERE parsed_end_date IS NOT NULL ORDER BY imported_at DESC LIMIT 1`
+    );
+    if (lastImport?.parsed_end_date && parsedEndDate < new Date(lastImport.parsed_end_date)) {
+      filenameWarning = `This file's date range appears to end before your last upload (${lastImport.file_name}). You may be uploading an older file.`;
     }
   }
+
+  const needsConfirmation = (exceedsCount || exceedsPercentage || !!filenameWarning) && !payload.confirmed;
+
+  if (!needsConfirmation) {
+    for (const job of missingJobs) {
+      await db.execute(
+        `UPDATE callback_jobs
+         SET status = 'GREEN', closed_at = CURRENT_TIMESTAMP, latest_outcome = 'ABSENT_FROM_LATEST_EXPORT', updated_at = CURRENT_TIMESTAMP
+         WHERE id = ?`,
+        [job.id]
+      );
+      await db.execute(
+        `INSERT INTO callback_job_logs (
+          callback_job_id, outcome, comment, logged_by, resulting_status, created_at
+        ) VALUES (?, 'ABSENT_FROM_LATEST_EXPORT', 'Vehicle no longer present in Brian''s latest export; assumed scheduled.', 'System', 'GREEN', CURRENT_TIMESTAMP)`,
+        [job.id]
+      );
+      autoClosedAbsentCount++;
+    }
+  }
+
+  const parsedEndDateStr = parsedEndDate ? parsedEndDate.toISOString().split('T')[0] : null;
 
   // Insert callback_imports record
   await db.execute(
     `INSERT INTO callback_imports (
-      file_name, imported_by, row_count_total, new_records_count, skipped_open_count, skipped_closed_count, auto_closed_absent_count, imported_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
+      file_name, imported_by, row_count_total, new_records_count, skipped_open_count, skipped_closed_count, auto_closed_absent_count, parsed_end_date, imported_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
     [
       fileName,
       importedBy,
@@ -516,11 +576,26 @@ export async function importCallbackJobs(
       skippedOpenCount,
       skippedClosedCount,
       autoClosedAbsentCount,
+      parsedEndDateStr,
     ]
   );
 
   // Full sweep of matured callback jobs
   await closeMaturedCallbackJobs(db);
+
+  if (needsConfirmation) {
+    return {
+      requiresConfirmation: true,
+      wouldCloseCount,
+      wouldClosePercentage,
+      totalCurrentlyOpen,
+      filenameWarning,
+      row_count_total: rows.length,
+      new_records_count: newRecordsCount,
+      skipped_open_count: skippedOpenCount,
+      skipped_closed_count: skippedClosedCount,
+    };
+  }
 
   return {
     row_count_total: rows.length,
