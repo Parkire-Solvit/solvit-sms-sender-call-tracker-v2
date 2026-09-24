@@ -50,6 +50,9 @@ import { OnboardingTour } from './OnboardingTour';
 interface InsuranceCallbackSectionProps {
   onOpenSettings?: () => void;
   allAgents?: { id: number; name: string; tag?: string }[];
+  /** When false (callback_agent role), management controls (upload, settings,
+   * allocation edits) are hidden. Agents can still view jobs and log outcomes. */
+  canManage?: boolean;
 }
 
 interface OutcomeOption {
@@ -132,6 +135,7 @@ function getOutcomeLabel(outcome?: string | null): string {
 export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> = ({
   onOpenSettings,
   allAgents = [],
+  canManage = true,
 }) => {
   // Data state
   const [jobs, setJobs] = useState<CallbackJob[]>([]);
@@ -1454,26 +1458,31 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
               )}
             </button>
 
-            {/* Team Settings Button */}
-            <button
-              id="btn-open-callback-settings"
-              onClick={() => setIsSettingsOpen(true)}
-              className="px-3.5 py-2 rounded-xl text-xs font-bold border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 transition-all flex items-center gap-1.5 shadow-2xs cursor-pointer"
-              title="Configure staff balancing and max attempts"
-            >
-              <SettingsIcon className="w-3.5 h-3.5 text-slate-500" />
-              <span>Team Settings</span>
-            </button>
+            {/* Management controls (admins only) */}
+            {canManage && (
+              <>
+                {/* Team Settings Button */}
+                <button
+                  id="btn-open-callback-settings"
+                  onClick={() => setIsSettingsOpen(true)}
+                  className="px-3.5 py-2 rounded-xl text-xs font-bold border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 transition-all flex items-center gap-1.5 shadow-2xs cursor-pointer"
+                  title="Configure staff balancing and max attempts"
+                >
+                  <SettingsIcon className="w-3.5 h-3.5 text-slate-500" />
+                  <span>Team Settings</span>
+                </button>
 
-            {/* Upload latest pending scheduling list Button */}
-            <button
-              id="btn-open-import-modal"
-              onClick={openUploadModal}
-              className="px-4 py-2 rounded-xl text-xs font-bold bg-[#ff353e] hover:bg-[#e0262f] text-white shadow-sm hover:shadow transition-all flex items-center gap-2 cursor-pointer"
-            >
-              <Upload className="w-3.5 h-3.5" />
-              <span>Upload latest pending scheduling list</span>
-            </button>
+                {/* Upload latest pending scheduling list Button */}
+                <button
+                  id="btn-open-import-modal"
+                  onClick={openUploadModal}
+                  className="px-4 py-2 rounded-xl text-xs font-bold bg-[#ff353e] hover:bg-[#e0262f] text-white shadow-sm hover:shadow transition-all flex items-center gap-2 cursor-pointer"
+                >
+                  <Upload className="w-3.5 h-3.5" />
+                  <span>Upload latest pending scheduling list</span>
+                </button>
+              </>
+            )}
 
             {/* Refresh Button */}
             <button
@@ -1840,13 +1849,15 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
               Upload Brian&rsquo;s daily valuation Excel export (.xlsx) to queue pending callbacks and auto-balance records across your callback team.
             </p>
           </div>
-          <button
-            onClick={openUploadModal}
-            className="px-5 py-2.5 rounded-xl text-xs font-bold bg-[#ff353e] hover:bg-[#e0262f] text-white shadow-sm transition-all inline-flex items-center gap-2 cursor-pointer"
-          >
-            <Upload className="w-4 h-4" />
-            <span>Upload latest pending scheduling list</span>
-          </button>
+          {canManage && (
+            <button
+              onClick={openUploadModal}
+              className="px-5 py-2.5 rounded-xl text-xs font-bold bg-[#ff353e] hover:bg-[#e0262f] text-white shadow-sm transition-all inline-flex items-center gap-2 cursor-pointer"
+            >
+              <Upload className="w-4 h-4" />
+              <span>Upload latest pending scheduling list</span>
+            </button>
+          )}
         </div>
       ) : groupedData.size === 0 ? (
         <div className="bg-white rounded-3xl p-12 border border-slate-200 text-center space-y-2">
