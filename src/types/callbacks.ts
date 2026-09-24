@@ -115,6 +115,7 @@ export interface UserAccount {
   username: string;
   display_name: string;
   active: boolean;
+  role: 'admin' | 'callback_agent';
   created_at: string;
 }
 
