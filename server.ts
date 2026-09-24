@@ -471,6 +471,22 @@ async function startServer() {
     }
   });
 
+  app.delete("/api/agents/:id", requireAdmin, async (req, res) => {
+    try {
+      // FKs on events / callback_jobs / channel_partner_allocations are ON DELETE SET NULL,
+      // so removing the agent detaches history rather than cascading deletes.
+      const result = await db.execute(
+        "DELETE FROM agents WHERE id = ? AND name != 'Unknown Agent'",
+        [req.params.id]
+      );
+      if (!result.affectedRows) return res.status(404).json({ error: "Agent not found" });
+      res.json({ success: true });
+    } catch (err) {
+      console.error("[API] Unable to delete agent:", err);
+      res.status(500).json({ error: "Database error" });
+    }
+  });
+
   app.get("/api/archived-agents", requireAdmin, async (_req, res) => {
     try {
       const agents = await db.queryAll(
