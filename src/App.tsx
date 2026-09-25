@@ -113,6 +113,7 @@ export default function App() {
   const [selectedAgentId, setSelectedAgentId] = useState<string>('');
   const [selectedTag, setSelectedTag] = useState<string>('');
   const [isAdminAuthenticated, setIsAdminAuthenticated] = useState(false);
+  const [isCallbackAgent, setIsCallbackAgent] = useState(false);
   const [memberEmail, setMemberEmail] = useState<string | null>(null);
   const [emailLoginAvailable, setEmailLoginAvailable] = useState(false);
   const [loginForm, setLoginForm] = useState({ username: '', password: '' });
@@ -164,9 +165,11 @@ export default function App() {
   useEffect(() => {
     fetch('/api/session').then((res) => res.json()).then((session) => {
       setIsAdminAuthenticated(session.role === 'admin');
+      setIsCallbackAgent(session.role === 'callback_agent');
       setMemberEmail(session.role === 'cs_member' ? session.email : null);
       setEmailLoginAvailable(Boolean(session.emailLoginAvailable));
       if (session.role === 'cs_member') setView('email');
+      if (session.role === 'callback_agent') setView('insurance-callbacks');
       if (new URLSearchParams(window.location.search).has('emailAuthError')) {
         setLoginError('Microsoft sign-in failed or this account is not approved for the CS pilot.');
         window.history.replaceState({}, '', window.location.pathname);
@@ -202,8 +205,14 @@ export default function App() {
         body: JSON.stringify(loginForm)
       });
       if (res.ok) {
-        setIsAdminAuthenticated(true);
+        const data = await res.json().catch(() => ({} as any));
         setLoginForm({ username: '', password: '' });
+        if (data.role === 'callback_agent') {
+          setIsCallbackAgent(true);
+          setView('insurance-callbacks');
+        } else {
+          setIsAdminAuthenticated(true);
+        }
       } else {
         setLoginError('Invalid username or password');
       }
@@ -215,6 +224,7 @@ export default function App() {
   const handleLogout = () => {
     void fetch('/api/logout', { method: 'POST' });
     setIsAdminAuthenticated(false);
+    setIsCallbackAgent(false);
     setMemberEmail(null);
     setView('admin');
     localStorage.removeItem('solvit_admin_token');
@@ -368,7 +378,7 @@ export default function App() {
             </div>
             )}
 
-            {(isAdminAuthenticated || memberEmail) && (
+            {(isAdminAuthenticated || memberEmail || isCallbackAgent) && (
               <button
                 id="btn-admin-logout"
                 onClick={handleLogout}
@@ -384,7 +394,7 @@ export default function App() {
       </nav>
 
       {/* Main View Area */}
-      {!isAdminAuthenticated && !memberEmail ? (
+      {!isAdminAuthenticated && !memberEmail && !isCallbackAgent ? (
         <div className="max-w-md mx-auto mt-20 px-6">
           <motion.div 
             initial={{ opacity: 0, y: 20 }}
@@ -456,11 +466,12 @@ export default function App() {
         <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-6">
           <EmailSlaSection employeeEmail={memberEmail || undefined} />
         </main>
-      ) : view === 'insurance-callbacks' ? (
+      ) : (view === 'insurance-callbacks' || isCallbackAgent) ? (
         <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-6">
-          <InsuranceCallbackSection 
-            onOpenSettings={() => setShowMasterSettings(true)} 
+          <InsuranceCallbackSection
+            onOpenSettings={isAdminAuthenticated ? () => setShowMasterSettings(true) : undefined}
             allAgents={stats?.allAgents || []}
+            canManage={isAdminAuthenticated}
           />
         </main>
       ) : (
