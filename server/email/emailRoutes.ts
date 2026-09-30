@@ -41,6 +41,7 @@ export function createEmailRouter(config: EmailRuntimeConfig | null): Router {
     next();
   }));
   router.get('/status', safe(async (_request, response) => {
+    response.setHeader('Cache-Control','no-store');
     response.json({ enabled: Boolean(config), sync: config && !response.locals.emailOwner ? await getEmailSyncHealth() : [] });
   }));
   router.use((_, response, next) => {

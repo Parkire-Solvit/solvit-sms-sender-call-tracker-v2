@@ -21,6 +21,10 @@ type TeamMember = {
 };
 type Alert = { id: number; email_thread_id: number; alert_type: string; emitted_at: string; subject: string; owner_name: string | null };
 type AssignmentNotice = { id: number; email_thread_id: number; created_at: string; subject: string; customer_email: string; method: string };
+type SyncHealth = {
+  mailbox: string; folder: string; last_successful_sync_at: string | null;
+  last_error_at: string | null; last_error_code: string | null;
+};
 type Summary = {
   total_received: number; unassigned: number; awaiting_response: number; in_progress: number;
   resolved_today: number; near_sla: number; breached: number;
@@ -97,6 +101,7 @@ export function EmailSlaSection({ employeeEmail }: { employeeEmail?: string }) {
   const [view, setView] = useState<'queue' | 'reports'>('queue');
   const [reportRefreshToken, setReportRefreshToken] = useState(0);
   const [enabled, setEnabled] = useState<boolean | null>(null);
+  const [syncHealth, setSyncHealth] = useState<SyncHealth[]>([]);
   const [threads, setThreads] = useState<Thread[]>([]);
   const [members, setMembers] = useState<TeamMember[]>([]);
   const [alerts, setAlerts] = useState<Alert[]>([]);
@@ -108,6 +113,7 @@ export function EmailSlaSection({ employeeEmail }: { employeeEmail?: string }) {
   const [receivedFrom, setReceivedFrom] = useState('');
   const [receivedTo, setReceivedTo] = useState('');
   const [error, setError] = useState('');
+  const [outlookNotice, setOutlookNotice] = useState('');
   const [busy, setBusy] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [showAlerts, setShowAlerts] = useState(false);
@@ -118,8 +124,9 @@ export function EmailSlaSection({ employeeEmail }: { employeeEmail?: string }) {
   const refresh = useCallback(async () => {
     const sequence = ++refreshSequence.current;
     try {
-      const status = await api<{ enabled: boolean }>('/api/email/status');
+      const status = await api<{ enabled: boolean; sync: SyncHealth[] }>('/api/email/status');
       setEnabled(status.enabled);
+      setSyncHealth(status.sync || []);
       if (!status.enabled) return;
       const query = new URLSearchParams({
         filter,
@@ -180,8 +187,11 @@ export function EmailSlaSection({ employeeEmail }: { employeeEmail?: string }) {
     if (!popup) { setError('Allow popups to open Outlook, or open Outlook directly and search the email subject.'); return; }
     popup.opener=null;
     try {
-      const data=await api<{url:string;mailbox:string}>(`/api/email/threads/${thread.id}/outlook`);
+      const data=await api<{url:string;mailbox:string;exact:boolean}>(`/api/email/threads/${thread.id}/outlook`);
       popup.location.href=data.url;
+      setOutlookNotice(data.exact
+        ? `Opening the exact email in ${data.mailbox}. Outlook must be signed in with that Account Manager's account.`
+        : `An exact mailbox copy was unavailable. Outlook is searching for “${thread.subject}” in ${data.mailbox}.`);
     } catch(cause) { popup.close(); setError((cause as Error).message); }
   }
 
@@ -203,6 +213,12 @@ export function EmailSlaSection({ employeeEmail }: { employeeEmail?: string }) {
   const breachAlerts = displayedAlerts.filter((alert) => alert.alert_type.endsWith('_BREACH')).length;
   const urgentAlerts = displayedAlerts.filter((alert) => alert.alert_type.endsWith('_URGENT')).length;
   const warningAlerts = displayedAlerts.filter((alert) => alert.alert_type.endsWith('_WARNING')).length;
+  const requiredSync = syncHealth.filter((row) => row.folder === 'inbox' || row.folder === 'sentitems');
+  const unhealthySync = requiredSync.filter((row) => {
+    const successfulAt = row.last_successful_sync_at ? Date.parse(row.last_successful_sync_at) : 0;
+    const errorAt = row.last_error_at ? Date.parse(row.last_error_at) : 0;
+    return !successfulAt || now - successfulAt > 5 * 60_000 || errorAt > successfulAt;
+  });
 
   return <main className="max-w-7xl mx-auto px-3 sm:px-6 py-7 space-y-6">
     <div className="flex flex-wrap items-center justify-between gap-3">
@@ -213,6 +229,18 @@ export function EmailSlaSection({ employeeEmail }: { employeeEmail?: string }) {
         <button onClick={() => { void refresh(); setReportRefreshToken(value => value + 1); }} className="px-3 py-2 rounded-lg border text-sm flex items-center gap-2"><RefreshCw className="w-4 h-4" /> Refresh</button>
       </div>
     </div>
+    {!isEmployee && requiredSync.length > 0 && <section className={`rounded-xl border px-4 py-3 text-sm ${unhealthySync.length ? 'border-red-200 bg-red-50 text-red-800' : 'border-emerald-200 bg-emerald-50 text-emerald-800'}`}>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="font-semibold">{unhealthySync.length ? `Mailbox sync needs attention (${unhealthySync.length})` : `Mailbox sync healthy (${requiredSync.length} folders)`}</p>
+        <p className="text-xs">Inbox and Sent Items must sync within 5 minutes.</p>
+      </div>
+      {unhealthySync.length > 0 && <ul className="mt-2 space-y-1 text-xs">
+        {unhealthySync.map((row) => <li key={`${row.mailbox}:${row.folder}`}>
+          {row.mailbox} · {row.folder} · {row.last_error_code || (row.last_successful_sync_at ? 'sync is stale' : 'never synced')}
+        </li>)}
+      </ul>}
+    </section>}
+    {outlookNotice && <p role="status" className="p-3 rounded-lg border border-blue-200 bg-blue-50 text-blue-800 text-sm">{outlookNotice}</p>}
     {error && <p role="alert" className="p-3 rounded-lg bg-red-50 text-red-700 text-sm">{error}</p>}
     {enabled === false && <div className="p-5 rounded-xl border bg-amber-50 text-amber-900 text-sm">Email SLA is not enabled on this service yet. Existing call and SMS reporting is unaffected.</div>}
     {enabled && <nav aria-label="Email SLA views" className="flex gap-2 border-b border-slate-200 pb-3">{(['queue','reports'] as const).map(tab => <button key={tab} onClick={() => setView(tab)} aria-pressed={view === tab} className={`rounded-lg px-4 py-2 text-sm font-medium ${view === tab ? 'bg-blue-50 text-blue-700' : 'text-slate-500 hover:bg-slate-100'}`}>{tab === 'queue' ? 'Email queue' : 'Reports'}</button>)}</nav>}
