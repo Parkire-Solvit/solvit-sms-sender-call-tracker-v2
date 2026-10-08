@@ -76,6 +76,7 @@ export const MasterSettingsModal: React.FC<MasterSettingsModalProps> = ({
   const [newUsername, setNewUsername] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [newDisplayName, setNewDisplayName] = useState('');
+  const [newRole, setNewRole] = useState<'admin' | 'callback_agent'>('callback_agent');
   const [isCreatingUser, setIsCreatingUser] = useState(false);
   const [editingUserId, setEditingUserId] = useState<number | null>(null);
   const [editingDisplayName, setEditingDisplayName] = useState('');
@@ -134,12 +135,14 @@ export const MasterSettingsModal: React.FC<MasterSettingsModalProps> = ({
           username: newUsername.trim(),
           password: newPassword.trim(),
           display_name: newDisplayName.trim(),
+          role: newRole,
         }),
       });
       if (res.ok) {
         setNewUsername('');
         setNewPassword('');
         setNewDisplayName('');
+        setNewRole('callback_agent');
         setUserSuccess('Team user account created successfully.');
         fetchUsers();
       } else {
@@ -171,6 +174,30 @@ export const MasterSettingsModal: React.FC<MasterSettingsModalProps> = ({
       }
     } catch (err) {
       setUserError('Network error updating user status');
+    }
+  };
+
+  const handleChangeRole = async (u: UserAccount) => {
+    const nextRole = u.role === 'admin' ? 'callback_agent' : 'admin';
+    setUserError(null);
+    setUserSuccess(null);
+    try {
+      const res = await fetch(`/api/users/${u.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ role: nextRole }),
+      });
+      if (res.ok) {
+        setUserSuccess(
+          `Account "${u.username}" access level set to ${nextRole === 'admin' ? 'Administrator' : 'Callback Agent'}.`
+        );
+        fetchUsers();
+      } else {
+        const data = await res.json().catch(() => ({}));
+        setUserError(data.error || 'Failed to update access level');
+      }
+    } catch (err) {
+      setUserError('Network error updating access level');
     }
   };
 
@@ -1164,7 +1191,7 @@ export const MasterSettingsModal: React.FC<MasterSettingsModalProps> = ({
                       <h3 className="text-sm font-bold text-slate-900">Add New Team Member Account</h3>
                     </div>
 
-                    <form onSubmit={handleCreateUser} className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                    <form onSubmit={handleCreateUser} className="grid grid-cols-1 sm:grid-cols-4 gap-3">
                       <div>
                         <label className="text-[11px] font-bold text-slate-700 block mb-1">Username / Login ID</label>
                         <input
@@ -1186,6 +1213,17 @@ export const MasterSettingsModal: React.FC<MasterSettingsModalProps> = ({
                           onChange={(e) => setNewDisplayName(e.target.value)}
                           className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none font-medium"
                         />
+                      </div>
+                      <div>
+                        <label className="text-[11px] font-bold text-slate-700 block mb-1">Access Level</label>
+                        <select
+                          value={newRole}
+                          onChange={(e) => setNewRole(e.target.value as 'admin' | 'callback_agent')}
+                          className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none font-medium bg-white"
+                        >
+                          <option value="callback_agent">Callback Agent (callbacks only)</option>
+                          <option value="admin">Administrator (full access)</option>
+                        </select>
                       </div>
                       <div>
                         <label className="text-[11px] font-bold text-slate-700 block mb-1">Temporary Password</label>
@@ -1244,6 +1282,7 @@ export const MasterSettingsModal: React.FC<MasterSettingsModalProps> = ({
                             <tr className="border-b border-slate-200 bg-slate-50/70 text-slate-500 font-bold uppercase tracking-wider text-[10px]">
                               <th className="py-2.5 px-3">User</th>
                               <th className="py-2.5 px-3">Display Name</th>
+                              <th className="py-2.5 px-3">Access Level</th>
                               <th className="py-2.5 px-3">Status</th>
                               <th className="py-2.5 px-3">Created</th>
                               <th className="py-2.5 px-3 text-right">Actions</th>
@@ -1295,6 +1334,31 @@ export const MasterSettingsModal: React.FC<MasterSettingsModalProps> = ({
                                         </button>
                                       </div>
                                     )}
+                                  </td>
+                                  <td className="py-2.5 px-3">
+                                    <div className="flex items-center gap-1.5">
+                                      <span
+                                        className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold border ${
+                                          u.role === 'admin'
+                                            ? 'bg-indigo-50 text-indigo-700 border-indigo-200'
+                                            : 'bg-sky-50 text-sky-700 border-sky-200'
+                                        }`}
+                                      >
+                                        {u.role === 'admin' ? 'Administrator' : 'Callback Agent'}
+                                      </span>
+                                      <button
+                                        type="button"
+                                        onClick={() => handleChangeRole(u)}
+                                        className="text-slate-400 hover:text-indigo-600 text-[10px] underline"
+                                        title={
+                                          u.role === 'admin'
+                                            ? 'Restrict to callbacks only'
+                                            : 'Grant full admin access'
+                                        }
+                                      >
+                                        {u.role === 'admin' ? 'Make Agent' : 'Make Admin'}
+                                      </button>
+                                    </div>
                                   </td>
                                   <td className="py-2.5 px-3">
                                     <span
@@ -1352,7 +1416,7 @@ export const MasterSettingsModal: React.FC<MasterSettingsModalProps> = ({
                                 </tr>
                                 {resettingUserId === u.id && (
                                   <tr className="bg-amber-50/50">
-                                    <td colSpan={5} className="py-2.5 px-3">
+                                    <td colSpan={6} className="py-2.5 px-3">
                                       <div className="flex items-center gap-2 justify-end">
                                         <span className="text-[11px] text-slate-600 font-semibold">
                                           New Password for {u.username}:

@@ -4,7 +4,7 @@ import path from "path";
 import { initDatabase, getDb, getPostgresPool } from "./db";
 import { getSystemSettings, updateSystemSettings, getSettingsChangeLogs } from "./settingsManager";
 import { evaluateCompliance, RawEvent, RawAgent } from "./complianceEngine";
-import { clearAdminSession, credentialsMatch, isAdminRequest, requireAdmin, setAdminSession } from './server/auth/adminSession';
+import { clearAdminSession, requireAdmin, requireAuth, sessionRole, setUserSession } from './server/auth/adminSession';
 import { clearEmailMemberSession, emailMember } from './server/auth/emailMemberSession';
 import { beginMicrosoftEmailLogin, completeMicrosoftEmailLogin, microsoftEmailLoginAvailable } from './server/auth/microsoftEmailLogin';
 import { createEmailRouter } from './server/email/emailRoutes';
@@ -111,8 +111,8 @@ async function startServer() {
         return res.status(400).json({ error: "Username and password are required" });
       }
 
-      const user = await db.queryOne<{ id: number; username: string; password_hash: string; display_name: string; active: any }>(
-        `SELECT id, username, password_hash, display_name, active FROM users WHERE LOWER(username) = LOWER(?)`,
+      const user = await db.queryOne<{ id: number; username: string; password_hash: string; display_name: string; active: any; role: string }>(
+        `SELECT id, username, password_hash, display_name, active, role FROM users WHERE LOWER(username) = LOWER(?)`,
         [submittedUser]
       );
       const isActive = user && (user.active === true || user.active === 1);
@@ -124,9 +124,10 @@ async function startServer() {
         return res.status(401).json({ error: "Invalid credentials or inactive account" });
       }
 
+      const role = user!.role === 'callback_agent' ? 'callback_agent' : 'admin';
       loginAttempts.delete(key);
-      setAdminSession(req, res);
-      res.json({ success: true, role: 'admin', display_name: user!.display_name });
+      setUserSession(req, res, role);
+      res.json({ success: true, role, display_name: user!.display_name });
     } catch (err) {
       console.error("[AUTH] Login error:", err);
       res.status(500).json({ error: "Authentication failed" });
@@ -134,8 +135,8 @@ async function startServer() {
   });
 
   app.get('/api/session', async (req, res) => {
-    const admin = isAdminRequest(req);
-    if (admin) return res.json({ authenticated: true, role: 'admin', emailLoginAvailable: Boolean(emailRuntime) && microsoftEmailLoginAvailable() });
+    const role = sessionRole(req);
+    if (role) return res.json({ authenticated: true, role, emailLoginAvailable: Boolean(emailRuntime) && microsoftEmailLoginAvailable() });
     const email = emailMember(req);
     if (emailRuntime && email && emailRuntime.mailboxes.includes(email)) {
       try {
@@ -153,14 +154,15 @@ async function startServer() {
   // GET /api/users - returns all accounts omitting password_hash
   app.get("/api/users", requireAdmin, async (req, res) => {
     try {
-      const users = await db.queryAll<{ id: number; username: string; display_name: string; active: any; created_at: string }>(
-        `SELECT id, username, display_name, active, created_at FROM users ORDER BY id ASC`
+      const users = await db.queryAll<{ id: number; username: string; display_name: string; active: any; role: string; created_at: string }>(
+        `SELECT id, username, display_name, active, role, created_at FROM users ORDER BY id ASC`
       );
       const normalized = users.map((u) => ({
         id: u.id,
         username: u.username,
         display_name: u.display_name,
         active: Boolean(u.active),
+        role: u.role === 'callback_agent' ? 'callback_agent' : 'admin',
         created_at: u.created_at,
       }));
       res.json(normalized);
@@ -173,10 +175,12 @@ async function startServer() {
   // POST /api/users - creates an account
   app.post("/api/users", requireAdmin, async (req, res) => {
     try {
-      const { username, display_name, password } = req.body || {};
+      const { username, display_name, password, role } = req.body || {};
       const cleanUser = (username || "").trim();
       const cleanName = (display_name || "").trim() || cleanUser;
       const cleanPass = (password || "").trim();
+      // New accounts default to the restricted callback_agent role.
+      const cleanRole = role === 'admin' ? 'admin' : 'callback_agent';
 
       if (!cleanUser || !cleanPass) {
         return res.status(400).json({ error: "Username and password are required" });
@@ -192,9 +196,9 @@ async function startServer() {
 
       const passwordHash = await hashPassword(cleanPass);
       const result = await db.execute(
-        `INSERT INTO users (username, password_hash, display_name, active, created_at, updated_at)
-         VALUES (?, ?, ?, TRUE, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
-        [cleanUser, passwordHash, cleanName]
+        `INSERT INTO users (username, password_hash, display_name, active, role, created_at, updated_at)
+         VALUES (?, ?, ?, TRUE, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+        [cleanUser, passwordHash, cleanName, cleanRole]
       );
 
       res.status(201).json({
@@ -202,6 +206,7 @@ async function startServer() {
         username: cleanUser,
         display_name: cleanName,
         active: true,
+        role: cleanRole,
       });
     } catch (err) {
       console.error("[API] Error creating user:", err);
@@ -213,7 +218,7 @@ async function startServer() {
   app.patch("/api/users/:id", requireAdmin, async (req, res) => {
     try {
       const id = parseInt(req.params.id, 10);
-      const { display_name, active } = req.body || {};
+      const { display_name, active, role } = req.body || {};
 
       const user = await db.queryOne<{ id: number }>(`SELECT id FROM users WHERE id = ?`, [id]);
       if (!user) return res.status(404).json({ error: "User not found" });
@@ -229,6 +234,10 @@ async function startServer() {
         updates.push("active = ?");
         params.push(active ? true : false);
       }
+      if (role !== undefined) {
+        updates.push("role = ?");
+        params.push(role === 'admin' ? 'admin' : 'callback_agent');
+      }
 
       if (updates.length > 0) {
         updates.push("updated_at = CURRENT_TIMESTAMP");
@@ -236,13 +245,14 @@ async function startServer() {
         await db.execute(`UPDATE users SET ${updates.join(", ")} WHERE id = ?`, params);
       }
 
-      const updated = await db.queryOne<{ id: number; username: string; display_name: string; active: any; created_at: string }>(
-        `SELECT id, username, display_name, active, created_at FROM users WHERE id = ?`,
+      const updated = await db.queryOne<{ id: number; username: string; display_name: string; active: any; role: string; created_at: string }>(
+        `SELECT id, username, display_name, active, role, created_at FROM users WHERE id = ?`,
         [id]
       );
       res.json({
         ...updated,
         active: Boolean(updated?.active),
+        role: updated?.role === 'callback_agent' ? 'callback_agent' : 'admin',
       });
     } catch (err) {
       console.error("[API] Error updating user:", err);
@@ -1098,7 +1108,7 @@ function computeActivitySummary(events: any[], totalAgents: number = 0) {
   // ==========================================
 
   // GET /api/channel-partner-allocations
-  app.get("/api/channel-partner-allocations", async (req, res) => {
+  app.get("/api/channel-partner-allocations", requireAuth, async (req, res) => {
     try {
       const data = await getChannelPartnerAllocations(db);
       const unallocatedList = (data.unallocated_partners || []).map((p) => ({
@@ -1118,7 +1128,7 @@ function computeActivitySummary(events: any[], totalAgents: number = 0) {
   });
 
   // POST /api/channel-partner-allocations
-  app.post("/api/channel-partner-allocations", async (req, res) => {
+  app.post("/api/channel-partner-allocations", requireAdmin, async (req, res) => {
     try {
       const { channel_partner, assigned_agent_id } = req.body || {};
       if (!channel_partner || !String(channel_partner).trim()) {
@@ -1136,7 +1146,7 @@ function computeActivitySummary(events: any[], totalAgents: number = 0) {
   });
 
   // GET /api/callback-settings
-  app.get("/api/callback-settings", requireAdmin, async (req, res) => {
+  app.get("/api/callback-settings", requireAuth, async (req, res) => {
     try {
       const settings = await getCallbackSettings(db);
       res.json(settings);
@@ -1175,7 +1185,7 @@ function computeActivitySummary(events: any[], totalAgents: number = 0) {
   });
 
   // GET /api/callback-jobs
-  app.get("/api/callback-jobs", requireAdmin, async (req, res) => {
+  app.get("/api/callback-jobs", requireAuth, async (req, res) => {
     try {
       const { status, channel_partner, assigned_agent_id, search } = req.query;
       const jobs = await getCallbackJobs(db, {
@@ -1235,11 +1245,11 @@ function computeActivitySummary(events: any[], totalAgents: number = 0) {
     }
   };
 
-  app.post("/api/callback-jobs/:id/outcome", requireAdmin, handleCallbackOutcomeLog);
-  app.post("/api/callback-jobs/:id/log", requireAdmin, handleCallbackOutcomeLog);
+  app.post("/api/callback-jobs/:id/outcome", requireAuth, handleCallbackOutcomeLog);
+  app.post("/api/callback-jobs/:id/log", requireAuth, handleCallbackOutcomeLog);
 
   // GET /api/callback-jobs/:id/logs
-  app.get("/api/callback-jobs/:id/logs", requireAdmin, async (req, res) => {
+  app.get("/api/callback-jobs/:id/logs", requireAuth, async (req, res) => {
     try {
       const id = Number(req.params.id);
       const logs = await getCallbackJobLogs(db, id);

@@ -1,6 +1,8 @@
 import crypto from 'node:crypto';
 import type { Request, Response, NextFunction } from 'express';
 
+export type UserRole = 'admin' | 'callback_agent';
+
 const cookieName = 'solvit_admin_session';
 const ttlMs = 8 * 60 * 60 * 1000;
 const sessionSecret = process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex');
@@ -15,15 +17,38 @@ function cookieValue(request: Request): string | undefined {
     ?.slice(cookieName.length + 1);
 }
 
-export function isAdminRequest(request: Request): boolean {
+function normalizeRole(value: string | undefined): UserRole {
+  return value === 'callback_agent' ? 'callback_agent' : 'admin';
+}
+
+/**
+ * Read and verify the signed session cookie. Cookie value is
+ * `<expiryMs>.<role>.<hmac(expiryMs.role)>`. Returns null if missing, tampered,
+ * malformed, or expired. (Old expiry-only cookies fail this check and simply
+ * require a fresh login.)
+ */
+export function readSession(request: Request): { role: UserRole } | null {
   const value = cookieValue(request);
-  if (!value) return false;
-  const [payload, signature] = value.split('.');
-  if (!payload || !signature || !/^\d+$/.test(payload)) return false;
+  if (!value) return null;
+  const parts = value.split('.');
+  if (parts.length !== 3) return null;
+  const [expiryPart, rolePart, signature] = parts;
+  if (!/^\d+$/.test(expiryPart)) return null;
+  const payload = `${expiryPart}.${rolePart}`;
   const expected = Buffer.from(mac(payload));
   const actual = Buffer.from(signature);
-  return expected.length === actual.length && crypto.timingSafeEqual(expected, actual) &&
-    Number(payload) > Date.now() && Number(payload) <= Date.now() + ttlMs;
+  if (expected.length !== actual.length || !crypto.timingSafeEqual(expected, actual)) return null;
+  const expiry = Number(expiryPart);
+  if (!(expiry > Date.now() && expiry <= Date.now() + ttlMs)) return null;
+  return { role: normalizeRole(rolePart) };
+}
+
+export function sessionRole(request: Request): UserRole | null {
+  return readSession(request)?.role ?? null;
+}
+
+export function isAdminRequest(request: Request): boolean {
+  return readSession(request)?.role === 'admin';
 }
 
 function cookieFlags(request: Request): string {
@@ -31,18 +56,33 @@ function cookieFlags(request: Request): string {
   return `Path=/; HttpOnly; SameSite=Strict${secure ? '; Secure' : ''}`;
 }
 
+export function setUserSession(request: Request, response: Response, role: UserRole = 'admin'): void {
+  const payload = `${Date.now() + ttlMs}.${normalizeRole(role)}`;
+  response.setHeader('Set-Cookie', `${cookieName}=${payload}.${mac(payload)}; Max-Age=${ttlMs / 1000}; ${cookieFlags(request)}`);
+}
+
+// Backwards-compatible alias (grants an admin session).
 export function setAdminSession(request: Request, response: Response): void {
-  const expiry = String(Date.now() + ttlMs);
-  response.setHeader('Set-Cookie', `${cookieName}=${expiry}.${mac(expiry)}; Max-Age=${ttlMs / 1000}; ${cookieFlags(request)}`);
+  setUserSession(request, response, 'admin');
 }
 
 export function clearAdminSession(request: Request, response: Response): void {
   response.setHeader('Set-Cookie', `${cookieName}=; Max-Age=0; ${cookieFlags(request)}`);
 }
 
+// Any authenticated dashboard user (admin or callback_agent).
+export function requireAuth(request: Request, response: Response, next: NextFunction): void {
+  if (!readSession(request)) {
+    response.status(401).json({ error: 'Authentication required' });
+    return;
+  }
+  next();
+}
+
+// Admins only.
 export function requireAdmin(request: Request, response: Response, next: NextFunction): void {
   if (!isAdminRequest(request)) {
-    response.status(401).json({ error: 'Authentication required' });
+    response.status(403).json({ error: 'Admin access required' });
     return;
   }
   next();
