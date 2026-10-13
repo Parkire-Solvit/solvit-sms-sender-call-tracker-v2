@@ -15,12 +15,12 @@ import { normalizedReplySubject } from './replySubjectFallback';
 type Client = pg.PoolClient;
 type SqlRow = Record<string, any>;
 
-async function transaction<T>(work: (client: Client) => Promise<T>): Promise<T> {
+async function transaction<T>(work: (client: Client) => Promise<T>, commit = true): Promise<T> {
   const client = await getPostgresPool().connect();
   try {
     await client.query('BEGIN');
     const result = await work(client);
-    await client.query('COMMIT');
+    await client.query(commit ? 'COMMIT' : 'ROLLBACK');
     return result;
   } catch (error) {
     await client.query('ROLLBACK');
@@ -203,7 +203,7 @@ export async function storeInbound(
   });
 }
 
-export async function storeOutbound(sourceMailbox: string, message: GraphMessage): Promise<number | null> {
+export async function storeOutbound(sourceMailbox: string, message: GraphMessage, dryRun = false): Promise<number | null> {
   if (message['@removed']) return null;
   const identity = emailIdentity(message);
   const sentAt = new Date(message.sentDateTime || '');
@@ -272,9 +272,19 @@ export async function storeOutbound(sourceMailbox: string, message: GraphMessage
        WHERE email_thread_id=$1 AND acknowledged_at IS NULL`,
       [threadId],
     );
-    console.info('[EMAIL] Response recovered', { threadId, mailbox: sourceMailbox, sentAt: sentAt.toISOString(), matchMethod });
+    if (!dryRun) console.info('[EMAIL] Response recovered', { threadId, mailbox: sourceMailbox, sentAt: sentAt.toISOString(), matchMethod });
     return threadId;
-  });
+  }, !dryRun);
+}
+
+export async function countOpenEmailThreads(ids: readonly number[]): Promise<number> {
+  if (!ids.length) return 0;
+  const result = await getPostgresPool().query(
+    `SELECT COUNT(*)::int AS count FROM email_threads
+     WHERE id = ANY($1::bigint[]) AND first_response_at IS NULL AND sla_exclusion_reason IS NULL`,
+    [ids],
+  );
+  return Number(result.rows[0]?.count || 0);
 }
 
 export async function isStoredEmail(message: GraphMessage): Promise<boolean> {

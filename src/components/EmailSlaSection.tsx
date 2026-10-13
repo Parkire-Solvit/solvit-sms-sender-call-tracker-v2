@@ -35,6 +35,10 @@ type Settings = {
   resolutionMinutes: number; resolutionWarningMinutes: number; resolutionUrgentMinutes: number;
   holidayDates: string[];
 };
+type ReconciliationJob = {
+  state: 'idle' | 'running' | 'complete' | 'failed'; startedAt?: string; finishedAt?: string; error?: string;
+  result?: { days: number; dryRun: boolean; sentScanned: number; replyCandidates: number; repliesMatched: number; ticketsClosed: number; repliesUnmatched: number };
+};
 
 const alertSeverity = (type: string) => type.endsWith('_BREACH') ? 3 : type.endsWith('_URGENT') ? 2 : type.endsWith('_WARNING') ? 1 : 0;
 const alertStage = (type: string) => type.startsWith('RESPONSE_') ? 'response' : type;
@@ -117,6 +121,8 @@ export function EmailSlaSection({ employeeEmail }: { employeeEmail?: string }) {
   const [busy, setBusy] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [showAlerts, setShowAlerts] = useState(false);
+  const [reconciliationDays, setReconciliationDays] = useState(30);
+  const [reconciliation, setReconciliation] = useState<ReconciliationJob>({ state: 'idle' });
   const [now, setNow] = useState(Date.now());
   const [lastUpdatedAt, setLastUpdatedAt] = useState<number | null>(null);
   const refreshSequence = useRef(0);
@@ -204,6 +210,29 @@ export function EmailSlaSection({ employeeEmail }: { employeeEmail?: string }) {
     finally { setBusy(false); }
   }
 
+  async function startReconciliation(apply: boolean) {
+    if (apply && !window.confirm('Apply the previewed high-confidence reply matches and close those answered tickets?')) return;
+    setBusy(true);
+    try {
+      const job = await api<ReconciliationJob>('/api/email/reconcile', {
+        method: 'POST', body: JSON.stringify({ days: reconciliationDays, apply }),
+      });
+      setReconciliation(job); setError('');
+    } catch (cause) { setError((cause as Error).message); }
+    finally { setBusy(false); }
+  }
+
+  useEffect(() => {
+    if (isEmployee || reconciliation.state !== 'running') return;
+    const poll = setInterval(() => {
+      void api<ReconciliationJob>('/api/email/reconcile').then((job) => {
+        setReconciliation(job);
+        if (job.state === 'complete') void refresh();
+      }).catch((cause) => setError((cause as Error).message));
+    }, 5000);
+    return () => clearInterval(poll);
+  }, [isEmployee, reconciliation.state, refresh]);
+
   const cards = summary ? [
     ['Awaiting response', summary.awaiting_response], ['Near SLA', summary.near_sla],
     ['Overdue', summary.breached], ['Responded today', summary.resolved_today],
@@ -290,6 +319,18 @@ export function EmailSlaSection({ employeeEmail }: { employeeEmail?: string }) {
           <span className="flex gap-3 text-xs"><label className="flex items-center gap-1"><input type="checkbox" checked={member.is_available} disabled={busy} onChange={(event) => void updateMember(member, 'isAvailable', event.target.checked)} />Available</label>
             <label className="flex items-center gap-1"><input type="checkbox" checked={member.round_robin_enabled} disabled={busy} onChange={(event) => void updateMember(member, 'roundRobinEnabled', event.target.checked)} />Rotation</label></span>
         </div>)}</div>
+      </section>}
+      {!isEmployee && showSettings && <section className="p-4 rounded-xl border bg-white">
+        <h3 className="font-semibold">Historical reply reconciliation</h3>
+        <p className="mt-1 text-xs text-slate-600">Scans Account Managers' Sent Items and matches replies to the unique inbound email ID. Preview makes no changes; apply closes only matched open tickets and leaves ambiguous messages untouched.</p>
+        <div className="mt-3 flex flex-wrap items-end gap-2">
+          <label className="text-xs text-slate-600">Lookback days<input type="number" min="2" max="366" value={reconciliationDays} onChange={(event) => setReconciliationDays(Number(event.target.value))} className="mt-1 block w-28 rounded-lg border px-2 py-1.5" /></label>
+          <button disabled={busy || reconciliation.state === 'running'} onClick={() => void startReconciliation(false)} className="rounded-lg border px-4 py-2 text-sm disabled:opacity-50">Preview</button>
+          <button disabled={busy || reconciliation.state === 'running' || !reconciliation.result?.dryRun || reconciliation.result.days !== reconciliationDays || reconciliation.result.ticketsClosed === 0} onClick={() => void startReconciliation(true)} className="rounded-lg bg-[#ff353e] px-4 py-2 text-sm text-white disabled:opacity-50">Apply preview</button>
+        </div>
+        {reconciliation.state === 'running' && <p className="mt-3 text-sm text-blue-700">Reconciliation is running in the background. You may keep this page open.</p>}
+        {reconciliation.error && <p className="mt-3 text-sm text-red-700">{reconciliation.error}</p>}
+        {reconciliation.result && <p className="mt-3 text-sm text-slate-700">Scanned {reconciliation.result.sentScanned} sent emails; found {reconciliation.result.replyCandidates} reply candidates, matched {reconciliation.result.repliesMatched}, and {reconciliation.result.dryRun ? 'would close' : 'closed'} <strong>{reconciliation.result.ticketsClosed}</strong> open tickets. {reconciliation.result.repliesUnmatched} candidates were left untouched.</p>}
       </section>}
       <section className="p-5 rounded-2xl border border-slate-200 bg-white shadow-sm"><div className="flex flex-wrap items-center justify-between gap-3 mb-4"><div><h3 className="font-semibold">CS emails</h3><p className="mt-1 text-xs text-slate-500">All times are Nairobi time (UTC+3). SLA counts Mon–Fri, 08:00–17:00, excluding configured holidays. Auto-refreshes every 15 seconds and when you return to this tab.{lastUpdatedAt ? ` Last updated ${new Date(lastUpdatedAt).toLocaleTimeString('en-KE', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}.` : ''}</p></div><div className="flex flex-wrap gap-2">
         <select aria-label="Email status filter" value={filter} onChange={(event) => setFilter(event.target.value)} className="border rounded-lg px-2 py-1.5 text-sm">{filters.filter(([value]) => !isEmployee || value !== 'unassigned').map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select>

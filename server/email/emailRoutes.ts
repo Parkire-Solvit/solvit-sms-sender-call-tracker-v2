@@ -6,7 +6,7 @@ import { emailReportPeriod } from './emailReporting';
 import { getEmailReport, emailReportWorkbook } from './emailReportService';
 import { emailOutlookCopySql } from './emailOutlookLookup';
 import type { EmailRuntimeConfig } from './emailSyncService';
-import { getEmailSyncHealth, runEmailSync } from './emailSyncService';
+import { getEmailSyncHealth, getHistoricalReconciliationJob, runEmailSync, startHistoricalReconciliation } from './emailSyncService';
 import {
   acknowledgeEmailAlert, assignEmailThread, emailSummary, getEmailSettings, listEmailAlerts,
   listAssignmentNotifications, markAssignmentNotificationSeen, listEmailTeam, listEmailThreads,
@@ -182,5 +182,15 @@ export function createEmailRouter(config: EmailRuntimeConfig | null): Router {
     });
   }));
   router.post('/sync', requireAdmin, safe(async (_request, response) => response.json(await runEmailSync(config!))));
+  router.get('/reconcile', requireAdmin, safe(async (_request, response) => response.json(getHistoricalReconciliationJob())));
+  router.post('/reconcile', requireAdmin, safe(async (request, response) => {
+    const days = Number(request.body?.days);
+    const apply = request.body?.apply === true;
+    if (!Number.isInteger(days) || days < 2 || days > 366) {
+      return response.status(400).json({ error: 'Choose a reconciliation period from 2 to 366 days' });
+    }
+    try { response.status(202).json(startHistoricalReconciliation(config!, days, apply)); }
+    catch (error) { response.status(409).json({ error: (error as Error).message }); }
+  }));
   return router;
 }

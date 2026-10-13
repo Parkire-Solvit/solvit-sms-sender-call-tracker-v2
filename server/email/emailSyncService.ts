@@ -3,7 +3,7 @@ import { GraphClient, type GraphMessage } from './graphClient';
 import { emailIdentity, isAddressedToGroup, isFromMonitoredMailbox } from './messageIdentity';
 import {
   emailHealth, emitDueAlerts, ensureEmailTeam, getDeltaLink, getEmailSettings, isStoredEmail,
-  recordOptionalFolderAbsent, recordSyncFailure, saveDeltaLink, storeInbound, storeOutbound,
+  countOpenEmailThreads, recordOptionalFolderAbsent, recordSyncFailure, saveDeltaLink, storeInbound, storeOutbound,
 } from './emailRepository';
 
 export interface EmailRuntimeConfig {
@@ -26,6 +26,26 @@ export type EmailSyncResult = FolderSyncMetrics & {
   alerts: number;
   skipped: boolean;
 };
+
+export type HistoricalReconciliationResult = {
+  days: number;
+  dryRun: boolean;
+  sentScanned: number;
+  replyCandidates: number;
+  repliesMatched: number;
+  ticketsClosed: number;
+  repliesUnmatched: number;
+};
+
+export type HistoricalReconciliationJob = {
+  state: 'idle' | 'running' | 'complete' | 'failed';
+  startedAt?: string;
+  finishedAt?: string;
+  result?: HistoricalReconciliationResult;
+  error?: string;
+};
+
+let historicalJob: HistoricalReconciliationJob = { state: 'idle' };
 
 const emptyMetrics = (): FolderSyncMetrics => ({
   processed: 0,
@@ -259,6 +279,59 @@ export async function runEmailSync(config: EmailRuntimeConfig): Promise<EmailSyn
     if (acquired) await lockClient.query('SELECT pg_advisory_unlock($1)', [lockKey]).catch(() => undefined);
     lockClient.release();
   }
+}
+
+export async function reconcileHistoricalReplies(
+  config: EmailRuntimeConfig,
+  days: number,
+  dryRun = true,
+): Promise<HistoricalReconciliationResult> {
+  if (!Number.isInteger(days) || days < 2 || days > 366) throw new Error('Historical reconciliation must cover 2 to 366 days');
+  const since = new Date(Math.max(config.monitoringStart.getTime(), Date.now() - days * 86_400_000));
+  const matchedTickets = new Set<number>();
+  const result: HistoricalReconciliationResult = {
+    days, dryRun, sentScanned: 0, replyCandidates: 0, repliesMatched: 0, ticketsClosed: 0, repliesUnmatched: 0,
+  };
+  for (const mailbox of config.mailboxes) {
+    const items = await config.graph.getRecentFolderMessages(mailbox, 'sentitems', since);
+    for (const item of items) {
+      result.sentScanned++;
+      const detail = await config.graph.getMessageHeaders(mailbox, item.id);
+      const message: GraphMessage = { ...item, internetMessageHeaders: detail.internetMessageHeaders };
+      const identity = emailIdentity(message);
+      if (!identity.inReplyTo && !identity.references.length && !message.conversationId) continue;
+      result.replyCandidates++;
+      // Always preview in a rolled-back transaction first. This gives an exact
+      // count of open tickets and keeps preview mode completely non-mutating.
+      const threadId = await storeOutbound(mailbox, message, true);
+      if (threadId) {
+        result.repliesMatched++;
+        if (!matchedTickets.has(threadId)) {
+          matchedTickets.add(threadId);
+          result.ticketsClosed += await countOpenEmailThreads([threadId]);
+        }
+        if (!dryRun) await storeOutbound(mailbox, message);
+      }
+      else result.repliesUnmatched++;
+    }
+  }
+  console.info('[EMAIL] Historical reply reconciliation', result);
+  return result;
+}
+
+export function getHistoricalReconciliationJob(): HistoricalReconciliationJob {
+  return historicalJob;
+}
+
+export function startHistoricalReconciliation(config: EmailRuntimeConfig, days: number, apply: boolean): HistoricalReconciliationJob {
+  if (historicalJob.state === 'running') throw new Error('A historical reconciliation is already running');
+  historicalJob = { state: 'running', startedAt: new Date().toISOString() };
+  void reconcileHistoricalReplies(config, days, !apply).then((result) => {
+    historicalJob = { ...historicalJob, state: 'complete', finishedAt: new Date().toISOString(), result };
+  }).catch((error) => {
+    historicalJob = { ...historicalJob, state: 'failed', finishedAt: new Date().toISOString(), error: error instanceof Error ? error.message : 'Reconciliation failed' };
+  });
+  return historicalJob;
 }
 
 export function startEmailPolling(config: EmailRuntimeConfig): void {
