@@ -57,7 +57,7 @@ function parseMailboxList(value: string): string[] {
 export const approvedCsMailboxes = [
   'jmungasi@solvit.co.ke', 'iodago@solvit.co.ke', 'vmusyoka@solvit.co.ke',
   'bmuthama@solvit.co.ke', 'modondi@solvit.co.ke', 'dbwosi@solvit.co.ke',
-  'cmbugua@solvit.co.ke',
+  'cmbugua@solvit.co.ke', 'mmuriuki@solvit.co.ke', 'twangui@solvit.co.ke',
 ] as const;
 
 export function validateMonitoredMailboxes(mailboxes: readonly string[]): void {

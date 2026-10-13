@@ -81,12 +81,16 @@ export async function setEmailSettings(settings: EmailSlaSettings): Promise<void
 }
 
 export async function ensureEmailTeam(mailboxes: readonly string[]): Promise<void> {
+  const displayNames: Record<string, string> = {
+    'mmuriuki@solvit.co.ke': 'Mary Muriuki',
+    'twangui@solvit.co.ke': 'Teresiah Wangui',
+  };
   await transaction(async (client) => {
     for (const mailbox of mailboxes) {
       await client.query(
         `INSERT INTO email_team_members (email, display_name) VALUES ($1,$2)
          ON CONFLICT (email) DO NOTHING`,
-        [mailbox.toLowerCase(), mailbox.split('@')[0]],
+        [mailbox.toLowerCase(), displayNames[mailbox.toLowerCase()] || mailbox.split('@')[0]],
       );
     }
   });
