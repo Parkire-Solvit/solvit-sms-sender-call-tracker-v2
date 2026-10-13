@@ -52,6 +52,9 @@ export async function getSystemSettings(db: DbAdapter): Promise<SystemSettings> 
       working_hours_schedule: parsedSchedule,
       clock_mode: row.clock_mode === 'continuous_24_7' ? 'continuous_24_7' : 'working_hours',
       min_connection_duration: Number(row.min_connection_duration ?? DEFAULT_SETTINGS.min_connection_duration),
+      daily_summary_enabled: row.daily_summary_enabled === true || row.daily_summary_enabled === 1 || row.daily_summary_enabled === '1',
+      daily_summary_recipients: String(row.daily_summary_recipients || '').split(',').map((value) => value.trim()).filter(Boolean),
+      daily_summary_last_sent_date: row.daily_summary_last_sent_date || null,
     };
   } catch (err) {
     console.error('Error fetching system settings:', err);
@@ -96,6 +99,13 @@ export async function updateSystemSettings(
       incoming.min_connection_duration !== undefined
         ? Number(incoming.min_connection_duration)
         : current.min_connection_duration,
+    daily_summary_enabled:
+      incoming.daily_summary_enabled !== undefined ? Boolean(incoming.daily_summary_enabled) : current.daily_summary_enabled,
+    daily_summary_recipients:
+      incoming.daily_summary_recipients !== undefined
+        ? incoming.daily_summary_recipients.map((value) => String(value).trim()).filter(Boolean)
+        : current.daily_summary_recipients,
+    daily_summary_last_sent_date: current.daily_summary_last_sent_date || null,
   };
 
   // Compare and record differences in settings_change_log
@@ -165,8 +175,8 @@ export async function updateSystemSettings(
   const schedJson = JSON.stringify(updated.working_hours_schedule);
   await db.execute(
       `INSERT INTO system_settings 
-       (id, callback_window_minutes, reconnection_window_minutes, sms_followup_enabled, sms_deadline_minutes, sms_template, working_hours_schedule, clock_mode, min_connection_duration)
-       VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?)
+       (id, callback_window_minutes, reconnection_window_minutes, sms_followup_enabled, sms_deadline_minutes, sms_template, working_hours_schedule, clock_mode, min_connection_duration, daily_summary_enabled, daily_summary_recipients, daily_summary_last_sent_date)
+       VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT (id) DO UPDATE SET
          callback_window_minutes = EXCLUDED.callback_window_minutes,
          reconnection_window_minutes = EXCLUDED.reconnection_window_minutes,
@@ -176,6 +186,9 @@ export async function updateSystemSettings(
          working_hours_schedule = EXCLUDED.working_hours_schedule,
          clock_mode = EXCLUDED.clock_mode,
          min_connection_duration = EXCLUDED.min_connection_duration,
+         daily_summary_enabled = EXCLUDED.daily_summary_enabled,
+         daily_summary_recipients = EXCLUDED.daily_summary_recipients,
+         daily_summary_last_sent_date = EXCLUDED.daily_summary_last_sent_date,
          updated_at = CURRENT_TIMESTAMP`,
       [
         updated.callback_window_minutes,
@@ -186,6 +199,9 @@ export async function updateSystemSettings(
         schedJson,
         updated.clock_mode,
         updated.min_connection_duration,
+        updated.daily_summary_enabled,
+        updated.daily_summary_recipients.join(', '),
+        updated.daily_summary_last_sent_date,
       ]
     );
 
@@ -199,6 +215,13 @@ export async function updateSystemSettings(
   }
 
   return { success: true, settings: updated };
+}
+
+export async function updateDailySummaryLastSentDate(db: DbAdapter, date: string): Promise<void> {
+  await db.execute(
+    `UPDATE system_settings SET daily_summary_last_sent_date = ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1`,
+    [date]
+  );
 }
 
 export async function getSettingsChangeLogs(db: DbAdapter): Promise<SettingsChangeLog[]> {

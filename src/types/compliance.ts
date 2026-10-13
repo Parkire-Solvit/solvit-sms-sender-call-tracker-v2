@@ -23,6 +23,9 @@ export interface SystemSettings {
   working_hours_schedule: WorkingHoursSchedule;
   clock_mode: 'working_hours' | 'continuous_24_7'; // default working_hours
   min_connection_duration: number; // in seconds, default 0
+  daily_summary_enabled: boolean;
+  daily_summary_recipients: string[];
+  daily_summary_last_sent_date?: string | null;
 }
 
 export interface SettingsChangeLog {
@@ -53,6 +56,9 @@ export const DEFAULT_SETTINGS: SystemSettings = {
   working_hours_schedule: DEFAULT_WORKING_HOURS,
   clock_mode: 'working_hours',
   min_connection_duration: 0,
+  daily_summary_enabled: false,
+  daily_summary_recipients: [],
+  daily_summary_last_sent_date: null,
 };
 
 export type ObligationType = 

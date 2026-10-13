@@ -46,6 +46,8 @@ import {
 } from '../types/callbacks';
 import { CallSessionView } from './CallSessionView';
 import { OnboardingTour } from './OnboardingTour';
+import { AgentReviewModal } from './AgentReviewModal';
+import { UnmatchedActivityModal } from './UnmatchedActivityModal';
 
 interface InsuranceCallbackSectionProps {
   onOpenSettings?: () => void;
@@ -214,8 +216,12 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
   const [tempStaffCount, setTempStaffCount] = useState(2);
   const [tempTeamTag, setTempTeamTag] = useState('Callback Team');
   const [tempMaxAttempts, setTempMaxAttempts] = useState(4);
+  const [tempMaxSmsAttempts, setTempMaxSmsAttempts] = useState(4);
   const [isSavingSettings, setIsSavingSettings] = useState(false);
   const [settingsSuccess, setSettingsSuccess] = useState(false);
+  const [showAgentReview, setShowAgentReview] = useState(false);
+  const [showUnmatchedActivity, setShowUnmatchedActivity] = useState(false);
+  const [reviewingHistoricalClosures, setReviewingHistoricalClosures] = useState(false);
 
   // Outcome Logging Modal State
   const [outcomeJob, setOutcomeJob] = useState<CallbackJob | null>(null);
@@ -594,6 +600,7 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
         setTempStaffCount(data.staff_count);
         setTempTeamTag(data.callback_team_tag);
         setTempMaxAttempts(data.max_attempts);
+        setTempMaxSmsAttempts(data.max_sms_attempts ?? 4);
       }
     } catch (err) {
       console.warn('Failed to load callback settings', err);
@@ -618,6 +625,7 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
         setTempStaffCount(dataSettings.staff_count);
         setTempTeamTag(dataSettings.callback_team_tag);
         setTempMaxAttempts(dataSettings.max_attempts);
+        setTempMaxSmsAttempts(dataSettings.max_sms_attempts ?? 4);
       }
     } catch (err) {
       setError((err as Error).message);
@@ -854,6 +862,7 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
         body: JSON.stringify({
           callback_team_tag: tempTeamTag,
           max_attempts: tempMaxAttempts,
+          max_sms_attempts: tempMaxSmsAttempts,
         }),
       });
       if (!res.ok) throw new Error('Failed to save settings');
@@ -870,6 +879,34 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
       alert(`Error: ${(err as Error).message}`);
     } finally {
       setIsSavingSettings(false);
+    }
+  };
+
+  const handleHistoricalClosureReview = async () => {
+    setReviewingHistoricalClosures(true);
+    try {
+      const previewResponse = await fetch('/api/callback-jobs/historical-reopen/preview');
+      const preview = await previewResponse.json();
+      if (!previewResponse.ok) throw new Error(preview.error || 'Unable to preview historical records');
+      if (!preview.count) {
+        alert('No historical callback records need reopening under the corrected call-and-SMS rule.');
+        return;
+      }
+      if (!confirm(`${preview.count} historical callback record(s) were closed under the old rule and should be reopened. Review and apply this one-time correction now?`)) return;
+      const phrase = prompt('Type REOPEN REVIEWED RECORDS to apply the audited one-time correction:');
+      if (phrase !== 'REOPEN REVIEWED RECORDS') return;
+      const applyResponse = await fetch('/api/callback-jobs/historical-reopen/apply', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ confirmation: phrase }),
+      });
+      const result = await applyResponse.json();
+      if (!applyResponse.ok) throw new Error(result.error || 'Historical correction failed');
+      alert(`${result.reopened} callback record(s) reopened. An audit snapshot was retained.`);
+      fetchJobs();
+    } catch (err) {
+      alert((err as Error).message);
+    } finally {
+      setReviewingHistoricalClosures(false);
     }
   };
 
@@ -1187,7 +1224,8 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
     return jobs.filter(
       (j) =>
         j.latest_outcome === 'MAX_ATTEMPTS_REACHED' ||
-        (j.attempt_count >= (j.max_attempts || 4) && j.status === 'RED')
+        (j.attempt_count >= (j.max_attempts || 4) &&
+          j.sms_count >= (j.max_sms_attempts || 4) && j.status === 'RED')
     ).length;
   }, [jobs]);
 
@@ -1439,6 +1477,15 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
 
           <div className="flex items-center gap-2.5 flex-wrap sm:flex-nowrap">
             {/* Max Attempts Report Button */}
+            <button onClick={() => setShowAgentReview(true)} className="px-3 py-2 border border-amber-200 bg-amber-50 text-amber-800 rounded-xl text-xs font-bold">
+              Review agent names
+            </button>
+            <button onClick={() => setShowUnmatchedActivity(true)} className="px-3 py-2 border border-indigo-200 bg-indigo-50 text-indigo-800 rounded-xl text-xs font-bold">
+              Unmatched activity
+            </button>
+            <button disabled={reviewingHistoricalClosures} onClick={handleHistoricalClosureReview} className="px-3 py-2 border border-slate-200 bg-white text-slate-700 rounded-xl text-xs font-bold disabled:opacity-50">
+              {reviewingHistoricalClosures ? 'Checking…' : 'Review old closures'}
+            </button>
             <button
               id="btn-open-max-attempts-report"
               onClick={openMaxAttemptsReport}
@@ -1708,6 +1755,13 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
           </div>
         </div>
       </div>
+      <AgentReviewModal
+        isOpen={showAgentReview}
+        onClose={() => setShowAgentReview(false)}
+        allAgents={allAgents || []}
+        onChanged={fetchJobs}
+      />
+      <UnmatchedActivityModal isOpen={showUnmatchedActivity} onClose={() => setShowUnmatchedActivity(false)} />
 
       {/* Upload Success Banner */}
       {uploadSummary && (
@@ -1986,6 +2040,7 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
                             {clientData.vehicles.map((vehicle) => {
                               const isMaxReached =
                                 vehicle.attempt_count >= (vehicle.max_attempts || 4) &&
+                                vehicle.sms_count >= (vehicle.max_sms_attempts || 4) &&
                                 vehicle.status === 'AMBER';
 
                               return (
@@ -2085,7 +2140,7 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
                                     >
                                       <MessageSquare className="w-3 h-3 text-blue-500" />
                                       <span>
-                                        {vehicle.sms_count} {vehicle.sms_count === 1 ? 'SMS' : 'SMSs'}
+                                        {vehicle.sms_count} / {vehicle.max_sms_attempts || 4} SMS
                                       </span>
                                     </div>
 
@@ -3005,6 +3060,21 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
                 />
                 <span className="text-[11px] text-slate-400 block mt-1">
                   When reached without scheduling, the vehicle automatically transitions to Red with the outcome &ldquo;MAX_ATTEMPTS_REACHED&rdquo;.
+                </span>
+              </div>
+
+              <div>
+                <label className="text-xs font-bold text-slate-700 block mb-1">Minimum SMS Attempts</label>
+                <input
+                  type="number"
+                  min="1"
+                  max="20"
+                  value={tempMaxSmsAttempts}
+                  onChange={(e) => setTempMaxSmsAttempts(Math.max(1, Math.min(20, parseInt(e.target.value) || 1)))}
+                  className="w-full px-3.5 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-800 font-bold focus:outline-none focus:ring-2 focus:ring-[#ff353e]/20 focus:border-[#ff353e]"
+                />
+                <span className="text-[11px] text-slate-400 block mt-1">
+                  Automatic closure requires both the call threshold and this SMS threshold.
                 </span>
               </div>
 

@@ -23,6 +23,10 @@ const VALID_AGENT_OUTCOMES = new Set<string>([
   "UNREACHABLE",
 ]);
 
+// CONNECTED is a second event emitted for the same call by some Android
+// devices. Only OUTGOING represents a distinct contact attempt.
+export const COUNTED_CALL_STATUSES = new Set<string>(["OUTGOING"]);
+
 const MONTHS: Record<string, number> = {
   JANUARY: 0, FEBRUARY: 1, MARCH: 2, APRIL: 3, MAY: 4, JUNE: 5,
   JULY: 6, AUGUST: 7, SEPTEMBER: 8, OCTOBER: 9, NOVEMBER: 10, DECEMBER: 11,
@@ -59,6 +63,29 @@ export function normalizePhone(raw: string | null | undefined): string {
   return digits.length >= 9 ? digits.slice(-9) : digits;
 }
 
+export function extractPhoneNumbers(raw: string | null | undefined): string[] {
+  if (!raw) return [];
+  const tokens = String(raw).trim().split(/[\r\n,;&/]+|\b(?:or|and)\b/i);
+  const result: string[] = [];
+  const seen = new Set<string>();
+  for (const token of tokens) {
+    const norm = normalizePhone(token);
+    if (norm.length >= 9 && !seen.has(norm)) {
+      seen.add(norm);
+      result.push(norm);
+    }
+  }
+  return result;
+}
+
+export function hasReachedMaxAttempts(
+  activity: { attempt_count: number; sms_count: number },
+  settings: { max_attempts: number; max_sms_attempts: number }
+): boolean {
+  return Number(activity.attempt_count || 0) >= Number(settings.max_attempts || 4)
+    && Number(activity.sms_count || 0) >= Number(settings.max_sms_attempts || 4);
+}
+
 /**
  * Vehicle registration:
  *   - Uppercase.
@@ -74,11 +101,12 @@ export function normalizeVehicleReg(raw: string | null | undefined): string {
  */
 export async function getCallbackSettings(db: DbAdapter): Promise<CallbackSettings> {
   const row = await db.queryOne<CallbackSettings & { disappearance_alert_fixed_count?: number; disappearance_alert_percentage?: number }>(
-    `SELECT id, staff_count, callback_team_tag, max_attempts, disappearance_alert_fixed_count, disappearance_alert_percentage, updated_at FROM callback_settings WHERE id = 1`
+    `SELECT id, staff_count, callback_team_tag, max_attempts, max_sms_attempts, disappearance_alert_fixed_count, disappearance_alert_percentage, updated_at FROM callback_settings WHERE id = 1`
   );
 
   let teamTag = "Callback Team";
   let maxAttempts = 4;
+  let maxSmsAttempts = 4;
   let fixedCount = 50;
   let percentage = 30;
 
@@ -93,12 +121,13 @@ export async function getCallbackSettings(db: DbAdapter): Promise<CallbackSettin
       } catch (_) {}
     }
     maxAttempts = Number(row.max_attempts || 4);
+    maxSmsAttempts = Number(row.max_sms_attempts || 4);
     fixedCount = row.disappearance_alert_fixed_count !== undefined && row.disappearance_alert_fixed_count !== null ? Number(row.disappearance_alert_fixed_count) : 50;
     percentage = row.disappearance_alert_percentage !== undefined && row.disappearance_alert_percentage !== null ? Number(row.disappearance_alert_percentage) : 30;
   } else {
     // Insert default if row 1 is missing
     await db.execute(
-      `INSERT INTO callback_settings (id, staff_count, callback_team_tag, max_attempts, disappearance_alert_fixed_count, disappearance_alert_percentage) VALUES (1, 0, 'Callback Team', 4, 50, 30) ON CONFLICT (id) DO NOTHING`
+      `INSERT INTO callback_settings (id, staff_count, callback_team_tag, max_attempts, max_sms_attempts, disappearance_alert_fixed_count, disappearance_alert_percentage) VALUES (1, 0, 'Callback Team', 4, 4, 50, 30) ON CONFLICT (id) DO NOTHING`
     );
   }
 
@@ -134,6 +163,7 @@ export async function getCallbackSettings(db: DbAdapter): Promise<CallbackSettin
     staff_count: autoStaffCount,
     callback_team_tag: teamTag,
     max_attempts: maxAttempts,
+    max_sms_attempts: maxSmsAttempts,
     disappearance_alert_fixed_count: fixedCount,
     disappearance_alert_percentage: percentage,
     active_agents: activeAgents,
@@ -146,12 +176,13 @@ export async function getCallbackSettings(db: DbAdapter): Promise<CallbackSettin
  */
 export async function updateCallbackSettings(
   db: DbAdapter,
-  updates: Partial<Pick<CallbackSettings, "staff_count" | "callback_team_tag" | "max_attempts" | "disappearance_alert_fixed_count" | "disappearance_alert_percentage">>
+  updates: Partial<Pick<CallbackSettings, "staff_count" | "callback_team_tag" | "max_attempts" | "max_sms_attempts" | "disappearance_alert_fixed_count" | "disappearance_alert_percentage">>
 ): Promise<CallbackSettings> {
   const current = await getCallbackSettings(db);
 
   const teamTag = updates.callback_team_tag !== undefined ? String(updates.callback_team_tag).trim() : current.callback_team_tag;
   const maxAttempts = updates.max_attempts !== undefined ? Number(updates.max_attempts) : current.max_attempts;
+  const maxSmsAttempts = updates.max_sms_attempts !== undefined ? Number(updates.max_sms_attempts) : current.max_sms_attempts;
   const fixedCount = updates.disappearance_alert_fixed_count !== undefined ? Number(updates.disappearance_alert_fixed_count) : (current.disappearance_alert_fixed_count ?? 50);
   const percentage = updates.disappearance_alert_percentage !== undefined ? Number(updates.disappearance_alert_percentage) : (current.disappearance_alert_percentage ?? 30);
 
@@ -163,8 +194,8 @@ export async function updateCallbackSettings(
   const autoStaffCount = activeAgents.length;
 
   await db.execute(
-    `UPDATE callback_settings SET staff_count = ?, callback_team_tag = ?, max_attempts = ?, disappearance_alert_fixed_count = ?, disappearance_alert_percentage = ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1`,
-    [autoStaffCount, teamTag, maxAttempts, fixedCount, percentage]
+    `UPDATE callback_settings SET staff_count = ?, callback_team_tag = ?, max_attempts = ?, max_sms_attempts = ?, disappearance_alert_fixed_count = ?, disappearance_alert_percentage = ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1`,
+    [autoStaffCount, teamTag, maxAttempts, maxSmsAttempts, fixedCount, percentage]
   );
 
   return {
@@ -172,6 +203,7 @@ export async function updateCallbackSettings(
     staff_count: autoStaffCount,
     callback_team_tag: teamTag,
     max_attempts: maxAttempts,
+    max_sms_attempts: maxSmsAttempts,
     disappearance_alert_fixed_count: fixedCount,
     disappearance_alert_percentage: percentage,
     active_agents: activeAgents,
@@ -423,7 +455,8 @@ export async function importCallbackJobs(
     const customerEmail = row.customer_email ? String(row.customer_email).trim() : null;
 
     const normReg = normalizeVehicleReg(rawReg);
-    const normPhone = normalizePhone(rawPhone);
+    const phoneNumbers = extractPhoneNumbers(rawPhone);
+    const normPhone = phoneNumbers[0] || normalizePhone(rawPhone);
 
     if (!normReg || !normPhone) {
       continue;
@@ -453,6 +486,13 @@ export async function importCallbackJobs(
           );
         }
         skippedOpenCount++;
+        for (const phone of phoneNumbers) {
+          await db.execute(
+            `INSERT INTO callback_job_phones (callback_job_id, phone_normalised, source)
+             VALUES (?, ?, ?) ON CONFLICT (callback_job_id, phone_normalised) DO NOTHING`,
+            [existing.id, phone, phone === normPhone ? 'PRIMARY' : 'IMPORT']
+          );
+        }
       }
     } else {
       // Find assigned_agent_id:
@@ -477,7 +517,7 @@ export async function importCallbackJobs(
       }
 
       // Insert new row at status = 'AMBER'
-      await db.execute(
+      const inserted = await db.execute(
         `INSERT INTO callback_jobs (
           vehicle_reg, vehicle_reg_raw, client_name, client_phone, client_phone_raw, customer_email,
           channel_partner, initiated_date, brian_reason, status, assigned_agent_id,
@@ -496,6 +536,14 @@ export async function importCallbackJobs(
           assignedAgentId,
         ]
       );
+
+      for (const phone of phoneNumbers) {
+        await db.execute(
+          `INSERT INTO callback_job_phones (callback_job_id, phone_normalised, source)
+           VALUES (?, ?, ?) ON CONFLICT (callback_job_id, phone_normalised) DO NOTHING`,
+          [inserted.lastInsertId, phone, phone === normPhone ? 'PRIMARY' : 'IMPORT']
+        );
+      }
 
       newRecordsCount++;
     }
@@ -611,7 +659,6 @@ export async function importCallbackJobs(
  */
 export async function closeMaturedCallbackJobs(db: DbAdapter, jobId?: number): Promise<void> {
   const settings = await getCallbackSettings(db);
-  const maxAttempts = settings.max_attempts;
 
   let query = `SELECT id, client_phone, assigned_agent_id FROM callback_jobs WHERE status = 'AMBER'`;
   const params: any[] = [];
@@ -624,25 +671,50 @@ export async function closeMaturedCallbackJobs(db: DbAdapter, jobId?: number): P
   if (openJobs.length === 0) return;
 
   // Query events scoped to agents.tag = settings.callback_team_tag AND archived_at IS NULL
-  const events = await db.queryAll<{ target_phone: string; type: string; agent_id: number }>(
-    `SELECT e.target_phone, e.type, e.agent_id
+  const events = await db.queryAll<{ target_phone: string; type: string; status: string | null; agent_id: number }>(
+    `SELECT e.target_phone, e.type, e.status, e.agent_id
      FROM events e
      JOIN agents a ON e.agent_id = a.id
-     WHERE a.tag = ? AND (a.archived_at IS NULL) AND e.type = 'CALL'`,
+     WHERE LOWER(TRIM(a.tag)) = LOWER(TRIM(?)) AND (a.archived_at IS NULL)
+       AND e.type IN ('CALL', 'SMS')`,
     [settings.callback_team_tag]
   );
 
-  const phoneAttemptMap = new Map<string, number>();
+  const phoneActivityMap = new Map<string, { attempt_count: number; sms_count: number }>();
   for (const ev of events) {
     const normP = normalizePhone(ev.target_phone);
     if (!normP) continue;
     const key = `${normP}::${ev.agent_id}`;
-    phoneAttemptMap.set(key, (phoneAttemptMap.get(key) || 0) + 1);
+    const activity = phoneActivityMap.get(key) || { attempt_count: 0, sms_count: 0 };
+    if (ev.type === "CALL" && COUNTED_CALL_STATUSES.has(String(ev.status || "").toUpperCase())) {
+      activity.attempt_count += 1;
+    } else if (ev.type === "SMS") {
+      activity.sms_count += 1;
+    }
+    phoneActivityMap.set(key, activity);
+  }
+
+  const phoneRows = await db.queryAll<{ callback_job_id: number; phone_normalised: string }>(
+    `SELECT callback_job_id, phone_normalised FROM callback_job_phones`
+  );
+  const phonesByJob = new Map<number, Set<string>>();
+  for (const row of phoneRows) {
+    const set = phonesByJob.get(Number(row.callback_job_id)) || new Set<string>();
+    set.add(normalizePhone(row.phone_normalised));
+    phonesByJob.set(Number(row.callback_job_id), set);
   }
 
   for (const job of openJobs) {
-    const attempts = phoneAttemptMap.get(`${job.client_phone}::${job.assigned_agent_id}`) || 0;
-    if (attempts >= maxAttempts) {
+    const phones = phonesByJob.get(Number(job.id)) || new Set<string>([normalizePhone(job.client_phone)]);
+    const activity = { attempt_count: 0, sms_count: 0 };
+    for (const phone of phones) {
+      const phoneActivity = phoneActivityMap.get(`${phone}::${job.assigned_agent_id}`);
+      if (phoneActivity) {
+        activity.attempt_count += phoneActivity.attempt_count;
+        activity.sms_count += phoneActivity.sms_count;
+      }
+    }
+    if (hasReachedMaxAttempts(activity, settings)) {
       await db.execute(
         `UPDATE callback_jobs 
          SET status = 'RED', closed_at = CURRENT_TIMESTAMP, latest_outcome = 'MAX_ATTEMPTS_REACHED', updated_at = CURRENT_TIMESTAMP 
@@ -652,7 +724,7 @@ export async function closeMaturedCallbackJobs(db: DbAdapter, jobId?: number): P
       await db.execute(
         `INSERT INTO callback_job_logs (
           callback_job_id, outcome, comment, logged_by, resulting_status, created_at
-        ) VALUES (?, 'MAX_ATTEMPTS_REACHED', 'Automatically closed: maximum contact attempts reached.', 'System', 'RED', CURRENT_TIMESTAMP)`,
+        ) VALUES (?, 'MAX_ATTEMPTS_REACHED', 'Automatically closed: minimum outgoing calls and minimum SMS reached.', 'System', 'RED', CURRENT_TIMESTAMP)`,
         [job.id]
       );
     }
@@ -828,8 +900,8 @@ export async function getCallbackJobs(
   // Scoped activity computation:
   // Scoped to agents.tag = callback_settings.callback_team_tag AND agents.archived_at IS NULL,
   // matching the job's assigned_agent_id:
-  const events = await db.queryAll<{ target_phone: string; type: string; timestamp: string; agent_id: number }>(
-    `SELECT e.target_phone, e.type, e.timestamp, e.agent_id
+  const events = await db.queryAll<{ target_phone: string; type: string; status: string | null; timestamp: string; agent_id: number }>(
+    `SELECT e.target_phone, e.type, e.status, e.timestamp, e.agent_id
      FROM events e
      JOIN agents a ON e.agent_id = a.id
      WHERE a.tag = ? AND (a.archived_at IS NULL)`,
@@ -849,7 +921,7 @@ export async function getCallbackJobs(
       phoneActivityMap.set(key, act);
     }
 
-    if (ev.type === "CALL") {
+    if (ev.type === "CALL" && COUNTED_CALL_STATUSES.has(String(ev.status || "").toUpperCase())) {
       act.attempt_count += 1;
       if (!act.last_attempt_at || new Date(ev.timestamp) > new Date(act.last_attempt_at)) {
         act.last_attempt_at = ev.timestamp;
@@ -859,12 +931,28 @@ export async function getCallbackJobs(
     }
   }
 
+  const jobPhoneRows = await db.queryAll<{ callback_job_id: number; phone_normalised: string }>(
+    `SELECT callback_job_id, phone_normalised FROM callback_job_phones`
+  );
+  const jobPhones = new Map<number, Set<string>>();
+  for (const row of jobPhoneRows) {
+    const set = jobPhones.get(Number(row.callback_job_id)) || new Set<string>();
+    set.add(normalizePhone(row.phone_normalised));
+    jobPhones.set(Number(row.callback_job_id), set);
+  }
+
   return jobs.map((job) => {
-    const act = phoneActivityMap.get(`${job.client_phone}::${job.assigned_agent_id}`) || {
-      attempt_count: 0,
-      sms_count: 0,
-      last_attempt_at: null,
-    };
+    const phones = jobPhones.get(Number(job.id)) || new Set<string>([normalizePhone(job.client_phone)]);
+    const act = { attempt_count: 0, sms_count: 0, last_attempt_at: null as string | null };
+    for (const phone of phones) {
+      const activity = phoneActivityMap.get(`${phone}::${job.assigned_agent_id}`);
+      if (!activity) continue;
+      act.attempt_count += activity.attempt_count;
+      act.sms_count += activity.sms_count;
+      if (activity.last_attempt_at && (!act.last_attempt_at || new Date(activity.last_attempt_at) > new Date(act.last_attempt_at))) {
+        act.last_attempt_at = activity.last_attempt_at;
+      }
+    }
 
     return {
       id: Number(job.id),
@@ -891,6 +979,7 @@ export async function getCallbackJobs(
       sms_sent: act.sms_count > 0,
       last_attempt_at: act.last_attempt_at,
       max_attempts: settings.max_attempts,
+      max_sms_attempts: settings.max_sms_attempts,
     };
   });
 }
@@ -1048,6 +1137,62 @@ export async function getMaxAttemptsReport(db: DbAdapter): Promise<MaxAttemptsRe
   }
 
   return result.sort((a, b) => a.channel_partner.localeCompare(b.channel_partner));
+}
+
+export async function previewHistoricalClosureReopen(db: DbAdapter): Promise<Array<{
+  id: number; vehicle_reg: string; assigned_agent_name: string | null;
+  attempt_count: number; sms_count: number; reason: string;
+}>> {
+  const settings = await getCallbackSettings(db);
+  const jobs = await getCallbackJobs(db, {});
+  return jobs
+    .filter((job) => job.status === 'RED' && job.latest_outcome === 'MAX_ATTEMPTS_REACHED')
+    .filter((job) => !hasReachedMaxAttempts(job, settings))
+    .map((job) => ({
+      id: job.id,
+      vehicle_reg: job.vehicle_reg_raw,
+      assigned_agent_name: job.assigned_agent_name || null,
+      attempt_count: job.attempt_count,
+      sms_count: job.sms_count,
+      reason: `Closed under the old rule but does not meet ${settings.max_attempts} outgoing calls and ${settings.max_sms_attempts} SMS.`,
+    }));
+}
+
+export async function applyHistoricalClosureReopen(db: DbAdapter): Promise<{ reopened: number }> {
+  const jobKey = 'callback-closure-rule-v2';
+  const prior = await db.queryOne(`SELECT id FROM one_time_job_runs WHERE job_key = ?`, [jobKey]);
+  if (prior) throw new Error('The historical callback correction has already been applied.');
+  const preview = await previewHistoricalClosureReopen(db);
+  const runToken = `reopen-${Date.now()}`;
+  for (const item of preview) {
+    const job = await db.queryOne<any>(`SELECT * FROM callback_jobs WHERE id = ?`, [item.id]);
+    if (!job) continue;
+    await db.execute(
+      `INSERT INTO callback_reopen_snapshot
+       (job_key, callback_job_id, action, previous_status, previous_closed_at,
+        previous_latest_outcome, previous_assigned_agent_id, new_assigned_agent_id,
+        outgoing_calls, sms_count)
+       VALUES (?, ?, 'REOPENED', ?, ?, ?, ?, ?, ?, ?)`,
+      [jobKey, item.id, job.status, job.closed_at, job.latest_outcome,
+       job.assigned_agent_id, job.assigned_agent_id, item.attempt_count, item.sms_count]
+    );
+    await db.execute(
+      `UPDATE callback_jobs SET status = 'AMBER', closed_at = NULL,
+       latest_outcome = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+      [item.id]
+    );
+    await db.execute(
+      `INSERT INTO callback_job_logs
+       (callback_job_id, outcome, comment, logged_by, resulting_status, created_at)
+       VALUES (?, 'HISTORICAL_RULE_CORRECTION', ?, 'System', 'AMBER', CURRENT_TIMESTAMP)`,
+      [item.id, item.reason]
+    );
+  }
+  await db.execute(
+    `INSERT INTO one_time_job_runs (job_key, run_token, summary) VALUES (?, ?, ?)`,
+    [jobKey, runToken, JSON.stringify({ reopened: preview.length })]
+  );
+  return { reopened: preview.length };
 }
 
 /**

@@ -747,6 +747,7 @@ export const CallSessionView: React.FC<CallSessionViewProps> = ({
               {currentClient.vehicles.map((vehicle, idx) => {
                 const formData = vehicleForm[vehicle.id] || { outcome: '', comment: '' };
                 const maxAtt = vehicle.max_attempts || settings?.max_attempts || 4;
+                const maxSms = vehicle.max_sms_attempts || settings?.max_sms_attempts || 4;
                 const attempts = vehicle.attempt_count || 0;
                 const selectedOpt = SESSION_OUTCOME_OPTIONS.find(
                   (o) => o.value === formData.outcome
@@ -803,7 +804,7 @@ export const CallSessionView: React.FC<CallSessionViewProps> = ({
                         {/* SMS Count */}
                         <span className="text-[11px] font-bold text-slate-600 bg-slate-50 border border-slate-200 px-2.5 py-1 rounded-lg flex items-center gap-1">
                           <MessageSquare className="w-3 h-3 text-slate-400" />
-                          <span>{vehicle.sms_count || 0} SMS</span>
+                          <span>{vehicle.sms_count || 0} / {maxSms} SMS</span>
                         </span>
                       </div>
                     </div>

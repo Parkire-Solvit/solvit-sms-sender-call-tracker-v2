@@ -2,7 +2,8 @@ import express from "express";
 import { createServer as createViteServer } from "vite";
 import path from "path";
 import { initDatabase, getDb, getPostgresPool } from "./db";
-import { getSystemSettings, updateSystemSettings, getSettingsChangeLogs } from "./settingsManager";
+import { getSystemSettings, updateSystemSettings, getSettingsChangeLogs, updateDailySummaryLastSentDate } from "./settingsManager";
+import { generateAndSendDailySummary, getNairobiDate } from './dailySummaryEmail';
 import { evaluateCompliance, RawEvent, RawAgent } from "./complianceEngine";
 import { clearAdminSession, credentialsMatch, isAdminRequest, requireAdmin, setAdminSession } from './server/auth/adminSession';
 import { clearEmailMemberSession, emailMember } from './server/auth/emailMemberSession';
@@ -22,6 +23,9 @@ import {
   seedChannelPartnerAllocations,
   getChannelPartnerAllocations,
   setChannelPartnerAllocation,
+  normalizePhone,
+  previewHistoricalClosureReopen,
+  applyHistoricalClosureReopen,
 } from "./insuranceCallbacks";
 import * as XLSX from "xlsx";
 import { seedDefaultAdmin, hashPassword, verifyPassword } from "./auth";
@@ -90,6 +94,17 @@ async function startServer() {
       statusMessage: db.statusMessage,
       database: "PostgreSQL",
     });
+  });
+
+  app.post('/api/daily-summary/send-test', requireAdmin, async (req, res) => {
+    try {
+      const recipients = Array.isArray(req.body?.recipients)
+        ? req.body.recipients.map((value: unknown) => String(value).trim()).filter(Boolean)
+        : undefined;
+      res.json(await generateAndSendDailySummary(db, { recipientsOverride: recipients }));
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
   });
 
   const loginAttempts = new Map<string, { count: number; resetAt: number }>();
@@ -364,11 +379,23 @@ async function startServer() {
         return res.json({ success: true, skipped: true, reason: "agent_archived" });
       }
 
-      // 3. Auto-create agent if not found
+      // Resolve historical spelling variations through the alias table.
       if (!agent && name !== "Unknown Agent") {
-        console.log(`[API] Agent "${name}" not found. Auto-creating...`);
+        const normalisedName = name.replace(/\s+/g, " ").toLowerCase();
+        agent = await db.queryOne(
+          `SELECT a.id, a.archived_at FROM agent_aliases al
+           JOIN agents a ON a.id = al.agent_id
+           WHERE al.alias_normalised = ?`,
+          [normalisedName]
+        );
+      }
+
+      // 3. Auto-create unknown device names, but flag them for administrator
+      // review so spelling changes cannot silently split one person's history.
+      if (!agent && name !== "Unknown Agent") {
+        console.log(`[API] Agent "${name}" not found. Auto-creating for review...`);
         try {
-          const result = await db.execute("INSERT INTO agents (name) VALUES (?)", [name]);
+          const result = await db.execute("INSERT INTO agents (name, needs_review) VALUES (?, TRUE)", [name]);
           agent = { id: result.lastInsertId };
         } catch (insertErr) {
           agent = await db.queryOne("SELECT id FROM agents WHERE name = ?", [name]);
@@ -400,13 +427,71 @@ async function startServer() {
     }
   });
 
+  app.get("/api/agents/needs-review", requireAdmin, async (_req, res) => {
+    try {
+      const agents = await db.queryAll(
+        `SELECT a.id, a.name, a.tag, a.needs_review, a.last_active_at,
+                COUNT(e.id)::int AS event_count
+         FROM agents a LEFT JOIN events e ON e.agent_id = a.id
+         WHERE a.needs_review = TRUE
+         GROUP BY a.id ORDER BY a.id DESC`
+      );
+      res.json(agents);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/agents/:id/keep-separate", requireAdmin, async (req, res) => {
+    const id = Number(req.params.id);
+    const tag = String(req.body?.tag || "Callback Team").trim() || "Callback Team";
+    if (!id) return res.status(400).json({ error: "Valid agent ID is required" });
+    await db.execute("UPDATE agents SET tag = ?, needs_review = FALSE WHERE id = ?", [tag, id]);
+    res.json({ success: true, tag });
+  });
+
+  app.post("/api/agents/:id/merge-into/:targetId", requireAdmin, async (req, res) => {
+    const sourceId = Number(req.params.id);
+    const targetId = Number(req.params.targetId);
+    if (!sourceId || !targetId || sourceId === targetId) {
+      return res.status(400).json({ error: "Different valid source and target agents are required" });
+    }
+    const source = await db.queryOne<{ id: number; name: string }>("SELECT id, name FROM agents WHERE id = ?", [sourceId]);
+    const target = await db.queryOne<{ id: number; name: string }>("SELECT id, name FROM agents WHERE id = ?", [targetId]);
+    if (!source || !target) return res.status(404).json({ error: "Agent not found" });
+    if (source.name === "Unknown Agent" || target.name === "Unknown Agent") {
+      return res.status(400).json({ error: "Unknown Agent cannot be merged" });
+    }
+    const client = await getPostgresPool().connect();
+    try {
+      await client.query('BEGIN');
+      await client.query("UPDATE events SET agent_id = $1 WHERE agent_id = $2", [targetId, sourceId]);
+      await client.query("UPDATE callback_jobs SET assigned_agent_id = $1 WHERE assigned_agent_id = $2", [targetId, sourceId]);
+      await client.query("UPDATE agent_aliases SET agent_id = $1 WHERE agent_id = $2", [targetId, sourceId]);
+      await client.query(
+        `INSERT INTO agent_aliases (alias_normalised, agent_id) VALUES ($1, $2)
+         ON CONFLICT (alias_normalised) DO UPDATE SET agent_id = EXCLUDED.agent_id`,
+        [source.name.trim().replace(/\s+/g, " ").toLowerCase(), targetId]
+      );
+      await client.query("DELETE FROM agents WHERE id = $1", [sourceId]);
+      await client.query('COMMIT');
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+    agentClients.delete(sourceId);
+    res.json({ success: true, source_id: sourceId, target_id: targetId });
+  });
+
   // Update Agent Tag
   app.post("/api/update-agent-tag", requireAdmin, async (req, res) => {
     const { id, tag } = req.body;
     if (!id || tag === undefined) return res.status(400).json({ error: "ID and Tag are required" });
 
     try {
-      await db.execute("UPDATE agents SET tag = ? WHERE id = ?", [tag, id]);
+      await db.execute("UPDATE agents SET tag = ?, needs_review = FALSE WHERE id = ?", [tag, id]);
       res.json({ success: true });
     } catch (err) {
       console.error(err);
@@ -1190,6 +1275,84 @@ function computeActivitySummary(events: any[], totalAgents: number = 0) {
     }
   });
 
+  app.get("/api/callback-jobs/unmatched-activity", requireAdmin, async (req, res) => {
+    try {
+      const days = Math.min(90, Math.max(1, Number(req.query.days || 14)));
+      const settings = await getCallbackSettings(db);
+      const events = await db.queryAll<any>(
+        `SELECT e.id, e.timestamp, e.agent_id, a.name AS agent_name, a.needs_review,
+                e.type, e.status, e.target_phone, e.reg_no
+         FROM events e JOIN agents a ON a.id = e.agent_id
+         WHERE (LOWER(TRIM(a.tag)) = LOWER(TRIM(?)) OR a.needs_review = TRUE)
+           AND a.archived_at IS NULL
+           AND e.timestamp >= CURRENT_TIMESTAMP - INTERVAL '${days} days'
+           AND ((e.type = 'CALL' AND UPPER(COALESCE(e.status, '')) = 'OUTGOING') OR e.type = 'SMS')
+         ORDER BY e.timestamp DESC`,
+        [settings.callback_team_tag]
+      );
+      const jobs = await db.queryAll<any>(
+        `SELECT j.id, j.vehicle_reg, j.vehicle_reg_raw, j.client_phone, j.assigned_agent_id,
+                a.name AS assigned_agent_name
+         FROM callback_jobs j LEFT JOIN agents a ON a.id = j.assigned_agent_id`
+      );
+      const phoneRows = await db.queryAll<{ callback_job_id: number; phone_normalised: string }>(
+        `SELECT callback_job_id, phone_normalised FROM callback_job_phones`
+      );
+      const phones = new Map<number, Set<string>>();
+      for (const job of jobs) phones.set(Number(job.id), new Set([normalizePhone(job.client_phone)]));
+      for (const row of phoneRows) {
+        const set = phones.get(Number(row.callback_job_id)) || new Set<string>();
+        set.add(normalizePhone(row.phone_normalised));
+        phones.set(Number(row.callback_job_id), set);
+      }
+      const result = events.flatMap((event: any) => {
+        const phone = normalizePhone(event.target_phone);
+        const reg = String(event.reg_no || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+        const possible = jobs.filter((job: any) =>
+          (phone && phones.get(Number(job.id))?.has(phone)) ||
+          (event.type === 'SMS' && reg && String(job.vehicle_reg || '').replace(/[^A-Z0-9]/g, '') === reg)
+        );
+        if (possible.some((job: any) => Number(job.assigned_agent_id) === Number(event.agent_id))) return [];
+        const suggested = possible[0] || null;
+        return [{
+          id: Number(event.id), timestamp: event.timestamp, agent_id: event.agent_id,
+          agent_name: event.agent_name, type: event.type, status: event.status,
+          target_phone: event.target_phone, reg_no: event.reg_no,
+          reason: event.needs_review ? 'UNRECOGNISED_AGENT' : suggested ? 'ASSIGNED_TO_OTHER_AGENT' : 'NO_JOB_FOR_NUMBER',
+          suggested_job: suggested ? {
+            id: Number(suggested.id), vehicle_reg: suggested.vehicle_reg_raw,
+            assigned_agent_id: suggested.assigned_agent_id,
+            assigned_agent_name: suggested.assigned_agent_name,
+          } : null,
+        }];
+      });
+      res.json(result);
+    } catch (err) {
+      console.error('[API] Unable to load unmatched callback activity:', err);
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get('/api/callback-jobs/historical-reopen/preview', requireAdmin, async (_req, res) => {
+    try {
+      const records = await previewHistoricalClosureReopen(db);
+      res.json({ count: records.length, records });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post('/api/callback-jobs/historical-reopen/apply', requireAdmin, async (req, res) => {
+    if (req.body?.confirmation !== 'REOPEN REVIEWED RECORDS') {
+      return res.status(400).json({ error: 'Exact confirmation phrase is required.' });
+    }
+    try {
+      res.json(await applyHistoricalClosureReopen(db));
+    } catch (err) {
+      res.status(409).json({ error: (err as Error).message });
+    }
+  });
+
   // PATCH /api/callback-jobs/:id/status
   app.patch("/api/callback-jobs/:id/status", requireAdmin, async (req, res) => {
     try {
@@ -1417,6 +1580,24 @@ function computeActivitySummary(events: any[], totalAgents: number = 0) {
       await closeMaturedCallbackJobs(db);
     } catch (err) {
       console.error("[Background] Error closing matured callback jobs:", err);
+    }
+  }, 60 * 1000);
+
+  // Check every minute, but send at most once for each Nairobi reporting day.
+  // No historical data is changed by this scheduler.
+  setInterval(async () => {
+    try {
+      const now = new Date(Date.now() + 3 * 60 * 60 * 1000);
+      if (now.getUTCHours() !== 8) return;
+      const settings = await getSystemSettings(db);
+      if (!settings.daily_summary_enabled || !settings.daily_summary_recipients.length) return;
+      const targetDate = getNairobiDate(-1);
+      if (settings.daily_summary_last_sent_date === targetDate) return;
+      await generateAndSendDailySummary(db, { targetDate });
+      await updateDailySummaryLastSentDate(db, targetDate);
+      console.log(`[Daily Summary] Sent report for ${targetDate}.`);
+    } catch (err) {
+      console.error('[Daily Summary] Send failed:', err);
     }
   }, 60 * 1000);
 }

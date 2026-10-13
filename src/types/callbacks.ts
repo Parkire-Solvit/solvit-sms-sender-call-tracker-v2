@@ -51,6 +51,7 @@ export interface CallbackJob {
   sms_sent?: boolean;
   last_attempt_at: string | null;
   max_attempts: number;
+  max_sms_attempts: number;
 }
 
 export interface LogOutcomePayload {
@@ -110,10 +111,38 @@ export interface CallbackSettings {
   staff_count: number;
   callback_team_tag: string;
   max_attempts: number;
+  max_sms_attempts: number;
   disappearance_alert_fixed_count?: number;
   disappearance_alert_percentage?: number;
   active_agents?: Array<{ id: number; name: string }>;
   updated_at?: string;
+}
+
+export interface AgentNeedingReview {
+  id: number;
+  name: string;
+  tag: string | null;
+  needs_review: boolean;
+  last_active_at: string | null;
+  event_count: number;
+}
+
+export interface UnmatchedActivity {
+  id: number;
+  timestamp: string;
+  agent_id: number | null;
+  agent_name: string;
+  type: string;
+  status: string | null;
+  target_phone: string;
+  reg_no: string | null;
+  reason: 'NO_JOB_FOR_NUMBER' | 'ASSIGNED_TO_OTHER_AGENT' | 'UNRECOGNISED_AGENT';
+  suggested_job: {
+    id: number;
+    vehicle_reg: string;
+    assigned_agent_id: number | null;
+    assigned_agent_name: string | null;
+  } | null;
 }
 
 export interface CallbackImportSummary {

@@ -59,6 +59,7 @@ export const MasterSettingsModal: React.FC<MasterSettingsModalProps> = ({
     staff_count: 2,
     callback_team_tag: 'Callback Team',
     max_attempts: 4,
+    max_sms_attempts: 4,
     disappearance_alert_fixed_count: 50,
     disappearance_alert_percentage: 30,
   });
@@ -67,6 +68,7 @@ export const MasterSettingsModal: React.FC<MasterSettingsModalProps> = ({
   const [saving, setSaving] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [testingSummary, setTestingSummary] = useState(false);
 
   // Team Accounts (Users) state
   const [users, setUsers] = useState<UserAccount[]>([]);
@@ -317,6 +319,7 @@ export const MasterSettingsModal: React.FC<MasterSettingsModalProps> = ({
             staff_count: callbackSettings.staff_count,
             callback_team_tag: callbackSettings.callback_team_tag,
             max_attempts: callbackSettings.max_attempts,
+            max_sms_attempts: callbackSettings.max_sms_attempts,
             disappearance_alert_fixed_count: callbackSettings.disappearance_alert_fixed_count,
             disappearance_alert_percentage: callbackSettings.disappearance_alert_percentage,
           }),
@@ -343,6 +346,25 @@ export const MasterSettingsModal: React.FC<MasterSettingsModalProps> = ({
   const handleResetDefaults = () => {
     if (confirm('Are you sure you want to reset all compliance settings to system defaults?')) {
       setSettings(DEFAULT_SETTINGS);
+    }
+  };
+
+  const handleTestDailySummary = async () => {
+    setTestingSummary(true);
+    setSaveError(null);
+    try {
+      const response = await fetch('/api/daily-summary/send-test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ recipients: settings.daily_summary_recipients }),
+      });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.error || 'Test email failed');
+      setSaveSuccess(true);
+    } catch (err) {
+      setSaveError((err as Error).message);
+    } finally {
+      setTestingSummary(false);
     }
   };
 
@@ -641,6 +663,25 @@ export const MasterSettingsModal: React.FC<MasterSettingsModalProps> = ({
                       <Info className="w-3.5 h-3.5 text-slate-400 flex-shrink-0" />
                       <span>Set to 0 if any connection status counts. If set to e.g. 10s, accidental 1-second pick-and-drops will not clear obligations.</span>
                     </div>
+                  </div>
+
+                  <div className="p-5 rounded-xl border border-slate-200 bg-white shadow-xs space-y-4">
+                    <div className="flex items-center justify-between gap-4">
+                      <div className="flex items-center gap-2.5"><Mail className="w-4 h-4 text-indigo-600" /><div><h3 className="text-sm font-bold text-slate-900">Daily Communication Summary</h3><p className="text-xs text-slate-500">Send the previous day’s activity at 8:00 AM Nairobi time.</p></div></div>
+                      <label className="flex items-center gap-2 text-xs font-bold"><input type="checkbox" checked={settings.daily_summary_enabled} onChange={(e) => setSettings({ ...settings, daily_summary_enabled: e.target.checked })} /> Enabled</label>
+                    </div>
+                    <div>
+                      <label className="block text-xs font-bold text-slate-700 mb-1">Recipients</label>
+                      <input
+                        type="text"
+                        value={settings.daily_summary_recipients.join(', ')}
+                        onChange={(e) => setSettings({ ...settings, daily_summary_recipients: e.target.value.split(',').map((value) => value.trim()).filter(Boolean) })}
+                        placeholder="manager@solvit.co.ke, supervisor@solvit.co.ke"
+                        className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm"
+                      />
+                    </div>
+                    <button type="button" onClick={handleTestDailySummary} disabled={testingSummary || !settings.daily_summary_recipients.length} className="px-3 py-2 rounded-lg border text-xs font-bold disabled:opacity-40 flex items-center gap-2"><Send className="w-3.5 h-3.5" />{testingSummary ? 'Sending…' : 'Send test summary'}</button>
+                    <p className="text-[11px] text-slate-500">The mail password is never stored here. Configure GMAIL_USER and GMAIL_APP_PASSWORD securely on Render.</p>
                   </div>
                 </div>
               )}
@@ -999,6 +1040,32 @@ export const MasterSettingsModal: React.FC<MasterSettingsModalProps> = ({
                     <div className="text-[11px] text-slate-500 bg-slate-50 p-2.5 rounded-lg flex items-center gap-2">
                       <Info className="w-3.5 h-3.5 text-slate-400 flex-shrink-0" />
                       <span>Default is 4. When attempt count reaches or exceeds this number, a visual flag prompts the staff member to close the record, but never changes status automatically.</span>
+                    </div>
+                  </div>
+
+                  <div className="p-5 rounded-xl border border-slate-200 bg-white shadow-xs space-y-3">
+                    <div className="flex items-center justify-between gap-4">
+                      <div>
+                        <h3 className="text-sm font-bold text-slate-900">Minimum SMS Attempts</h3>
+                        <p className="text-xs text-slate-500">
+                          Automatic maximum-attempt closure requires both the call and SMS minimums.
+                        </p>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <input
+                          id="input-max-sms-attempts"
+                          type="number"
+                          min="1"
+                          max="20"
+                          value={callbackSettings.max_sms_attempts ?? 4}
+                          onChange={(e) => setCallbackSettings({
+                            ...callbackSettings,
+                            max_sms_attempts: Math.max(1, Math.min(20, parseInt(e.target.value) || 1)),
+                          })}
+                          className="w-20 px-3 py-1.5 text-right font-mono font-bold text-slate-900 border border-slate-300 rounded-lg text-sm"
+                        />
+                        <span className="text-xs font-semibold text-slate-500">SMS</span>
+                      </div>
                     </div>
                   </div>
 
