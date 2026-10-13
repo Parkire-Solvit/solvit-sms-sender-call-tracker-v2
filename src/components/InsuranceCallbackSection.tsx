@@ -32,7 +32,10 @@ import {
   FileText,
   Download,
   History,
-  HelpCircle
+  HelpCircle,
+  AlertTriangle,
+  Activity,
+  RotateCcw
 } from 'lucide-react';
 import {
   CallbackJob,
@@ -219,8 +222,18 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
   const [tempMaxSmsAttempts, setTempMaxSmsAttempts] = useState(4);
   const [isSavingSettings, setIsSavingSettings] = useState(false);
   const [settingsSuccess, setSettingsSuccess] = useState(false);
-  const [showAgentReview, setShowAgentReview] = useState(false);
-  const [showUnmatchedActivity, setShowUnmatchedActivity] = useState(false);
+  const [isDownloadingReopenReport, setIsDownloadingReopenReport] = useState(false);
+  const [reopenReportMsg, setReopenReportMsg] = useState<{ type: 'error' | 'success'; text: string } | null>(null);
+
+  const isAdmin =
+    typeof window !== 'undefined' &&
+    (!!localStorage.getItem('solvit_admin_token') || !!localStorage.getItem('nellions_admin_token'));
+
+  // Review Agents & Unmatched Activity modals state
+  const [isReviewAgentsOpen, setIsReviewAgentsOpen] = useState(false);
+  const [isUnmatchedActivityOpen, setIsUnmatchedActivityOpen] = useState(false);
+  const [needsReviewCount, setNeedsReviewCount] = useState(0);
+  const [unmatchedCount, setUnmatchedCount] = useState(0);
 
   // Outcome Logging Modal State
   const [outcomeJob, setOutcomeJob] = useState<CallbackJob | null>(null);
@@ -285,6 +298,14 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
   const [reportData, setReportData] = useState<MaxAttemptsReportGroup[]>([]);
   const [loadingReport, setLoadingReport] = useState(false);
   const [reportError, setReportError] = useState<string | null>(null);
+  const [reportAgentFilter, setReportAgentFilter] = useState<string>('ALL');
+  const [reportPartnerFilter, setReportPartnerFilter] = useState<string>('ALL');
+
+  // Bulk assignment in Unassigned filter view
+  const [selectedUnassignedJobIds, setSelectedUnassignedJobIds] = useState<Set<number>>(new Set());
+  const [bulkTargetAgentId, setBulkTargetAgentId] = useState<string>('');
+  const [isBulkAssigning, setIsBulkAssigning] = useState<boolean>(false);
+  const [bulkMessage, setBulkMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
   // Quick clipboard state
   const [copiedPhone, setCopiedPhone] = useState<string | null>(null);
@@ -626,11 +647,53 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
         setTempMaxAttempts(dataSettings.max_attempts);
         setTempMaxSmsAttempts(dataSettings.max_sms_attempts ?? 4);
       }
+      fetchReviewAndUnmatchedCounts();
     } catch (err) {
       setError((err as Error).message);
     } finally {
       setRefreshing(false);
       setLoading(false);
+    }
+  };
+
+  const fetchReviewAndUnmatchedCounts = async () => {
+    try {
+      const [reviewRes, unmatchedRes] = await Promise.all([
+        fetch('/api/agents/needs-review'),
+        fetch('/api/callback-jobs/unmatched-activity?days=14')
+      ]);
+      if (reviewRes.ok) {
+        const reviewData = await reviewRes.json();
+        setNeedsReviewCount(Array.isArray(reviewData) ? reviewData.length : 0);
+      }
+      if (unmatchedRes.ok) {
+        const unmatchedData = await unmatchedRes.json();
+        setUnmatchedCount(Array.isArray(unmatchedData) ? unmatchedData.length : 0);
+      }
+    } catch (_) {}
+  };
+
+  const handleAssignJob = async (jobId: number, agentId: number | null) => {
+    try {
+      const res = await fetch(`/api/callback-jobs/${jobId}/assign`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ agent_id: agentId, apply_to_client: true }),
+      });
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        alert(errData.error || 'Failed to reassign vehicle');
+        return;
+      }
+      const updated: CallbackJob = await res.json();
+      setJobs((prev) =>
+        prev.map((j) => (j.id === updated.id ? { ...j, ...updated } : j))
+      );
+      fetchJobs();
+      fetchReviewAndUnmatchedCounts();
+    } catch (err: any) {
+      console.error('Error assigning callback job:', err);
+      alert('Error updating assignment: ' + err.message);
     }
   };
 
@@ -718,6 +781,8 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
     setIsReportOpen(true);
     setLoadingReport(true);
     setReportError(null);
+    setReportAgentFilter('ALL');
+    setReportPartnerFilter('ALL');
     try {
       const res = await fetch('/api/callback-jobs/max-attempts-report');
       if (!res.ok) throw new Error('Failed to load max-attempts report.');
@@ -730,15 +795,233 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
     }
   };
 
-  // Export Max Attempts Report to Excel directly using XLSX
-  const handleExportMaxAttemptsReportToExcel = (partner?: string) => {
-    try {
-      const filteredGroups = partner && partner !== 'ALL'
-        ? reportData.filter((g) => g.channel_partner.toLowerCase() === partner.toLowerCase())
-        : reportData;
+  // Derived values for Max Attempts modal
+  const agentOptions = useMemo(() => {
+    const agentMap = new Map<string, { id: string; name: string; count: number }>();
+    let unallocatedCount = 0;
+    let hasUnallocatedGroup = false;
 
-      const rows: any[] = [];
-      for (const group of filteredGroups) {
+    for (const g of reportData) {
+      if (g.allocated_agent_id !== null && g.allocated_agent_id !== undefined) {
+        const idKey = String(g.allocated_agent_id);
+        const existing = agentMap.get(idKey);
+        if (existing) {
+          existing.count += g.records.length;
+        } else {
+          agentMap.set(idKey, {
+            id: idKey,
+            name: g.allocated_agent_name || 'Agent',
+            count: g.records.length,
+          });
+        }
+      } else {
+        hasUnallocatedGroup = true;
+        unallocatedCount += g.records.length;
+      }
+    }
+
+    const sortedAgents = Array.from(agentMap.values()).sort((a, b) => a.name.localeCompare(b.name));
+    const options: Array<{ value: string; label: string; name?: string }> = [
+      { value: 'ALL', label: 'All agents' },
+      ...sortedAgents.map((a) => ({
+        value: a.id,
+        label: `${a.name} (${a.count})`,
+        name: a.name,
+      })),
+    ];
+
+    if (hasUnallocatedGroup) {
+      options.push({
+        value: 'UNALLOCATED',
+        label: `Unallocated partners (${unallocatedCount})`,
+      });
+    }
+
+    return options;
+  }, [reportData]);
+
+  const groupsForAgent = useMemo(() => {
+    if (reportAgentFilter === 'ALL') return reportData;
+    if (reportAgentFilter === 'UNALLOCATED') {
+      return reportData.filter((g) => g.allocated_agent_id === null || g.allocated_agent_id === undefined);
+    }
+    return reportData.filter((g) => String(g.allocated_agent_id) === reportAgentFilter);
+  }, [reportData, reportAgentFilter]);
+
+  const partnerOptions = useMemo(() => {
+    const sorted = [...groupsForAgent].sort((a, b) => a.channel_partner.localeCompare(b.channel_partner));
+    return [
+      { value: 'ALL', label: 'All channel partners' },
+      ...sorted.map((g) => ({
+        value: g.channel_partner,
+        label: `${g.channel_partner} (${g.records.length})`,
+      })),
+    ];
+  }, [groupsForAgent]);
+
+  // When agent selection changes and current partner is not in new partnerOptions, reset to 'ALL'
+  useEffect(() => {
+    if (reportPartnerFilter !== 'ALL') {
+      const exists = partnerOptions.some((opt) => opt.value === reportPartnerFilter);
+      if (!exists) {
+        setReportPartnerFilter('ALL');
+      }
+    }
+  }, [reportAgentFilter, partnerOptions, reportPartnerFilter]);
+
+  const visibleGroups = useMemo(() => {
+    if (reportPartnerFilter === 'ALL') return groupsForAgent;
+    return groupsForAgent.filter((g) => g.channel_partner === reportPartnerFilter);
+  }, [groupsForAgent, reportPartnerFilter]);
+
+  const allUnassignedCount = useMemo(() => {
+    return jobs.filter((j) => !j.assigned_agent_id && !j.assigned_agent_name).length;
+  }, [jobs]);
+
+  const totalReportRecords = useMemo(() => {
+    return reportData.reduce((acc, g) => acc + g.records.length, 0);
+  }, [reportData]);
+
+  const visibleRecordCount = useMemo(() => {
+    return visibleGroups.reduce((acc, g) => acc + g.records.length, 0);
+  }, [visibleGroups]);
+
+  const isReportFiltered = reportAgentFilter !== 'ALL' || reportPartnerFilter !== 'ALL';
+
+  const getDownloadButtonLabel = () => {
+    if (reportPartnerFilter !== 'ALL') {
+      return `Download ${reportPartnerFilter}`;
+    }
+    if (reportAgentFilter !== 'ALL') {
+      const opt = agentOptions.find((o) => o.value === reportAgentFilter);
+      const agentName = reportAgentFilter === 'UNALLOCATED' ? 'Unallocated' : (opt?.name || 'Agent');
+      return `Download ${agentName} records`;
+    }
+    return 'Download Excel Report';
+  };
+
+  // Bulk assignment action handler
+  const handleBulkAssign = async (mode: 'SELECTED' | 'ALL') => {
+    if (!bulkTargetAgentId) {
+      setBulkMessage({ type: 'error', text: 'Please select a callback team agent first.' });
+      return;
+    }
+    const agentId = Number(bulkTargetAgentId);
+    const targetAgent = callbackAgents.find((a) => a.id === agentId);
+    const agentName = targetAgent?.name || 'Agent';
+
+    const allUnassignedIds = jobs
+      .filter((j) => !j.assigned_agent_id && !j.assigned_agent_name)
+      .map((j) => j.id);
+    const idsToAssign = mode === 'ALL' ? allUnassignedIds : Array.from(selectedUnassignedJobIds);
+
+    if (idsToAssign.length === 0) {
+      setBulkMessage({ type: 'error', text: 'No unassigned records to assign.' });
+      return;
+    }
+
+    setIsBulkAssigning(true);
+    setBulkMessage(null);
+    try {
+      const res = await fetch('/api/callback-jobs/assign-bulk', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids: idsToAssign, agent_id: agentId }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || 'Failed to bulk assign jobs');
+      }
+      setBulkMessage({
+        type: 'success',
+        text: `Successfully assigned ${idsToAssign.length} vehicle(s) to ${agentName}.`,
+      });
+      setSelectedUnassignedJobIds(new Set());
+      await fetchJobs();
+    } catch (err: any) {
+      setBulkMessage({ type: 'error', text: err.message || 'Error bulk assigning jobs' });
+    } finally {
+      setIsBulkAssigning(false);
+    }
+  };
+
+  // Export Max Attempts Report to Excel directly using XLSX with per-partner sheets
+  const handleExportMaxAttemptsReportToExcel = (groupsToExport?: MaxAttemptsReportGroup[], exportPartnerName?: string) => {
+    try {
+      const targetGroups = groupsToExport || visibleGroups;
+      if (!targetGroups || targetGroups.length === 0) return;
+
+      const wb = XLSX.utils.book_new();
+
+      // Sheet 1: Summary - one row per client phone with maximum counts per phone
+      type SummaryRow = {
+        clientName: string;
+        clientPhone: string;
+        channelPartners: Set<string>;
+        vehicles: Set<string>;
+        allocatedAgents: Set<string>;
+        outgoingCallsMax: number;
+        smsSentMax: number;
+      };
+
+      const summaryByPhone = new Map<string, SummaryRow>();
+
+      for (const group of targetGroups) {
+        const allocName = group.allocated_agent_name || 'Unallocated';
+        for (const record of group.records) {
+          const phone = record.client_phone_raw;
+          let entry = summaryByPhone.get(phone);
+          if (!entry) {
+            entry = {
+              clientName: record.client_name || 'N/A',
+              clientPhone: phone,
+              channelPartners: new Set(),
+              vehicles: new Set(),
+              allocatedAgents: new Set(),
+              outgoingCallsMax: 0,
+              smsSentMax: 0,
+            };
+            summaryByPhone.set(phone, entry);
+          }
+          entry.channelPartners.add(group.channel_partner);
+          entry.vehicles.add(record.vehicle_reg_raw);
+          entry.allocatedAgents.add(allocName);
+
+          const calls = Number(record.outgoing_calls_count || 0);
+          const sms = Number(record.sms_count || 0);
+          entry.outgoingCallsMax = Math.max(entry.outgoingCallsMax, calls);
+          entry.smsSentMax = Math.max(entry.smsSentMax, sms);
+        }
+      }
+
+      const summaryRows = [...summaryByPhone.values()].map((e) => ({
+        'Client Name': e.clientName,
+        'Client Phone': e.clientPhone,
+        'Channel Partner(s)': [...e.channelPartners].join(', '),
+        'Vehicles': [...e.vehicles].join(', '),
+        'Vehicle Count': e.vehicles.size,
+        'Allocated Agent': [...e.allocatedAgents].join(', ') || 'Unallocated',
+        'Outgoing Calls': e.outgoingCallsMax,
+        'SMS Sent': e.smsSentMax,
+      }));
+
+      const wsSummary = XLSX.utils.json_to_sheet(summaryRows);
+      wsSummary['!cols'] = [
+        { wch: 22 },
+        { wch: 16 },
+        { wch: 26 },
+        { wch: 24 },
+        { wch: 14 },
+        { wch: 20 },
+        { wch: 24 },
+        { wch: 18 },
+      ];
+      XLSX.utils.book_append_sheet(wb, wsSummary, 'Summary');
+
+      // Helper function to build rows for a group
+      const buildRowsForGroup = (group: MaxAttemptsReportGroup) => {
+        const rows: any[] = [];
+        const allocAgent = group.allocated_agent_name || 'Unallocated';
         for (const rec of group.records) {
           const entries = rec.chronology && rec.chronology.length > 0
             ? rec.chronology
@@ -749,6 +1032,7 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
                 comment: a.comment,
                 logged_by: a.logged_by,
                 logged_by_phone: null,
+                counted: false,
               }));
 
           if (entries.length === 0) {
@@ -763,11 +1047,14 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
               'Notes': '',
               'Agent Name': '',
               'Agent Phone': '',
+              'Allocated Agent': allocAgent,
+              'Counted Towards Max Attempts': 'No',
             });
           } else {
             for (const item of entries) {
               const statusOutcome = item.kind === 'OUTCOME' ? item.outcome : item.status;
               const notes = item.kind === 'OUTCOME' ? item.comment : (item.kind === 'SMS' ? item.note : '');
+              const isCounted = item.counted === true || (item.kind === 'SMS') || (item.kind === 'CALL' && String(item.status || '').toUpperCase() === 'OUTGOING');
               rows.push({
                 'Vehicle Registration': rec.vehicle_reg_raw,
                 'Client Name': rec.client_name || 'N/A',
@@ -779,71 +1066,97 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
                 'Notes': notes || '',
                 'Agent Name': item.logged_by || '',
                 'Agent Phone': item.logged_by_phone || '',
+                'Allocated Agent': allocAgent,
+                'Counted Towards Max Attempts': isCounted ? 'Yes' : 'No',
               });
             }
           }
         }
-      }
-
-      const wb = XLSX.utils.book_new();
-      const wsRaw = XLSX.utils.json_to_sheet(rows);
-      XLSX.utils.book_append_sheet(wb, wsRaw, 'Raw Data');
-
-      // Sheet 2: Summary - deduplicated by timestamp|kind|status/outcome per client phone
-      type SummaryRow = {
-        clientName: string;
-        clientPhone: string;
-        channelPartners: Set<string>;
-        vehicles: Set<string>;
-        agent: string;
-        callKeys: Set<string>;
-        smsKeys: Set<string>;
+        return rows;
       };
 
-      const summaryByPhone = new Map<string, SummaryRow>();
+      const rawCols = [
+        { wch: 20 },
+        { wch: 22 },
+        { wch: 16 },
+        { wch: 24 },
+        { wch: 20 },
+        { wch: 10 },
+        { wch: 22 },
+        { wch: 30 },
+        { wch: 20 },
+        { wch: 16 },
+        { wch: 20 },
+        { wch: 28 },
+      ];
 
-      for (const group of filteredGroups) {
-        for (const record of group.records) {
-          const phone = record.client_phone_raw;
-          let entry = summaryByPhone.get(phone);
-          if (!entry) {
-            entry = {
-              clientName: record.client_name || 'N/A',
-              clientPhone: phone,
-              channelPartners: new Set(),
-              vehicles: new Set(),
-              agent: (record as any).assigned_agent_name || 'Unassigned',
-              callKeys: new Set(),
-              smsKeys: new Set(),
-            };
-            summaryByPhone.set(phone, entry);
-          }
-          entry.channelPartners.add(group.channel_partner);
-          entry.vehicles.add(record.vehicle_reg_raw);
-          for (const chrono of record.chronology || []) {
-            const dedupeKey = `${chrono.timestamp}|${chrono.kind}|${'status' in chrono ? chrono.status : (chrono as any).outcome}`;
-            if (chrono.kind === 'CALL') entry.callKeys.add(dedupeKey);
-            if (chrono.kind === 'SMS') entry.smsKeys.add(dedupeKey);
-          }
+      // Sheet name sanitizer
+      const usedSheetNames = new Set<string>(['summary', 'raw data']);
+      const sanitizeSheetName = (rawName: string): string => {
+        let name = rawName.replace(/[\[\]:*?/\\]/g, '-').trim();
+        if (!name) name = 'Partner';
+        if (name.toLowerCase() === 'summary' || name.toLowerCase() === 'raw data') {
+          name = `${name}-Partner`;
         }
+        if (name.length > 31) name = name.slice(0, 31).trim();
+
+        if (!usedSheetNames.has(name.toLowerCase())) {
+          usedSheetNames.add(name.toLowerCase());
+          return name;
+        }
+
+        let counter = 2;
+        while (true) {
+          const suffix = ` (${counter})`;
+          const maxBase = 31 - suffix.length;
+          const base = name.slice(0, maxBase).trim();
+          const candidate = `${base}${suffix}`;
+          if (!usedSheetNames.has(candidate.toLowerCase())) {
+            usedSheetNames.add(candidate.toLowerCase());
+            return candidate;
+          }
+          counter++;
+        }
+      };
+
+      // Then one sheet per channel partner in alphabetical order
+      const sortedPartners = [...targetGroups].sort((a, b) => a.channel_partner.localeCompare(b.channel_partner));
+      const allRawRows: any[] = [];
+
+      for (const group of sortedPartners) {
+        const groupRows = buildRowsForGroup(group);
+        allRawRows.push(...groupRows);
+        const wsPartner = XLSX.utils.json_to_sheet(groupRows);
+        wsPartner['!cols'] = rawCols;
+        const validSheetName = sanitizeSheetName(group.channel_partner);
+        XLSX.utils.book_append_sheet(wb, wsPartner, validSheetName);
       }
 
-      const summaryRows = [...summaryByPhone.values()].map((e) => ({
-        'Client Name': e.clientName,
-        'Client Phone': e.clientPhone,
-        'Channel Partner(s)': [...e.channelPartners].join(', '),
-        'Vehicles': [...e.vehicles].join(', '),
-        'Vehicle Count': e.vehicles.size,
-        'Assigned Agent': e.agent,
-        'Total Contact Attempts': e.callKeys.size,
-        'Total SMSs Sent': e.smsKeys.size,
-      }));
+      // Last sheet "Raw Data": all rows combined
+      const wsRaw = XLSX.utils.json_to_sheet(allRawRows);
+      wsRaw['!cols'] = rawCols;
+      XLSX.utils.book_append_sheet(wb, wsRaw, 'Raw Data');
 
-      const wsSummary = XLSX.utils.json_to_sheet(summaryRows);
-      XLSX.utils.book_append_sheet(wb, wsSummary, 'Summary');
+      // Compute file name: max_attempts_report_<agent or all>_<partner or all>_<YYYY-MM-DD>.xlsx
+      const cleanPart = (s: string) => s.trim().toLowerCase().replace(/[^a-z0-9_-]+/g, '_') || 'all';
+      let agentPart = 'all';
+      if (reportAgentFilter !== 'ALL') {
+        if (reportAgentFilter === 'UNALLOCATED') {
+          agentPart = 'unallocated';
+        } else {
+          const opt = agentOptions.find((o) => o.value === reportAgentFilter);
+          agentPart = cleanPart(opt?.name || reportAgentFilter);
+        }
+      }
+      let partnerPart = 'all';
+      if (exportPartnerName) {
+        partnerPart = cleanPart(exportPartnerName);
+      } else if (reportPartnerFilter !== 'ALL') {
+        partnerPart = cleanPart(reportPartnerFilter);
+      }
+      const todayStr = new Date().toISOString().split('T')[0];
+      const filename = `max_attempts_report_${agentPart}_${partnerPart}_${todayStr}.xlsx`;
 
-      const safePartner = partner && partner !== 'ALL' ? `_${partner.replace(/[^a-zA-Z0-9_-]/g, '_')}` : '';
-      const filename = `max_attempts_report${safePartner}_${new Date().toISOString().split('T')[0]}.xlsx`;
       XLSX.writeFile(wb, filename);
     } catch (err) {
       console.error('Error generating Max Attempts Excel:', err);
@@ -878,6 +1191,44 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
       alert(`Error: ${(err as Error).message}`);
     } finally {
       setIsSavingSettings(false);
+    }
+  };
+
+  // Download one-time closure reopen report
+  const handleDownloadReopenReport = async () => {
+    try {
+      setIsDownloadingReopenReport(true);
+      setReopenReportMsg(null);
+      const res = await fetch('/api/callback-jobs/one-time-reopen/report');
+      if (!res.ok) {
+        if (res.status === 404) {
+          const errData = await res.json().catch(() => ({}));
+          setReopenReportMsg({
+            type: 'error',
+            text: errData.error || 'The one-time closure reopen job has not run yet.',
+          });
+          return;
+        }
+        throw new Error(`Failed to download report (${res.status})`);
+      }
+      const blob = await res.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `one_time_reopen_report_${new Date().toISOString().split('T')[0]}.xlsx`;
+      document.body.appendChild(a);
+      a.click();
+      window.URL.revokeObjectURL(url);
+      document.body.removeChild(a);
+      setReopenReportMsg({ type: 'success', text: 'Report downloaded successfully.' });
+    } catch (err) {
+      console.error('Failed to download reopen report:', err);
+      setReopenReportMsg({
+        type: 'error',
+        text: 'Failed to download report: ' + (err as Error).message,
+      });
+    } finally {
+      setIsDownloadingReopenReport(false);
     }
   };
 
@@ -1192,13 +1543,15 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
 
   // Total max attempts reached records
   const totalMaxAttemptsCount = useMemo(() => {
-    return jobs.filter(
-      (j) =>
+    return jobs.filter((j) => {
+      const callsLimit = j.max_attempts || settings?.max_attempts || 4;
+      const smsLimit = j.max_sms_attempts || settings?.max_sms_attempts || 4;
+      return (
         j.latest_outcome === 'MAX_ATTEMPTS_REACHED' ||
-        (j.attempt_count >= (j.max_attempts || 4) &&
-          j.sms_count >= (j.max_sms_attempts || 4) && j.status === 'RED')
-    ).length;
-  }, [jobs]);
+        (j.status === 'RED' && (j.attempt_count || 0) >= callsLimit && (j.sms_count || 0) >= smsLimit)
+      );
+    }).length;
+  }, [jobs, settings]);
 
   // Filtered jobs
   const filteredJobs = useMemo(() => {
@@ -1233,6 +1586,10 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
       return true;
     });
   }, [jobs, selectedPartner, selectedStatus, selectedAgent, searchTerm]);
+
+  const visibleUnassignedJobs = useMemo(() => {
+    return filteredJobs.filter((j) => !j.assigned_agent_id && !j.assigned_agent_name);
+  }, [filteredJobs]);
 
   // Grouping: by channel_partner, then by client_phone
   const groupedData = useMemo(() => {
@@ -1441,19 +1798,13 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
                 </span>
               </div>
               <p className="text-xs text-slate-500 mt-1 max-w-2xl">
-                Daily callbacks for pending vehicle valuations. Outcome logging is required per contact attempt: records go Green only when scheduled, stay Amber with notes, and automatically close Red when max attempts are reached.
+                Daily callbacks for pending vehicle valuations. Outcome logging is required per contact attempt: records go Green only when scheduled, stay Amber (notes are optional), and automatically close Red when max attempts are reached.
               </p>
             </div>
           </div>
 
           <div className="flex items-center gap-2.5 flex-wrap sm:flex-nowrap">
             {/* Max Attempts Report Button */}
-            <button onClick={() => setShowAgentReview(true)} className="px-3 py-2 border border-amber-200 bg-amber-50 text-amber-800 rounded-xl text-xs font-bold">
-              Review agent names
-            </button>
-            <button onClick={() => setShowUnmatchedActivity(true)} className="px-3 py-2 border border-indigo-200 bg-indigo-50 text-indigo-800 rounded-xl text-xs font-bold">
-              Unmatched activity
-            </button>
             <button
               id="btn-open-max-attempts-report"
               onClick={openMaxAttemptsReport}
@@ -1465,6 +1816,22 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
               {totalMaxAttemptsCount > 0 && (
                 <span className="px-1.5 py-0.2 rounded-full text-[10px] font-mono font-bold bg-red-100 text-red-700">
                   {totalMaxAttemptsCount}
+                </span>
+              )}
+            </button>
+
+            {/* Unmatched Activity Button */}
+            <button
+              id="btn-open-unmatched-activity"
+              onClick={() => setIsUnmatchedActivityOpen(true)}
+              className="px-3.5 py-2 rounded-xl text-xs font-bold border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 transition-all flex items-center gap-1.5 shadow-2xs cursor-pointer"
+              title="View call and SMS events that did not match any callback job"
+            >
+              <Activity className="w-3.5 h-3.5 text-blue-600" />
+              <span>Unmatched Activity</span>
+              {unmatchedCount > 0 && (
+                <span className="px-1.5 py-0.2 rounded-full text-[10px] font-mono font-bold bg-blue-100 text-blue-700">
+                  {unmatchedCount}
                 </span>
               )}
             </button>
@@ -1502,6 +1869,34 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
             </button>
           </div>
         </div>
+
+        {/* Unrecognised Agent Names Notice Banner */}
+        {needsReviewCount > 0 && (
+          <div
+            onClick={() => setIsReviewAgentsOpen(true)}
+            className="mt-4 p-3.5 bg-amber-50 border border-amber-200 rounded-2xl flex items-center justify-between gap-3 cursor-pointer hover:bg-amber-100/80 transition-all text-amber-950 shadow-2xs"
+          >
+            <div className="flex items-center gap-2.5">
+              <div className="p-1.5 rounded-lg bg-amber-100 text-amber-700">
+                <AlertTriangle className="w-4 h-4" />
+              </div>
+              <div>
+                <span className="text-xs font-black">
+                  {needsReviewCount} unrecognised agent {needsReviewCount === 1 ? 'name needs' : 'names need'} review
+                </span>
+                <span className="text-[11px] text-amber-800 ml-1.5 hidden sm:inline">
+                  Unrecognised agent names from Android app logs need merge or confirmation.
+                </span>
+              </div>
+            </div>
+            <button
+              type="button"
+              className="px-3 py-1 rounded-xl bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold transition-colors cursor-pointer shrink-0 shadow-2xs"
+            >
+              Review Names &rarr;
+            </button>
+          </div>
+        )}
 
         {/* Callback Agent Filter Bar */}
         <div className="mt-5 pt-4 border-t border-slate-100">
@@ -1723,13 +2118,6 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
           </div>
         </div>
       </div>
-      <AgentReviewModal
-        isOpen={showAgentReview}
-        onClose={() => setShowAgentReview(false)}
-        allAgents={allAgents || []}
-        onChanged={fetchJobs}
-      />
-      <UnmatchedActivityModal isOpen={showUnmatchedActivity} onClose={() => setShowUnmatchedActivity(false)} />
 
       {/* Upload Success Banner */}
       {uploadSummary && (
@@ -1889,6 +2277,118 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
         </div>
       ) : (
         <div className="space-y-5">
+          {/* Bulk Assignment Bar in Unassigned filter view */}
+          {selectedAgent === '__unassigned__' && (
+            <div className="bg-white rounded-2xl p-4 border border-amber-200 shadow-xs space-y-3">
+              <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
+                {/* Left: Select all checkbox & selection count */}
+                <div className="flex items-center gap-3">
+                  <label className="flex items-center gap-2 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={
+                        visibleUnassignedJobs.length > 0 &&
+                        visibleUnassignedJobs.every((j) => selectedUnassignedJobIds.has(j.id))
+                      }
+                      onChange={() => {
+                        const allSelected =
+                          visibleUnassignedJobs.length > 0 &&
+                          visibleUnassignedJobs.every((j) => selectedUnassignedJobIds.has(j.id));
+                        if (allSelected) {
+                          setSelectedUnassignedJobIds(new Set());
+                        } else {
+                          const next = new Set(selectedUnassignedJobIds);
+                          visibleUnassignedJobs.forEach((j) => next.add(j.id));
+                          setSelectedUnassignedJobIds(next);
+                        }
+                      }}
+                      className="w-4 h-4 rounded border-slate-300 text-[#ff353e] focus:ring-[#ff353e] cursor-pointer"
+                    />
+                    <span className="text-xs font-bold text-slate-700">
+                      Select all ({visibleUnassignedJobs.length})
+                    </span>
+                  </label>
+                  <span className="text-xs text-slate-400 font-mono">
+                    | {selectedUnassignedJobIds.size} selected
+                  </span>
+                </div>
+
+                {/* Right: Agent selector and Actions */}
+                <div className="flex flex-wrap items-center gap-2">
+                  <select
+                    value={bulkTargetAgentId}
+                    onChange={(e) => setBulkTargetAgentId(e.target.value)}
+                    className="text-xs font-semibold px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-xl text-slate-800 focus:outline-none focus:ring-1 focus:ring-[#ff353e] cursor-pointer"
+                  >
+                    <option value="">Select agent to assign...</option>
+                    {callbackAgents
+                      .filter((a) => a.id !== undefined)
+                      .map((a) => (
+                        <option key={a.id} value={a.id}>
+                          {a.name}
+                        </option>
+                      ))}
+                  </select>
+
+                  <button
+                    type="button"
+                    onClick={() => handleBulkAssign('SELECTED')}
+                    disabled={selectedUnassignedJobIds.size === 0 || !bulkTargetAgentId || isBulkAssigning}
+                    className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer ${
+                      selectedUnassignedJobIds.size === 0 || !bulkTargetAgentId || isBulkAssigning
+                        ? 'bg-slate-100 text-slate-400 border border-slate-200 cursor-not-allowed opacity-60'
+                        : 'bg-[#ff353e] hover:bg-[#e0262f] text-white shadow-2xs'
+                    }`}
+                  >
+                    {isBulkAssigning ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <UserCheck className="w-3.5 h-3.5" />}
+                    <span>Assign selected ({selectedUnassignedJobIds.size}) to...</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => handleBulkAssign('ALL')}
+                    disabled={allUnassignedCount === 0 || !bulkTargetAgentId || isBulkAssigning}
+                    className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer ${
+                      allUnassignedCount === 0 || !bulkTargetAgentId || isBulkAssigning
+                        ? 'bg-slate-100 text-slate-400 border border-slate-200 cursor-not-allowed opacity-60'
+                        : 'bg-slate-900 hover:bg-slate-800 text-white shadow-2xs'
+                    }`}
+                  >
+                    {isBulkAssigning ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Users className="w-3.5 h-3.5" />}
+                    <span>Assign all {allUnassignedCount} unassigned to...</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Success / Error Message Banner */}
+              {bulkMessage && (
+                <div
+                  className={`p-2.5 rounded-xl text-xs font-medium flex items-center justify-between gap-2 ${
+                    bulkMessage.type === 'success'
+                      ? 'bg-emerald-50 text-emerald-800 border border-emerald-200'
+                      : 'bg-rose-50 text-rose-800 border border-rose-200'
+                  }`}
+                >
+                  <div className="flex items-center gap-1.5">
+                    {bulkMessage.type === 'success' ? (
+                      <CheckCircle2 className="w-4 h-4 text-emerald-600 flex-shrink-0" />
+                    ) : (
+                      <AlertCircle className="w-4 h-4 text-rose-600 flex-shrink-0" />
+                    )}
+                    <span>{bulkMessage.text}</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setBulkMessage(null)}
+                    className="text-slate-400 hover:text-slate-600 p-1"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+
           {Array.from(groupedData.entries()).map(([partner, clientMap]) => {
             const isCollapsed = collapsedPartners[partner];
             let pTotal = 0;
@@ -1968,30 +2468,70 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
                                   {clientData.client_name || 'Valuation Client'}
                                 </h4>
 
-                                {/* Bigger phone number display */}
-                                <div className="flex items-center gap-2 mt-1">
-                                  <a
-                                    href={`tel:${clientData.client_phone_raw}`}
-                                    className="text-base sm:text-lg font-black font-mono tracking-wide text-slate-900 hover:text-[#ff353e] flex items-center gap-1.5 transition-colors bg-slate-100 hover:bg-red-50 px-2.5 py-1 rounded-lg border border-slate-200/80"
-                                    title="Click to place call"
-                                  >
-                                    <Phone className="w-4 h-4 text-[#ff353e]" />
-                                    <span>{clientData.client_phone_raw}</span>
-                                  </a>
-                                  <button
-                                    onClick={() => copyToClipboard(clientData.client_phone_raw)}
-                                    className="text-slate-400 hover:text-slate-700 p-1.5 rounded-lg hover:bg-slate-100 border border-slate-200/60 transition-colors"
-                                    title="Copy phone number"
-                                  >
-                                    {copiedPhone === clientData.client_phone_raw ? (
-                                      <span className="text-xs font-bold text-emerald-600 flex items-center gap-1">
-                                        <Check className="w-3.5 h-3.5" /> Copied!
-                                      </span>
-                                    ) : (
-                                      <Copy className="w-3.5 h-3.5" />
-                                    )}
-                                  </button>
-                                </div>
+                                {/* Phone numbers with tel: link per number in phones array */}
+                                {(() => {
+                                  const clientPhones: Array<{ phone_normalised: string; source: string }> = (() => {
+                                    const map = new Map<string, { phone_normalised: string; source: string }>();
+                                    for (const v of clientData.vehicles) {
+                                      if (v.phones && v.phones.length > 0) {
+                                        for (const p of v.phones) {
+                                          if (!map.has(p.phone_normalised)) {
+                                            map.set(p.phone_normalised, { phone_normalised: p.phone_normalised, source: p.source });
+                                          }
+                                        }
+                                      }
+                                    }
+                                    if (map.size === 0) {
+                                      const raw = clientData.client_phone_raw || clientData.vehicles[0]?.client_phone || '';
+                                      const norm = raw.replace(/\D/g, '').slice(-9);
+                                      if (norm) {
+                                        map.set(norm, { phone_normalised: norm, source: 'PRIMARY' });
+                                      }
+                                    }
+                                    return Array.from(map.values());
+                                  })();
+
+                                  return (
+                                    <div className="flex flex-wrap items-center gap-2 mt-1">
+                                      {clientPhones.map((p, idx) => {
+                                        const dialNumber = `+254${p.phone_normalised}`;
+                                        const displayNumber = `0${p.phone_normalised}`;
+                                        const isAlternate = idx > 0 || p.source !== 'PRIMARY';
+
+                                        return (
+                                          <div key={p.phone_normalised} className="flex items-center gap-1.5">
+                                            <a
+                                              href={`tel:${dialNumber}`}
+                                              className="text-base sm:text-lg font-black font-mono tracking-wide text-slate-900 hover:text-[#ff353e] flex items-center gap-1.5 transition-colors bg-slate-100 hover:bg-red-50 px-2.5 py-1 rounded-lg border border-slate-200/80"
+                                              title={`Click to dial ${dialNumber}`}
+                                            >
+                                              <Phone className="w-4 h-4 text-[#ff353e]" />
+                                              <span>{displayNumber}</span>
+                                              {isAlternate && (
+                                                <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-amber-100 text-amber-800 border border-amber-200 uppercase tracking-wide">
+                                                  alternate
+                                                </span>
+                                              )}
+                                            </a>
+                                            <button
+                                              onClick={() => copyToClipboard(displayNumber)}
+                                              className="text-slate-400 hover:text-slate-700 p-1.5 rounded-lg hover:bg-slate-100 border border-slate-200/60 transition-colors cursor-pointer"
+                                              title={`Copy ${displayNumber}`}
+                                            >
+                                              {copiedPhone === displayNumber ? (
+                                                <span className="text-xs font-bold text-emerald-600 flex items-center gap-1">
+                                                  <Check className="w-3.5 h-3.5" /> Copied!
+                                                </span>
+                                              ) : (
+                                                <Copy className="w-3.5 h-3.5" />
+                                              )}
+                                            </button>
+                                          </div>
+                                        );
+                                      })}
+                                    </div>
+                                  );
+                                })()}
                               </div>
                             </div>
 
@@ -2006,10 +2546,13 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
                           {/* Vehicles Table / List */}
                           <div className="space-y-2.5">
                             {clientData.vehicles.map((vehicle) => {
-                              const isMaxReached =
-                                vehicle.attempt_count >= (vehicle.max_attempts || 4) &&
-                                vehicle.sms_count >= (vehicle.max_sms_attempts || 4) &&
-                                vehicle.status === 'AMBER';
+                              const callsLimit = vehicle.max_attempts || settings?.max_attempts || 4;
+                              const smsLimit = vehicle.max_sms_attempts || settings?.max_sms_attempts || 4;
+                              const callsCount = vehicle.attempt_count || 0;
+                              const smsCount = vehicle.sms_count || 0;
+                              const callsMet = callsCount >= callsLimit;
+                              const smsMet = smsCount >= smsLimit;
+                              const isMaxReached = callsMet && smsMet && vehicle.status === 'AMBER';
 
                               return (
                                 <div
@@ -2027,8 +2570,30 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
                                   <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-3.5">
                                     {/* Left: Vehicle Plate, Status Pill, Reason & Latest Outcome */}
                                     <div className="flex items-start sm:items-center gap-3 flex-wrap">
-                                    {/* Number Plate badge */}
-                                    <div className="px-3.5 py-1.5 rounded-xl bg-slate-900 text-white font-mono font-black text-xs tracking-wider shadow-xs border border-slate-700 flex-shrink-0">
+                                      {selectedAgent === '__unassigned__' && (
+                                        <div className="flex items-center self-center flex-shrink-0" onClick={(e) => e.stopPropagation()}>
+                                          <input
+                                            type="checkbox"
+                                            checked={selectedUnassignedJobIds.has(vehicle.id)}
+                                            onChange={() => {
+                                              setSelectedUnassignedJobIds((prev) => {
+                                                const next = new Set(prev);
+                                                if (next.has(vehicle.id)) {
+                                                  next.delete(vehicle.id);
+                                                } else {
+                                                  next.add(vehicle.id);
+                                                }
+                                                return next;
+                                              });
+                                            }}
+                                            className="w-4 h-4 rounded border-slate-300 text-[#ff353e] focus:ring-[#ff353e] cursor-pointer"
+                                            title="Select vehicle for assignment"
+                                          />
+                                        </div>
+                                      )}
+
+                                      {/* Number Plate badge */}
+                                      <div className="px-3.5 py-1.5 rounded-xl bg-slate-900 text-white font-mono font-black text-xs tracking-wider shadow-xs border border-slate-700 flex-shrink-0">
                                       {vehicle.vehicle_reg_raw}
                                     </div>
 
@@ -2085,61 +2650,68 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
                                     {/* Call Attempt Count Badge */}
                                     <div
                                       className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-bold font-mono ${
-                                        vehicle.attempt_count >= (vehicle.max_attempts || 4)
+                                        callsMet
                                           ? 'bg-red-50 text-red-700 border border-red-200'
                                           : 'bg-slate-100 text-slate-700 border border-slate-200/60'
                                       }`}
-                                      title={`Contact attempts by callback team: ${vehicle.attempt_count} / ${vehicle.max_attempts || 4}`}
+                                      title={`Contact attempts by callback team: ${callsCount} / ${callsLimit}`}
                                     >
                                       <Phone className="w-3 h-3 text-slate-500" />
                                       <span>
-                                        {vehicle.attempt_count} / {vehicle.max_attempts || 4} calls
+                                        {callsCount} / {callsLimit} calls
                                       </span>
                                     </div>
 
-                                    {/* SMS Count Indicator */}
+                                    {/* SMS Count Badge */}
                                     <div
-                                      className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-bold ${
-                                        vehicle.sms_count > 0
-                                          ? 'bg-blue-50 text-blue-700 border border-blue-200'
-                                          : 'bg-slate-50 text-slate-400 border border-slate-100'
+                                      className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-bold font-mono ${
+                                        smsMet
+                                          ? 'bg-red-50 text-red-700 border border-red-200'
+                                          : 'bg-slate-100 text-slate-700 border border-slate-200/60'
                                       }`}
-                                      title={`SMS messages sent to this client: ${vehicle.sms_count}`}
+                                      title={`SMS messages sent to this client: ${smsCount} / ${smsLimit}`}
                                     >
-                                      <MessageSquare className="w-3 h-3 text-blue-500" />
+                                      <MessageSquare className="w-3 h-3 text-slate-500" />
                                       <span>
-                                        {vehicle.sms_count} / {vehicle.max_sms_attempts || 4} SMS
+                                        {smsCount} / {smsLimit} SMS
                                       </span>
                                     </div>
 
-                                    {/* Assigned Agent Pill */}
-                                    <button
-                                      type="button"
-                                      onClick={(e) => {
-                                        e.stopPropagation();
-                                        if (vehicle.assigned_agent_name) {
-                                          setSelectedAgent(
-                                            selectedAgent.toLowerCase() === vehicle.assigned_agent_name.toLowerCase()
-                                              ? 'ALL'
-                                              : vehicle.assigned_agent_name
-                                          );
-                                        }
-                                      }}
-                                      title={
-                                        vehicle.assigned_agent_name
-                                          ? `Filter callbacks for ${vehicle.assigned_agent_name}`
-                                          : 'Unassigned'
-                                      }
-                                      className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs transition-all cursor-pointer ${
-                                        vehicle.assigned_agent_name &&
-                                        selectedAgent.toLowerCase() === vehicle.assigned_agent_name.toLowerCase()
-                                          ? 'bg-red-50 text-[#ff353e] border border-red-200 font-bold'
-                                          : 'bg-slate-50 hover:bg-slate-100 border border-slate-200/80 text-slate-700 font-semibold'
-                                      }`}
-                                    >
-                                      <User className="w-3 h-3 text-slate-400" />
-                                      <span>{vehicle.assigned_agent_name || 'Unassigned'}</span>
-                                    </button>
+                                    {/* Amber Hints when one threshold is met but not the other */}
+                                    {callsMet && !smsMet && vehicle.status === 'AMBER' && (
+                                      <span className="px-2 py-0.5 rounded-md bg-amber-50 text-amber-800 border border-amber-200 text-[10px] font-bold">
+                                        SMS needed
+                                      </span>
+                                    )}
+                                    {!callsMet && smsMet && vehicle.status === 'AMBER' && (
+                                      <span className="px-2 py-0.5 rounded-md bg-amber-50 text-amber-800 border border-amber-200 text-[10px] font-bold">
+                                        Calls needed
+                                      </span>
+                                    )}
+
+                                    {/* Assigned Agent Dropdown */}
+                                    <div className="relative inline-flex items-center" onClick={(e) => e.stopPropagation()}>
+                                      <select
+                                        id={`select-assign-agent-${vehicle.id}`}
+                                        value={vehicle.assigned_agent_id ?? ''}
+                                        onChange={(e) => {
+                                          const val = e.target.value;
+                                          handleAssignJob(vehicle.id, val === '' ? null : Number(val));
+                                        }}
+                                        className="text-xs font-bold pl-2.5 pr-6 py-1 bg-white border border-slate-200 rounded-lg text-slate-800 hover:border-slate-300 focus:outline-none focus:ring-1 focus:ring-[#ff353e] cursor-pointer appearance-none shadow-2xs"
+                                        title="Assign callback agent (applies to client)"
+                                      >
+                                        <option value="">Unassigned</option>
+                                        {callbackAgents
+                                          .filter((a) => a.id !== undefined)
+                                          .map((a) => (
+                                            <option key={a.id} value={a.id}>
+                                              {a.name}
+                                            </option>
+                                          ))}
+                                      </select>
+                                      <ChevronDown className="w-3 h-3 text-slate-400 absolute right-1.5 pointer-events-none" />
+                                    </div>
 
                                     {/* History Toggle Button */}
                                     <button
@@ -2553,12 +3125,12 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
                 </div>
                 <div>
                   <h3 className="text-sm sm:text-base font-black text-slate-900">
-                    Max Attempts Reached — Channel Partner Report
+                    Max Attempts Reached: Channel Partner Report
                   </h3>
                   <p className="text-xs text-slate-500">
-                    Vehicles closed Red due to hitting maximum contact attempts without booking • Total Records:{' '}
+                    Vehicles closed Red after reaching the minimum outgoing calls and minimum SMS without booking • Total Records:{' '}
                     <span className="font-bold text-slate-900 bg-slate-100 px-2 py-0.5 rounded-md">
-                      {reportData.reduce((acc, g) => acc + g.records.length, 0)}
+                      {isReportFiltered ? `${visibleRecordCount} of ${totalReportRecords} total` : visibleRecordCount}
                     </span>
                   </p>
                 </div>
@@ -2571,6 +3143,45 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
               >
                 <X className="w-5 h-5" />
               </button>
+            </div>
+
+            {/* Filter row: Agent and Channel Partner selectors */}
+            <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3 p-3 bg-slate-50 rounded-2xl border border-slate-200 flex-shrink-0">
+              <div className="flex-1 flex flex-col gap-1">
+                <label htmlFor="select-report-agent-filter" className="text-[11px] font-bold text-slate-600 uppercase tracking-wider">
+                  Agent
+                </label>
+                <select
+                  id="select-report-agent-filter"
+                  value={reportAgentFilter}
+                  onChange={(e) => setReportAgentFilter(e.target.value)}
+                  className="w-full px-3 py-1.5 bg-white border border-slate-200 rounded-xl text-xs font-semibold text-slate-800 hover:border-slate-300 focus:outline-none focus:ring-1 focus:ring-[#ff353e] cursor-pointer"
+                >
+                  {agentOptions.map((opt) => (
+                    <option key={opt.value} value={opt.value}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="flex-1 flex flex-col gap-1">
+                <label htmlFor="select-report-partner-filter" className="text-[11px] font-bold text-slate-600 uppercase tracking-wider">
+                  Channel Partner
+                </label>
+                <select
+                  id="select-report-partner-filter"
+                  value={reportPartnerFilter}
+                  onChange={(e) => setReportPartnerFilter(e.target.value)}
+                  className="w-full px-3 py-1.5 bg-white border border-slate-200 rounded-xl text-xs font-semibold text-slate-800 hover:border-slate-300 focus:outline-none focus:ring-1 focus:ring-[#ff353e] cursor-pointer"
+                >
+                  {partnerOptions.map((opt) => (
+                    <option key={opt.value} value={opt.value}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
             </div>
 
             {reportError && (
@@ -2586,12 +3197,14 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
                   <RefreshCw className="w-5 h-5 animate-spin text-[#ff353e]" />
                   <span>Compiling Channel-Partner report...</span>
                 </div>
-              ) : reportData.length === 0 ? (
+              ) : visibleGroups.length === 0 ? (
                 <div className="py-16 text-center text-xs text-slate-400 bg-slate-50 rounded-2xl border border-slate-100">
-                  No records currently closed under &ldquo;Max Attempts Reached&rdquo;.
+                  {reportData.length === 0
+                    ? 'No records currently closed under "Max Attempts Reached".'
+                    : 'No records for this selection.'}
                 </div>
               ) : (
-                reportData.map((group) => (
+                visibleGroups.map((group) => (
                   <div key={group.channel_partner} className="bg-slate-50 rounded-2xl p-4 border border-slate-200">
                     <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-3">
                       <div className="flex items-center gap-2">
@@ -2604,7 +3217,7 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
                         </span>
                       </div>
                       <button
-                        onClick={() => handleExportMaxAttemptsReportToExcel(group.channel_partner)}
+                        onClick={() => handleExportMaxAttemptsReportToExcel([group], group.channel_partner)}
                         type="button"
                         className="px-2.5 py-1 rounded-lg text-[11px] font-bold bg-white hover:bg-slate-100 text-slate-700 border border-slate-200 shadow-2xs flex items-center gap-1 transition-colors w-fit cursor-pointer"
                         title={`Download Excel for ${group.channel_partner}`}
@@ -2644,29 +3257,43 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
                               <span className="font-bold text-slate-600 block text-[10px]">
                                 Chronological Attempt &amp; SMS History ({rec.chronology.length} events):
                               </span>
-                              {rec.chronology.map((entry, idx) => (
-                                <div key={idx} className="text-slate-700 flex items-baseline gap-1.5 flex-wrap">
-                                  {entry.kind === 'SMS' ? (
-                                    <span className="font-bold text-indigo-700 bg-indigo-50 px-1 py-0.2 rounded text-[10px]">
-                                      SMS ({entry.status}):
+                              {rec.chronology.map((entry, idx) => {
+                                const isUncountedCall = entry.kind === 'CALL' && !entry.counted;
+                                return (
+                                  <div
+                                    key={idx}
+                                    className={`flex items-baseline gap-1.5 flex-wrap ${
+                                      isUncountedCall ? 'text-slate-400' : 'text-slate-700'
+                                    }`}
+                                  >
+                                    {entry.kind === 'SMS' ? (
+                                      <span className="font-bold text-indigo-700 bg-indigo-50 px-1 py-0.2 rounded text-[10px]">
+                                        SMS ({entry.status}):
+                                      </span>
+                                    ) : entry.kind === 'CALL' ? (
+                                      entry.counted ? (
+                                        <span className="font-bold text-amber-700 bg-amber-50 px-1 py-0.2 rounded text-[10px]">
+                                          Call ({entry.status}):
+                                        </span>
+                                      ) : (
+                                        <span className="font-semibold text-slate-400 bg-slate-100 px-1 py-0.2 rounded text-[10px]">
+                                          Call ({entry.status}) (not counted):
+                                        </span>
+                                      )
+                                    ) : (
+                                      <span className="font-bold text-slate-800 text-[10px]">
+                                        Outcome ({entry.outcome}):
+                                      </span>
+                                    )}
+                                    <span className={`italic ${isUncountedCall ? 'text-slate-400' : 'text-slate-600'}`}>
+                                      {entry.kind === 'SMS' ? entry.note : entry.kind === 'OUTCOME' ? (entry.comment ? `"${entry.comment}"` : '(No comment)') : ''}
                                     </span>
-                                  ) : entry.kind === 'CALL' ? (
-                                    <span className="font-bold text-amber-700 bg-amber-50 px-1 py-0.2 rounded text-[10px]">
-                                      Call ({entry.status}):
+                                    <span className="text-slate-400 text-[10px] ml-auto font-mono">
+                                      {entry.logged_by}{entry.logged_by_phone ? ` (${entry.logged_by_phone})` : ''} • {new Date(entry.timestamp).toLocaleDateString()}
                                     </span>
-                                  ) : (
-                                    <span className="font-bold text-slate-800 text-[10px]">
-                                      Outcome ({entry.outcome}):
-                                    </span>
-                                  )}
-                                  <span className="italic text-slate-600">
-                                    {entry.kind === 'SMS' ? entry.note : entry.kind === 'OUTCOME' ? (entry.comment ? `“${entry.comment}”` : '(No comment)') : ''}
-                                  </span>
-                                  <span className="text-slate-400 text-[10px] ml-auto font-mono">
-                                    {entry.logged_by}{entry.logged_by_phone ? ` (${entry.logged_by_phone})` : ''} • {new Date(entry.timestamp).toLocaleDateString()}
-                                  </span>
-                                </div>
-                              ))}
+                                  </div>
+                                );
+                              })}
                             </div>
                           ) : rec.attempts.length > 0 ? (
                             <div className="bg-slate-50 rounded-lg p-2 text-[11px] space-y-1 border border-slate-100">
@@ -2708,10 +3335,15 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
                 <button
                   onClick={() => handleExportMaxAttemptsReportToExcel()}
                   type="button"
-                  className="px-5 py-2 rounded-xl text-xs font-bold bg-[#ff353e] hover:bg-[#e0262f] text-white shadow-sm transition-all flex items-center gap-1.5 cursor-pointer"
+                  disabled={visibleRecordCount === 0}
+                  className={`px-5 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer ${
+                    visibleRecordCount === 0
+                      ? 'bg-slate-200 text-slate-400 cursor-not-allowed opacity-60'
+                      : 'bg-[#ff353e] hover:bg-[#e0262f] text-white shadow-sm'
+                  }`}
                 >
                   <Download className="w-3.5 h-3.5" />
-                  <span>Download Excel Report</span>
+                  <span>{getDownloadButtonLabel()}</span>
                 </button>
               </div>
             </div>
@@ -3016,35 +3648,37 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
                 </span>
               </div>
 
-              <div>
-                <label className="text-xs font-bold text-slate-700 block mb-1">Max Call Attempts Threshold</label>
-                <input
-                  type="number"
-                  min="1"
-                  max="15"
-                  value={tempMaxAttempts}
-                  onChange={(e) => setTempMaxAttempts(Math.max(1, parseInt(e.target.value) || 1))}
-                  className="w-full px-3.5 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-800 font-bold focus:outline-none focus:ring-2 focus:ring-[#ff353e]/20 focus:border-[#ff353e]"
-                />
-                <span className="text-[11px] text-slate-400 block mt-1">
-                  When reached without scheduling, the vehicle automatically transitions to Red with the outcome &ldquo;MAX_ATTEMPTS_REACHED&rdquo;.
-                </span>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+                <div>
+                  <label className="text-xs font-bold text-slate-700 block mb-1">
+                    Minimum outgoing calls
+                  </label>
+                  <input
+                    type="number"
+                    min="1"
+                    max="20"
+                    value={tempMaxAttempts}
+                    onChange={(e) => setTempMaxAttempts(Math.max(1, Math.min(20, parseInt(e.target.value) || 1)))}
+                    className="w-full px-3.5 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-800 font-bold focus:outline-none focus:ring-2 focus:ring-[#ff353e]/20 focus:border-[#ff353e]"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs font-bold text-slate-700 block mb-1">
+                    Minimum SMS
+                  </label>
+                  <input
+                    type="number"
+                    min="1"
+                    max="20"
+                    value={tempMaxSmsAttempts}
+                    onChange={(e) => setTempMaxSmsAttempts(Math.max(1, Math.min(20, parseInt(e.target.value) || 1)))}
+                    className="w-full px-3.5 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-800 font-bold focus:outline-none focus:ring-2 focus:ring-[#ff353e]/20 focus:border-[#ff353e]"
+                  />
+                </div>
               </div>
-
-              <div>
-                <label className="text-xs font-bold text-slate-700 block mb-1">Minimum SMS Attempts</label>
-                <input
-                  type="number"
-                  min="1"
-                  max="20"
-                  value={tempMaxSmsAttempts}
-                  onChange={(e) => setTempMaxSmsAttempts(Math.max(1, Math.min(20, parseInt(e.target.value) || 1)))}
-                  className="w-full px-3.5 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-800 font-bold focus:outline-none focus:ring-2 focus:ring-[#ff353e]/20 focus:border-[#ff353e]"
-                />
-                <span className="text-[11px] text-slate-400 block mt-1">
-                  Automatic closure requires both the call threshold and this SMS threshold.
-                </span>
-              </div>
+              <span className="text-[11px] text-slate-400 block -mt-1">
+                A vehicle closes automatically as Max Attempts Reached only when it has at least this many outgoing calls AND at least this many SMS. Incoming and missed calls are not counted. Default is 4 and 4.
+              </span>
 
               {/* Channel Partner Allocations Section */}
               <div className="pt-3 border-t border-slate-200">
@@ -3105,31 +3739,63 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
             </div>
 
             {/* Pinned Modal Footer (Always visible at bottom) */}
-            <div className="p-3 sm:px-5 sm:py-3.5 bg-slate-50 border-t border-slate-200/80 flex items-center justify-end gap-2.5 flex-shrink-0">
-              <button
-                onClick={() => setIsSettingsOpen(false)}
-                className="px-4 py-2 rounded-xl text-xs font-bold text-slate-600 hover:bg-slate-200/70 transition-colors cursor-pointer"
-              >
-                Cancel
-              </button>
-              <button
-                id="btn-save-callback-settings"
-                disabled={isSavingSettings}
-                onClick={handleSaveSettings}
-                className="px-5 py-2 rounded-xl text-xs font-bold bg-[#ff353e] hover:bg-[#e0262f] text-white shadow-sm disabled:opacity-50 transition-all flex items-center gap-1.5 cursor-pointer"
-              >
-                {isSavingSettings ? (
-                  <>
-                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                    <span>Saving...</span>
-                  </>
-                ) : (
-                  <>
-                    <Check className="w-3.5 h-3.5" />
-                    <span>Save Settings</span>
-                  </>
+            <div className="p-3 sm:px-5 sm:py-3.5 bg-slate-50 border-t border-slate-200/80 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 flex-shrink-0">
+              <div className="flex flex-col gap-1">
+                {isAdmin && (
+                  <button
+                    type="button"
+                    id="btn-download-one-time-reopen-report"
+                    onClick={handleDownloadReopenReport}
+                    disabled={isDownloadingReopenReport}
+                    className="px-3 py-1.5 rounded-xl text-xs font-bold border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 transition-colors flex items-center gap-1.5 cursor-pointer disabled:opacity-50 shadow-2xs w-fit"
+                    title="Download one-time reopen report (.xlsx)"
+                  >
+                    {isDownloadingReopenReport ? (
+                      <RefreshCw className="w-3.5 h-3.5 animate-spin text-slate-500" />
+                    ) : (
+                      <Download className="w-3.5 h-3.5 text-slate-500" />
+                    )}
+                    <span>Download one-time reopen report</span>
+                  </button>
                 )}
-              </button>
+                {reopenReportMsg && (
+                  <span
+                    className={
+                      reopenReportMsg.type === 'error'
+                        ? 'text-[11px] text-rose-600 font-medium'
+                        : 'text-[11px] text-emerald-600 font-medium'
+                    }
+                  >
+                    {reopenReportMsg.text}
+                  </span>
+                )}
+              </div>
+              <div className="flex items-center justify-end gap-2.5">
+                <button
+                  onClick={() => setIsSettingsOpen(false)}
+                  className="px-4 py-2 rounded-xl text-xs font-bold text-slate-600 hover:bg-slate-200/70 transition-colors cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  id="btn-save-callback-settings"
+                  disabled={isSavingSettings}
+                  onClick={handleSaveSettings}
+                  className="px-5 py-2 rounded-xl text-xs font-bold bg-[#ff353e] hover:bg-[#e0262f] text-white shadow-sm disabled:opacity-50 transition-all flex items-center gap-1.5 cursor-pointer"
+                >
+                  {isSavingSettings ? (
+                    <>
+                      <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                      <span>Saving...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Check className="w-3.5 h-3.5" />
+                      <span>Save Settings</span>
+                    </>
+                  )}
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -3261,7 +3927,7 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
                               {j.vehicle_reg_raw || j.vehicle_reg}
                             </td>
                             <td className="py-2.5 px-3 font-medium text-slate-800">
-                              {j.client_name || '—'}
+                              {j.client_name || '-'}
                             </td>
                             <td className="py-2.5 px-3 font-mono text-slate-600 whitespace-nowrap">
                               {j.client_phone_raw || j.client_phone}
@@ -3328,6 +3994,28 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
       <OnboardingTour
         isOpen={isOnboardingOpen}
         onClose={handleCloseOnboardingTour}
+      />
+
+      {/* Agent Review Modal */}
+      <AgentReviewModal
+        isOpen={isReviewAgentsOpen}
+        onClose={() => setIsReviewAgentsOpen(false)}
+        onUpdated={() => {
+          fetchReviewAndUnmatchedCounts();
+          fetchJobs();
+        }}
+        allAgents={allAgents}
+      />
+
+      {/* Unmatched Activity Modal */}
+      <UnmatchedActivityModal
+        isOpen={isUnmatchedActivityOpen}
+        onClose={() => setIsUnmatchedActivityOpen(false)}
+        onOpenAgentReview={() => setIsReviewAgentsOpen(true)}
+        onDataChanged={() => {
+          fetchReviewAndUnmatchedCounts();
+          fetchJobs();
+        }}
       />
     </div>
   );

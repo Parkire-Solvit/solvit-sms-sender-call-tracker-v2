@@ -25,6 +25,14 @@ export interface CallbackJobLog {
   created_at: string;
 }
 
+export interface CallbackJobPhone {
+  id?: number;
+  callback_job_id?: number;
+  phone_normalised: string;
+  source: 'PRIMARY' | 'IMPORT' | 'MANUAL';
+  created_at?: string;
+}
+
 export interface CallbackJob {
   id: number;
   vehicle_reg: string;
@@ -45,6 +53,7 @@ export interface CallbackJob {
   closed_at: string | null;
   created_at: string;
   updated_at: string;
+  phones?: CallbackJobPhone[];
   // Computed activity metrics
   attempt_count: number;
   sms_count: number;
@@ -53,7 +62,6 @@ export interface CallbackJob {
   max_attempts: number;
   max_sms_attempts: number;
 }
-
 export interface LogOutcomePayload {
   outcome: string;
   comment?: string;
@@ -61,9 +69,9 @@ export interface LogOutcomePayload {
 }
 
 export type MaxAttemptsChronologyEntry =
-  | { kind: 'CALL'; status: string; logged_by: string; logged_by_phone: string | null; timestamp: string }
-  | { kind: 'SMS'; status: string; note: string; logged_by: string; logged_by_phone: string | null; timestamp: string }
-  | { kind: 'OUTCOME'; outcome: string; comment: string; logged_by: string; logged_by_phone: string | null; timestamp: string };
+  | { kind: 'CALL'; status: string; logged_by: string; logged_by_phone: string | null; timestamp: string; counted?: boolean }
+  | { kind: 'SMS'; status: string; note: string; logged_by: string; logged_by_phone: string | null; timestamp: string; counted?: boolean }
+  | { kind: 'OUTCOME'; outcome: string; comment: string; logged_by: string; logged_by_phone: string | null; timestamp: string; counted?: boolean };
 
 export interface MaxAttemptsReportAttempt {
   attempt_number: number;
@@ -82,12 +90,16 @@ export interface MaxAttemptsReportRecord {
   closed_at: string | null;
   assigned_agent_id?: number | null;
   assigned_agent_name?: string | null;
+  outgoing_calls_count?: number;
+  sms_count?: number;
   attempts: MaxAttemptsReportAttempt[];
   chronology?: MaxAttemptsChronologyEntry[];
 }
 
 export interface MaxAttemptsReportGroup {
   channel_partner: string;
+  allocated_agent_id?: number | null;
+  allocated_agent_name?: string | null;
   records: MaxAttemptsReportRecord[];
 }
 
@@ -116,33 +128,6 @@ export interface CallbackSettings {
   disappearance_alert_percentage?: number;
   active_agents?: Array<{ id: number; name: string }>;
   updated_at?: string;
-}
-
-export interface AgentNeedingReview {
-  id: number;
-  name: string;
-  tag: string | null;
-  needs_review: boolean;
-  last_active_at: string | null;
-  event_count: number;
-}
-
-export interface UnmatchedActivity {
-  id: number;
-  timestamp: string;
-  agent_id: number | null;
-  agent_name: string;
-  type: string;
-  status: string | null;
-  target_phone: string;
-  reg_no: string | null;
-  reason: 'NO_JOB_FOR_NUMBER' | 'ASSIGNED_TO_OTHER_AGENT' | 'UNRECOGNISED_AGENT';
-  suggested_job: {
-    id: number;
-    vehicle_reg: string;
-    assigned_agent_id: number | null;
-    assigned_agent_name: string | null;
-  } | null;
 }
 
 export interface CallbackImportSummary {
@@ -175,3 +160,45 @@ export interface CallbackImportPayload {
   confirmed?: boolean;
 }
 
+export type UnmatchedActivityReason =
+  | 'NO_JOB_FOR_NUMBER'
+  | 'ASSIGNED_TO_OTHER_AGENT'
+  | 'UNRECOGNISED_AGENT';
+
+export interface UnmatchedActivitySuggestedJob {
+  id: number;
+  vehicle_reg: string;
+  assigned_agent_id: number | null;
+  assigned_agent_name: string | null;
+}
+
+export interface UnmatchedActivityItem {
+  id: number;
+  timestamp: string;
+  agent_id: number | null;
+  agent_name: string;
+  type: string;
+  status: string | null;
+  target_phone: string;
+  reg_no: string | null;
+  reason: UnmatchedActivityReason;
+  suggested_job: UnmatchedActivitySuggestedJob | null;
+}
+
+export interface AgentNeedsReview {
+  id: number;
+  name: string;
+  tag: string;
+  needs_review: boolean;
+  event_count: number;
+  last_active_at: string | null;
+}
+
+export function hasReachedMaxAttempts(
+  job: { attempt_count: number; sms_count: number; max_attempts?: number; max_sms_attempts?: number },
+  settings?: { max_attempts: number; max_sms_attempts: number }
+): boolean {
+  const targetCalls = settings?.max_attempts ?? job.max_attempts ?? 4;
+  const targetSms = settings?.max_sms_attempts ?? job.max_sms_attempts ?? 4;
+  return (job.attempt_count || 0) >= targetCalls && (job.sms_count || 0) >= targetSms;
+}

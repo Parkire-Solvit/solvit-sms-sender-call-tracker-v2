@@ -23,7 +23,13 @@ import {
   seedChannelPartnerAllocations,
   getChannelPartnerAllocations,
   setChannelPartnerAllocation,
-  normalizePhone,
+  backfillAdditionalImportPhones,
+  assignCallbackJob,
+  assignCallbackJobsBulk,
+  addPhoneToCallbackJob,
+  getUnmatchedActivity,
+  runOneTimeClosureReopen,
+  CLOSURE_REOPEN_JOB_KEY,
 } from "./insuranceCallbacks";
 import * as XLSX from "xlsx";
 import { seedDefaultAdmin, hashPassword, verifyPassword } from "./auth";
@@ -61,6 +67,7 @@ async function startServer() {
 
   // Seed channel-partner → agent allocations for the callbacks feature
   await seedChannelPartnerAllocations(db);
+  await backfillAdditionalImportPhones(db);
 
   // Seed the initial admin user (from ADMIN_USERNAME/ADMIN_PASSWORD) if none exists
   await seedDefaultAdmin(db);
@@ -1273,61 +1280,41 @@ function computeActivitySummary(events: any[], totalAgents: number = 0) {
     }
   });
 
+  app.patch("/api/callback-jobs/:id/assign", requireAdmin, async (req, res) => {
+    try {
+      const id = Number(req.params.id);
+      const targetAgentId = req.body?.agent_id == null ? null : Number(req.body.agent_id);
+      res.json(await assignCallbackJob(db, id, targetAgentId, req.body?.apply_to_client !== false));
+    } catch (err: any) {
+      res.status(400).json({ error: err.message || "Failed to assign callback job" });
+    }
+  });
+
+  app.post("/api/callback-jobs/assign-bulk", requireAdmin, async (req, res) => {
+    try {
+      if (!Array.isArray(req.body?.ids)) return res.status(400).json({ error: "ids must be an array" });
+      const targetAgentId = req.body?.agent_id == null ? null : Number(req.body.agent_id);
+      res.json(await assignCallbackJobsBulk(db, req.body.ids.map(Number), targetAgentId));
+    } catch (err: any) {
+      res.status(400).json({ error: err.message || "Failed to assign callback jobs" });
+    }
+  });
+
+  app.post("/api/callback-jobs/:id/add-phone", requireAdmin, async (req, res) => {
+    try {
+      if (!req.body?.phone) return res.status(400).json({ error: "Phone number is required" });
+      res.json(await addPhoneToCallbackJob(db, Number(req.params.id), req.body.phone));
+    } catch (err: any) {
+      res.status(err.message?.includes("not found") ? 404 : 400).json({ error: err.message || "Failed to add phone" });
+    }
+  });
+
   app.get("/api/callback-jobs/unmatched-activity", requireAdmin, async (req, res) => {
     try {
       const days = Math.min(90, Math.max(1, Number(req.query.days || 14)));
-      const settings = await getCallbackSettings(db);
-      const events = await db.queryAll<any>(
-        `SELECT e.id, e.timestamp, e.agent_id, a.name AS agent_name, a.needs_review,
-                e.type, e.status, e.target_phone, e.reg_no
-         FROM events e JOIN agents a ON a.id = e.agent_id
-         WHERE (LOWER(TRIM(a.tag)) = LOWER(TRIM(?)) OR a.needs_review = TRUE)
-           AND a.archived_at IS NULL
-           AND e.timestamp >= CURRENT_TIMESTAMP - INTERVAL '${days} days'
-           AND ((e.type = 'CALL' AND UPPER(COALESCE(e.status, '')) = 'OUTGOING') OR e.type = 'SMS')
-         ORDER BY e.timestamp DESC`,
-        [settings.callback_team_tag]
-      );
-      const jobs = await db.queryAll<any>(
-        `SELECT j.id, j.vehicle_reg, j.vehicle_reg_raw, j.client_phone, j.assigned_agent_id,
-                a.name AS assigned_agent_name
-         FROM callback_jobs j LEFT JOIN agents a ON a.id = j.assigned_agent_id`
-      );
-      const phoneRows = await db.queryAll<{ callback_job_id: number; phone_normalised: string }>(
-        `SELECT callback_job_id, phone_normalised FROM callback_job_phones`
-      );
-      const phones = new Map<number, Set<string>>();
-      for (const job of jobs) phones.set(Number(job.id), new Set([normalizePhone(job.client_phone)]));
-      for (const row of phoneRows) {
-        const set = phones.get(Number(row.callback_job_id)) || new Set<string>();
-        set.add(normalizePhone(row.phone_normalised));
-        phones.set(Number(row.callback_job_id), set);
-      }
-      const result = events.flatMap((event: any) => {
-        const phone = normalizePhone(event.target_phone);
-        const reg = String(event.reg_no || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
-        const possible = jobs.filter((job: any) =>
-          (phone && phones.get(Number(job.id))?.has(phone)) ||
-          (event.type === 'SMS' && reg && String(job.vehicle_reg || '').replace(/[^A-Z0-9]/g, '') === reg)
-        );
-        if (possible.some((job: any) => Number(job.assigned_agent_id) === Number(event.agent_id))) return [];
-        const suggested = possible[0] || null;
-        return [{
-          id: Number(event.id), timestamp: event.timestamp, agent_id: event.agent_id,
-          agent_name: event.agent_name, type: event.type, status: event.status,
-          target_phone: event.target_phone, reg_no: event.reg_no,
-          reason: event.needs_review ? 'UNRECOGNISED_AGENT' : suggested ? 'ASSIGNED_TO_OTHER_AGENT' : 'NO_JOB_FOR_NUMBER',
-          suggested_job: suggested ? {
-            id: Number(suggested.id), vehicle_reg: suggested.vehicle_reg_raw,
-            assigned_agent_id: suggested.assigned_agent_id,
-            assigned_agent_name: suggested.assigned_agent_name,
-          } : null,
-        }];
-      });
-      res.json(result);
-    } catch (err) {
-      console.error('[API] Unable to load unmatched callback activity:', err);
-      res.status(500).json({ error: (err as Error).message });
+      res.json(await getUnmatchedActivity(db, days));
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || "Failed to fetch unmatched activity" });
     }
   });
 
@@ -1533,6 +1520,59 @@ function computeActivitySummary(events: any[], totalAgents: number = 0) {
 
   app.get("/api/callback-jobs/max-attempts-report/excel", requireAdmin, handleMaxAttemptsExcel);
   app.get("/api/callback-jobs/max-attempts-report/csv", requireAdmin, handleMaxAttemptsExcel);
+
+  app.get("/api/callback-jobs/one-time-reopen/report", requireAdmin, async (_req, res) => {
+    try {
+      const run = await db.queryOne<any>(
+        `SELECT job_key, run_token, completed_at, summary FROM one_time_job_runs WHERE job_key = ?`,
+        [CLOSURE_REOPEN_JOB_KEY]
+      );
+      if (!run) return res.status(404).json({ error: "The one-time closure reopen job has not run yet." });
+      const settings = await getCallbackSettings(db);
+      const snapshots = await db.queryAll<any>(
+        `SELECT s.action, s.outgoing_calls, s.sms_count, s.previous_assigned_agent_id,
+                s.new_assigned_agent_id, j.vehicle_reg_raw, j.client_name,
+                j.client_phone_raw, j.channel_partner, a.name AS assigned_agent_name
+         FROM callback_reopen_snapshot s
+         LEFT JOIN callback_jobs j ON j.id = s.callback_job_id
+         LEFT JOIN agents a ON a.id = COALESCE(s.new_assigned_agent_id, s.previous_assigned_agent_id)
+         WHERE s.job_key = ? ORDER BY s.id`,
+        [CLOSURE_REOPEN_JOB_KEY]
+      );
+      let summary: any = {};
+      try { summary = JSON.parse(run.summary || "{}"); } catch (_) {}
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet([
+        { Metric: "Run completed", Value: run.completed_at },
+        { Metric: "Candidates", Value: summary.candidates ?? 0 },
+        { Metric: "Compliant - left closed", Value: summary.compliant_left_closed ?? 0 },
+        { Metric: "Reopened", Value: summary.reopened ?? 0 },
+        { Metric: "Assigned and reopened", Value: summary.assigned_and_reopened ?? 0 },
+        { Metric: "Skipped - no allocation", Value: summary.skipped_no_allocation ?? 0 },
+      ]), "Summary");
+      const rows = snapshots.map((s: any) => ({
+        "Vehicle Registration": s.vehicle_reg_raw || "N/A",
+        "Client Name": s.client_name || "N/A",
+        "Client Phone": s.client_phone_raw || "N/A",
+        "Channel Partner": s.channel_partner || "N/A",
+        "Assigned Agent": s.assigned_agent_name || "Unassigned",
+        Action: s.action,
+        "Outgoing Calls at Run": s.outgoing_calls || 0,
+        "SMS at Run": s.sms_count || 0,
+        "Calls Still Needed": Math.max(0, settings.max_attempts - (s.outgoing_calls || 0)),
+        "SMS Still Needed": Math.max(0, settings.max_sms_attempts - (s.sms_count || 0)),
+      }));
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows.filter((r: any) => r.Action !== "SKIPPED_NO_ALLOCATION")), "Reopened");
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows.filter((r: any) => r.Action === "SKIPPED_NO_ALLOCATION")), "Skipped");
+      const buffer = XLSX.write(wb, { type: "buffer", bookType: "xlsx" });
+      res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+      res.setHeader("Content-Disposition", `attachment; filename="one_time_reopen_report_${new Date().toISOString().slice(0, 10)}.xlsx"`);
+      res.send(buffer);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
   // Vite middleware for development
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
@@ -1550,6 +1590,9 @@ function computeActivitySummary(events: any[], totalAgents: number = 0) {
 
   app.listen(PORT, "0.0.0.0", () => {
     console.log(`Solvit server running on http://localhost:${PORT}`);
+    runOneTimeClosureReopen(db).catch((err) => {
+      console.error("[One-Time Reopen] Background error:", err);
+    });
   });
 
   // Recurring sweep: close matured callback records within a minute

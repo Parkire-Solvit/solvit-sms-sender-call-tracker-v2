@@ -34,8 +34,8 @@ ON CONFLICT (callback_job_id, phone_normalised) DO NOTHING;
 
 ALTER TABLE callback_settings ADD COLUMN IF NOT EXISTS max_sms_attempts INTEGER NOT NULL DEFAULT 4;
 
--- These tables support an explicitly-triggered, auditable repair. Nothing in
--- this migration changes existing callback statuses.
+-- These tables support the final build's idempotent, auditable one-time
+-- correction. The migration itself does not change callback statuses.
 CREATE TABLE IF NOT EXISTS one_time_job_runs (
   id SERIAL PRIMARY KEY,
   job_key TEXT UNIQUE NOT NULL,

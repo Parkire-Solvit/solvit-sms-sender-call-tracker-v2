@@ -23,10 +23,6 @@ const VALID_AGENT_OUTCOMES = new Set<string>([
   "UNREACHABLE",
 ]);
 
-// CONNECTED is a second event emitted for the same call by some Android
-// devices. Only OUTGOING represents a distinct contact attempt.
-export const COUNTED_CALL_STATUSES = new Set<string>(["OUTGOING"]);
-
 const MONTHS: Record<string, number> = {
   JANUARY: 0, FEBRUARY: 1, MARCH: 2, APRIL: 3, MAY: 4, JUNE: 5,
   JULY: 6, AUGUST: 7, SEPTEMBER: 8, OCTOBER: 9, NOVEMBER: 10, DECEMBER: 11,
@@ -51,6 +47,12 @@ export function parseFileNameEndDate(fileName: string): Date | null {
 }
 
 /**
+ * Counted call statuses: Count a call attempt only when type is CALL and status is OUTGOING.
+ * Do not count CONNECTED (it duplicates the same call), INCOMING or MISSED.
+ */
+export const COUNTED_CALL_STATUSES = new Set<string>(["OUTGOING"]);
+
+/**
  * Normalization Rules:
  * Phone number:
  *   - Strip every character except digits.
@@ -63,27 +65,51 @@ export function normalizePhone(raw: string | null | undefined): string {
   return digits.length >= 9 ? digits.slice(-9) : digits;
 }
 
+/**
+ * Extract individual phone numbers from a raw string.
+ * Splits on "/", ",", ";", "&", line breaks and the words "or" and "and" (case-insensitive).
+ * Does not split on spaces inside a token, so "0702 280749" and "+254 702 280 749" stay one number.
+ * If a token still has more than 13 digits, splits it into numbers beginning with 0, 254 or +254.
+ * Normalises each to the last 9 digits, discards tokens with fewer than 9 digits,
+ * removes duplicates, and treats the first as primary.
+ */
 export function extractPhoneNumbers(raw: string | null | undefined): string[] {
   if (!raw) return [];
-  const tokens = String(raw).trim().split(/[\r\n,;&/]+|\b(?:or|and)\b/i);
+  const text = String(raw).trim();
+  if (!text) return [];
+
+  // Split on "/", ",", ";", "&", line breaks and the words "or" and "and" (case-insensitive)
+  const initialTokens = text.split(/[\r\n,;&/]+|\b(?:or|and)\b/i);
+
+  const subTokens: string[] = [];
+  for (const token of initialTokens) {
+    const trimmed = token.trim();
+    if (!trimmed) continue;
+
+    const digitsOnly = trimmed.replace(/\D/g, "");
+    if (digitsOnly.length > 13) {
+      // If a token still has more than 13 digits, split it into numbers beginning with 0, 254 or +254
+      const parts = trimmed.split(/(?=\s*(?:\+?254|0)\d{8,})/g);
+      for (const p of parts) {
+        if (p.trim()) subTokens.push(p.trim());
+      }
+    } else {
+      subTokens.push(trimmed);
+    }
+  }
+
   const result: string[] = [];
   const seen = new Set<string>();
-  for (const token of tokens) {
-    const norm = normalizePhone(token);
+
+  for (const t of subTokens) {
+    const norm = normalizePhone(t);
     if (norm.length >= 9 && !seen.has(norm)) {
       seen.add(norm);
       result.push(norm);
     }
   }
-  return result;
-}
 
-export function hasReachedMaxAttempts(
-  activity: { attempt_count: number; sms_count: number },
-  settings: { max_attempts: number; max_sms_attempts: number }
-): boolean {
-  return Number(activity.attempt_count || 0) >= Number(settings.max_attempts || 4)
-    && Number(activity.sms_count || 0) >= Number(settings.max_sms_attempts || 4);
+  return result;
 }
 
 /**
@@ -97,10 +123,85 @@ export function normalizeVehicleReg(raw: string | null | undefined): string {
 }
 
 /**
+ * Vehicle registration alphanumeric normalization (used for SMS reg matching):
+ *   - Uppercase.
+ *   - Strip every non-alphanumeric character.
+ */
+export function normalizeRegAlphaNumeric(raw: string | null | undefined): string {
+  if (!raw) return "";
+  return String(raw).toUpperCase().replace(/[^A-Z0-9]/g, "");
+}
+
+/**
+ * Idempotent startup routine that parses client_phone_raw of every existing job
+ * and adds any additional numbers as IMPORT.
+ */
+export async function backfillAdditionalImportPhones(db: DbAdapter): Promise<number> {
+  const jobs = await db.queryAll<{ id: number; client_phone_raw: string }>(
+    `SELECT id, client_phone_raw FROM callback_jobs WHERE client_phone_raw IS NOT NULL AND client_phone_raw != ''`
+  );
+  let addedCount = 0;
+  for (const job of jobs) {
+    const phones = extractPhoneNumbers(job.client_phone_raw);
+    for (let i = 1; i < phones.length; i++) {
+      const p = phones[i];
+      try {
+        const res = await db.execute(
+          `INSERT INTO callback_job_phones (callback_job_id, phone_normalised, source)
+           VALUES (?, ?, 'IMPORT')
+           ON CONFLICT (callback_job_id, phone_normalised) DO NOTHING`,
+          [job.id, p]
+        );
+        if (res.affectedRows > 0) addedCount++;
+      } catch (_) {}
+    }
+  }
+  if (addedCount > 0) {
+    console.log(`[BACKFILL] Backfilled ${addedCount} additional phone number(s) into callback_job_phones.`);
+  }
+  return addedCount;
+}
+
+
+/**
+ * Helper to clamp a threshold between 1 and 20
+ */
+export function clampThreshold(val: any, fallback = 4): number {
+  const n = parseInt(String(val), 10);
+  if (isNaN(n)) return fallback;
+  return Math.min(20, Math.max(1, n));
+}
+
+/**
+ * Combined closure rule: job closes as MAX_ATTEMPTS_REACHED only when
+ * BOTH conditions are true:
+ * (a) it has at least N outgoing calls AND
+ * (b) it has at least M SMS
+ * Incoming, missed, and connected-only calls are never counted towards calls.
+ */
+export function hasReachedMaxAttempts(
+  activity: { attempt_count: number; sms_count: number },
+  settings: { max_attempts: number; max_sms_attempts: number }
+): boolean {
+  const reqCalls = Number(settings.max_attempts || 4);
+  const reqSms = Number(settings.max_sms_attempts || 4);
+  return (
+    Number(activity.attempt_count || 0) >= reqCalls &&
+    Number(activity.sms_count || 0) >= reqSms
+  );
+}
+
+/**
  * Fetch callback settings or initialize defaults
  */
 export async function getCallbackSettings(db: DbAdapter): Promise<CallbackSettings> {
-  const row = await db.queryOne<CallbackSettings & { disappearance_alert_fixed_count?: number; disappearance_alert_percentage?: number }>(
+  const row = await db.queryOne<
+    CallbackSettings & {
+      max_sms_attempts?: number;
+      disappearance_alert_fixed_count?: number;
+      disappearance_alert_percentage?: number;
+    }
+  >(
     `SELECT id, staff_count, callback_team_tag, max_attempts, max_sms_attempts, disappearance_alert_fixed_count, disappearance_alert_percentage, updated_at FROM callback_settings WHERE id = 1`
   );
 
@@ -120,8 +221,8 @@ export async function getCallbackSettings(db: DbAdapter): Promise<CallbackSettin
         await db.execute(`UPDATE agents SET tag = 'Callback Team' WHERE tag = 'Insurance Callback Team'`);
       } catch (_) {}
     }
-    maxAttempts = Number(row.max_attempts || 4);
-    maxSmsAttempts = Number(row.max_sms_attempts || 4);
+    maxAttempts = clampThreshold(row.max_attempts, 4);
+    maxSmsAttempts = clampThreshold(row.max_sms_attempts, 4);
     fixedCount = row.disappearance_alert_fixed_count !== undefined && row.disappearance_alert_fixed_count !== null ? Number(row.disappearance_alert_fixed_count) : 50;
     percentage = row.disappearance_alert_percentage !== undefined && row.disappearance_alert_percentage !== null ? Number(row.disappearance_alert_percentage) : 30;
   } else {
@@ -181,8 +282,8 @@ export async function updateCallbackSettings(
   const current = await getCallbackSettings(db);
 
   const teamTag = updates.callback_team_tag !== undefined ? String(updates.callback_team_tag).trim() : current.callback_team_tag;
-  const maxAttempts = updates.max_attempts !== undefined ? Number(updates.max_attempts) : current.max_attempts;
-  const maxSmsAttempts = updates.max_sms_attempts !== undefined ? Number(updates.max_sms_attempts) : current.max_sms_attempts;
+  const maxAttempts = updates.max_attempts !== undefined ? clampThreshold(updates.max_attempts, current.max_attempts) : current.max_attempts;
+  const maxSmsAttempts = updates.max_sms_attempts !== undefined ? clampThreshold(updates.max_sms_attempts, current.max_sms_attempts) : current.max_sms_attempts;
   const fixedCount = updates.disappearance_alert_fixed_count !== undefined ? Number(updates.disappearance_alert_fixed_count) : (current.disappearance_alert_fixed_count ?? 50);
   const percentage = updates.disappearance_alert_percentage !== undefined ? Number(updates.disappearance_alert_percentage) : (current.disappearance_alert_percentage ?? 30);
 
@@ -282,8 +383,7 @@ export async function seedChannelPartnerAllocations(db: DbAdapter): Promise<void
       await db.execute(
         `INSERT INTO channel_partner_allocations (channel_partner, assigned_agent_id, updated_at)
          VALUES (?, ?, CURRENT_TIMESTAMP)
-         ON CONFLICT (channel_partner) DO UPDATE SET assigned_agent_id = EXCLUDED.assigned_agent_id, updated_at = CURRENT_TIMESTAMP
-         RETURNING channel_partner`,
+         ON CONFLICT (channel_partner) DO UPDATE SET assigned_agent_id = EXCLUDED.assigned_agent_id, updated_at = CURRENT_TIMESTAMP`,
         [alloc.partner, alloc.agentId]
       );
     }
@@ -366,7 +466,7 @@ export async function setChannelPartnerAllocation(
     );
   } else {
     await db.execute(
-      `INSERT INTO channel_partner_allocations (channel_partner, assigned_agent_id, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP) RETURNING channel_partner`,
+      `INSERT INTO channel_partner_allocations (channel_partner, assigned_agent_id, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)`,
       [partner, assignedAgentId]
     );
   }
@@ -385,29 +485,34 @@ export async function setChannelPartnerAllocation(
  * Keeps the agent from the vehicle imported earliest.
  */
 export async function reconcileClientAgentAssignments(db: DbAdapter): Promise<{ clientsFixed: number; jobsUpdated: number }> {
-  const splitPhones = await db.queryAll<{ client_phone: string }>(
-    `SELECT client_phone FROM callback_jobs
-     WHERE assigned_agent_id IS NOT NULL
-     GROUP BY client_phone
-     HAVING COUNT(DISTINCT assigned_agent_id) > 1`
+  const splitPhones = await db.queryAll<{ phone_normalised: string }>(
+    `SELECT p.phone_normalised
+     FROM callback_job_phones p
+     JOIN callback_jobs j ON p.callback_job_id = j.id
+     WHERE j.assigned_agent_id IS NOT NULL AND j.status = 'AMBER'
+     GROUP BY p.phone_normalised
+     HAVING COUNT(DISTINCT j.assigned_agent_id) > 1`
   );
 
   let clientsFixed = 0;
   let jobsUpdated = 0;
 
-  for (const { client_phone } of splitPhones) {
+  for (const { phone_normalised } of splitPhones) {
     const earliest = await db.queryOne<{ assigned_agent_id: number }>(
-      `SELECT assigned_agent_id FROM callback_jobs
-       WHERE client_phone = ? AND assigned_agent_id IS NOT NULL
-       ORDER BY first_imported_at ASC LIMIT 1`,
-      [client_phone]
+      `SELECT j.assigned_agent_id
+       FROM callback_jobs j
+       JOIN callback_job_phones p ON p.callback_job_id = j.id
+       WHERE p.phone_normalised = ? AND j.assigned_agent_id IS NOT NULL
+       ORDER BY j.first_imported_at ASC LIMIT 1`,
+      [phone_normalised]
     );
     if (!earliest) continue;
 
     const result = await db.execute(
       `UPDATE callback_jobs SET assigned_agent_id = ?, updated_at = CURRENT_TIMESTAMP
-       WHERE client_phone = ? AND status = 'AMBER' AND assigned_agent_id != ?`,
-      [earliest.assigned_agent_id, client_phone, earliest.assigned_agent_id]
+       WHERE id IN (SELECT callback_job_id FROM callback_job_phones WHERE phone_normalised = ?)
+         AND status = 'AMBER' AND assigned_agent_id != ?`,
+      [earliest.assigned_agent_id, phone_normalised, earliest.assigned_agent_id]
     );
     if (result.affectedRows > 0) {
       clientsFixed++;
@@ -455,12 +560,14 @@ export async function importCallbackJobs(
     const customerEmail = row.customer_email ? String(row.customer_email).trim() : null;
 
     const normReg = normalizeVehicleReg(rawReg);
-    const phoneNumbers = extractPhoneNumbers(rawPhone);
-    const normPhone = phoneNumbers[0] || normalizePhone(rawPhone);
+    const extractedPhones = extractPhoneNumbers(rawPhone);
 
-    if (!normReg || !normPhone) {
+    // Skip row only when no valid number is found or reg is empty
+    if (!normReg || extractedPhones.length === 0) {
       continue;
     }
+
+    const normPhone = extractedPhones[0];
 
     // Check if a callback_jobs row with this vehicle_reg already exists
     const existing = await db.queryOne<{ id: number; status: string }>(
@@ -485,26 +592,35 @@ export async function importCallbackJobs(
             [existing.id]
           );
         }
-        skippedOpenCount++;
-        for (const phone of phoneNumbers) {
+
+        // Store all extracted numbers in callback_job_phones
+        for (let i = 0; i < extractedPhones.length; i++) {
+          const p = extractedPhones[i];
+          const src = i === 0 ? "PRIMARY" : "IMPORT";
           await db.execute(
             `INSERT INTO callback_job_phones (callback_job_id, phone_normalised, source)
-             VALUES (?, ?, ?) ON CONFLICT (callback_job_id, phone_normalised) DO NOTHING`,
-            [existing.id, phone, phone === normPhone ? 'PRIMARY' : 'IMPORT']
+             VALUES (?, ?, ?)
+             ON CONFLICT (callback_job_id, phone_normalised) DO NOTHING`,
+            [existing.id, p, src]
           );
         }
+
+        skippedOpenCount++;
       }
     } else {
       // Find assigned_agent_id:
-      // If this client already has a vehicle assigned to someone, keep every
-      // vehicle of theirs with that same agent, regardless of channel partner.
+      // Treat clients as the same when ANY number overlaps
       let assignedAgentId: number | null = null;
 
+      const placeholders = extractedPhones.map(() => "?").join(",");
       const existingClientAssignment = await db.queryOne<{ assigned_agent_id: number | null }>(
-        `SELECT assigned_agent_id FROM callback_jobs
-         WHERE client_phone = ? AND assigned_agent_id IS NOT NULL
-         ORDER BY first_imported_at ASC LIMIT 1`,
-        [normPhone]
+        `SELECT j.assigned_agent_id
+         FROM callback_jobs j
+         LEFT JOIN callback_job_phones p ON p.callback_job_id = j.id
+         WHERE (j.client_phone IN (${placeholders}) OR p.phone_normalised IN (${placeholders}))
+           AND j.assigned_agent_id IS NOT NULL
+         ORDER BY j.first_imported_at ASC LIMIT 1`,
+        [...extractedPhones, ...extractedPhones]
       );
 
       if (existingClientAssignment?.assigned_agent_id) {
@@ -517,7 +633,7 @@ export async function importCallbackJobs(
       }
 
       // Insert new row at status = 'AMBER'
-      const inserted = await db.execute(
+      const insertResult = await db.execute(
         `INSERT INTO callback_jobs (
           vehicle_reg, vehicle_reg_raw, client_name, client_phone, client_phone_raw, customer_email,
           channel_partner, initiated_date, brian_reason, status, assigned_agent_id,
@@ -537,11 +653,17 @@ export async function importCallbackJobs(
         ]
       );
 
-      for (const phone of phoneNumbers) {
+      const newJobId = insertResult.lastInsertId;
+
+      // Store all extracted numbers in callback_job_phones
+      for (let i = 0; i < extractedPhones.length; i++) {
+        const p = extractedPhones[i];
+        const src = i === 0 ? "PRIMARY" : "IMPORT";
         await db.execute(
           `INSERT INTO callback_job_phones (callback_job_id, phone_normalised, source)
-           VALUES (?, ?, ?) ON CONFLICT (callback_job_id, phone_normalised) DO NOTHING`,
-          [inserted.lastInsertId, phone, phone === normPhone ? 'PRIMARY' : 'IMPORT']
+           VALUES (?, ?, ?)
+           ON CONFLICT (callback_job_id, phone_normalised) DO NOTHING`,
+          [newJobId, p, src]
         );
       }
 
@@ -654,67 +776,197 @@ export async function importCallbackJobs(
   };
 }
 
+export interface JobActivityMetrics {
+  attempt_count: number;
+  sms_count: number;
+  last_attempt_at: string | null;
+}
+
+/**
+ * Shared helper: returns agents that are not archived and match the callback team tag.
+ * Uses exactly the same conditions that computeCallbackJobsActivity uses.
+ */
+export async function getValidCallbackAgents(
+  db: DbAdapter,
+  teamTag?: string
+): Promise<Array<{ id: number; name: string }>> {
+  const tag = (teamTag || "Callback Team").trim().toLowerCase();
+  return db.queryAll<{ id: number; name: string }>(
+    `SELECT id, name FROM agents WHERE LOWER(TRIM(tag)) = LOWER(TRIM(?)) AND archived_at IS NULL`,
+    [tag]
+  );
+}
+
+/**
+ * Shared helper: returns the Set of agent IDs that are not archived and match the callback team tag.
+ */
+export async function getValidCallbackAgentIds(
+  db: DbAdapter,
+  teamTag?: string
+): Promise<Set<number>> {
+  const agents = await getValidCallbackAgents(db, teamTag);
+  return new Set(agents.map((a) => a.id));
+}
+
+/**
+ * Shared activity computation engine for callback jobs.
+ * Used by both getCallbackJobs and closeMaturedCallbackJobs so they can never disagree.
+ *
+ * Rules:
+ * - Compares callback team tag using LOWER(TRIM()) on both sides, excluding archived agents.
+ * - Call attempts counted only when type is CALL and status is OUTGOING (from COUNTED_CALL_STATUSES).
+ *   Does not count CONNECTED, INCOMING, or MISSED.
+ * - SMS counting counted when type is SMS.
+ * - An event counts toward a job when:
+ *     1. The event's agent is the job's assigned agent.
+ *     2. AND:
+ *        - For CALL: its normalised phone equals ANY number in callback_job_phones for that job.
+ *        - For SMS: its normalised phone equals ANY number in callback_job_phones for that job
+ *                   OR its reg_no (alphanumeric normalised) equals the job's vehicle_reg (alphanumeric normalised).
+ * - An event is never counted twice for the same job.
+ */
+export async function computeCallbackJobsActivity(
+  db: DbAdapter,
+  jobs: Array<{ id: number; assigned_agent_id: number | null; vehicle_reg: string; client_phone?: string }>
+): Promise<Map<number, JobActivityMetrics>> {
+  const result = new Map<number, JobActivityMetrics>();
+  const countedCallEvents = new Map<number, Set<number>>();
+  const countedSmsEvents = new Map<number, Set<number>>();
+
+  for (const j of jobs) {
+    result.set(j.id, { attempt_count: 0, sms_count: 0, last_attempt_at: null });
+    countedCallEvents.set(j.id, new Set<number>());
+    countedSmsEvents.set(j.id, new Set<number>());
+  }
+
+  if (jobs.length === 0) return result;
+
+  const settings = await getCallbackSettings(db);
+  const teamTag = (settings.callback_team_tag || "Callback Team").trim().toLowerCase();
+
+  // Query events scoped to non-archived agents matching teamTag
+  const events = await db.queryAll<{
+    id: number;
+    target_phone: string;
+    type: string;
+    status: string | null;
+    reg_no: string | null;
+    timestamp: string;
+    agent_id: number;
+  }>(
+    `SELECT e.id, e.target_phone, e.type, e.status, e.reg_no, e.timestamp, e.agent_id
+     FROM events e
+     JOIN agents a ON e.agent_id = a.id
+     WHERE LOWER(TRIM(a.tag)) = LOWER(TRIM(?)) AND (a.archived_at IS NULL)
+     ORDER BY e.timestamp ASC`,
+    [teamTag]
+  );
+
+  // Fetch all phone numbers associated with the jobs
+  const allPhones = await db.queryAll<{ callback_job_id: number; phone_normalised: string }>(
+    `SELECT callback_job_id, phone_normalised FROM callback_job_phones`
+  );
+  const jobPhonesMap = new Map<number, Set<string>>();
+  for (const p of allPhones) {
+    let set = jobPhonesMap.get(p.callback_job_id);
+    if (!set) {
+      set = new Set<string>();
+      jobPhonesMap.set(p.callback_job_id, set);
+    }
+    set.add(p.phone_normalised);
+  }
+
+  // Also ensure client_phone on the job is included in the lookup set
+  for (const j of jobs) {
+    if (j.client_phone) {
+      let set = jobPhonesMap.get(j.id);
+      if (!set) {
+        set = new Set<string>();
+        jobPhonesMap.set(j.id, set);
+      }
+      const norm = normalizePhone(j.client_phone);
+      if (norm) set.add(norm);
+    }
+  }
+
+  // Group candidate jobs by assigned_agent_id
+  const jobsByAgent = new Map<number, typeof jobs>();
+  for (const j of jobs) {
+    if (j.assigned_agent_id !== null) {
+      const list = jobsByAgent.get(j.assigned_agent_id) || [];
+      list.push(j);
+      jobsByAgent.set(j.assigned_agent_id, list);
+    }
+  }
+
+  for (const ev of events) {
+    if (!ev.agent_id) continue;
+    const candidateJobs = jobsByAgent.get(ev.agent_id);
+    if (!candidateJobs || candidateJobs.length === 0) continue;
+
+    const normEvPhone = normalizePhone(ev.target_phone);
+    const normEvReg = normalizeRegAlphaNumeric(ev.reg_no);
+    const isCall = ev.type === "CALL" && COUNTED_CALL_STATUSES.has(String(ev.status || "").toUpperCase());
+    const isSms = ev.type === "SMS";
+
+    if (!isCall && !isSms) continue;
+
+    for (const job of candidateJobs) {
+      const phones = jobPhonesMap.get(job.id);
+      const phoneMatches = Boolean(normEvPhone && phones && phones.has(normEvPhone));
+
+      if (isCall && phoneMatches) {
+        const set = countedCallEvents.get(job.id)!;
+        if (!set.has(ev.id)) {
+          set.add(ev.id);
+          const act = result.get(job.id)!;
+          act.attempt_count += 1;
+          if (!act.last_attempt_at || new Date(ev.timestamp) > new Date(act.last_attempt_at)) {
+            act.last_attempt_at = ev.timestamp;
+          }
+        }
+      } else if (isSms) {
+        const regMatches = Boolean(normEvReg && normEvReg === normalizeRegAlphaNumeric(job.vehicle_reg));
+        if (phoneMatches || regMatches) {
+          const set = countedSmsEvents.get(job.id)!;
+          if (!set.has(ev.id)) {
+            set.add(ev.id);
+            const act = result.get(job.id)!;
+            act.sms_count += 1;
+          }
+        }
+      }
+    }
+  }
+
+  return result;
+}
+
 /**
  * Close any AMBER jobs whose attempts have reached or exceeded callback_settings.max_attempts
  */
-export async function closeMaturedCallbackJobs(db: DbAdapter, jobId?: number): Promise<void> {
+export async function closeMaturedCallbackJobs(db: DbAdapter, jobId?: number): Promise<number> {
   const settings = await getCallbackSettings(db);
+  const maxAttempts = settings.max_attempts;
 
-  let query = `SELECT id, client_phone, assigned_agent_id FROM callback_jobs WHERE status = 'AMBER'`;
+  let query = `SELECT id, vehicle_reg, client_phone, assigned_agent_id FROM callback_jobs WHERE status = 'AMBER'`;
   const params: any[] = [];
   if (jobId !== undefined && jobId !== null) {
     query += ` AND id = ?`;
     params.push(jobId);
   }
 
-  const openJobs = await db.queryAll<{ id: number; client_phone: string; assigned_agent_id: number | null }>(query, params);
-  if (openJobs.length === 0) return;
-
-  // Query events scoped to agents.tag = settings.callback_team_tag AND archived_at IS NULL
-  const events = await db.queryAll<{ target_phone: string; type: string; status: string | null; agent_id: number }>(
-    `SELECT e.target_phone, e.type, e.status, e.agent_id
-     FROM events e
-     JOIN agents a ON e.agent_id = a.id
-     WHERE LOWER(TRIM(a.tag)) = LOWER(TRIM(?)) AND (a.archived_at IS NULL)
-       AND e.type IN ('CALL', 'SMS')`,
-    [settings.callback_team_tag]
-  );
-
-  const phoneActivityMap = new Map<string, { attempt_count: number; sms_count: number }>();
-  for (const ev of events) {
-    const normP = normalizePhone(ev.target_phone);
-    if (!normP) continue;
-    const key = `${normP}::${ev.agent_id}`;
-    const activity = phoneActivityMap.get(key) || { attempt_count: 0, sms_count: 0 };
-    if (ev.type === "CALL" && COUNTED_CALL_STATUSES.has(String(ev.status || "").toUpperCase())) {
-      activity.attempt_count += 1;
-    } else if (ev.type === "SMS") {
-      activity.sms_count += 1;
-    }
-    phoneActivityMap.set(key, activity);
+  const openJobs = await db.queryAll<{ id: number; vehicle_reg: string; client_phone: string; assigned_agent_id: number | null }>(query, params);
+  if (openJobs.length === 0) {
+    return 0;
   }
 
-  const phoneRows = await db.queryAll<{ callback_job_id: number; phone_normalised: string }>(
-    `SELECT callback_job_id, phone_normalised FROM callback_job_phones`
-  );
-  const phonesByJob = new Map<number, Set<string>>();
-  for (const row of phoneRows) {
-    const set = phonesByJob.get(Number(row.callback_job_id)) || new Set<string>();
-    set.add(normalizePhone(row.phone_normalised));
-    phonesByJob.set(Number(row.callback_job_id), set);
-  }
+  const metricsMap = await computeCallbackJobsActivity(db, openJobs);
+  let closedCount = 0;
 
   for (const job of openJobs) {
-    const phones = phonesByJob.get(Number(job.id)) || new Set<string>([normalizePhone(job.client_phone)]);
-    const activity = { attempt_count: 0, sms_count: 0 };
-    for (const phone of phones) {
-      const phoneActivity = phoneActivityMap.get(`${phone}::${job.assigned_agent_id}`);
-      if (phoneActivity) {
-        activity.attempt_count += phoneActivity.attempt_count;
-        activity.sms_count += phoneActivity.sms_count;
-      }
-    }
-    if (hasReachedMaxAttempts(activity, settings)) {
+    const act = metricsMap.get(job.id) || { attempt_count: 0, sms_count: 0, last_attempt_at: null };
+    if (hasReachedMaxAttempts(act, settings)) {
       await db.execute(
         `UPDATE callback_jobs 
          SET status = 'RED', closed_at = CURRENT_TIMESTAMP, latest_outcome = 'MAX_ATTEMPTS_REACHED', updated_at = CURRENT_TIMESTAMP 
@@ -727,8 +979,12 @@ export async function closeMaturedCallbackJobs(db: DbAdapter, jobId?: number): P
         ) VALUES (?, 'MAX_ATTEMPTS_REACHED', 'Automatically closed: minimum outgoing calls and minimum SMS reached.', 'System', 'RED', CURRENT_TIMESTAMP)`,
         [job.id]
       );
+      closedCount++;
     }
   }
+
+  console.log(`[CALLBACKS] closeMaturedCallbackJobs checked ${openJobs.length} open job(s). Closed ${closedCount} matured job(s).`);
+  return closedCount;
 }
 
 /**
@@ -869,7 +1125,9 @@ export async function getCallbackJobs(
 
   if (filters.assigned_agent_id && filters.assigned_agent_id !== "ALL") {
     const rawVal = String(filters.assigned_agent_id).trim();
-    if (/^\d+$/.test(rawVal)) {
+    if (rawVal === "UNASSIGNED" || rawVal === "unassigned") {
+      query += ` AND j.assigned_agent_id IS NULL`;
+    } else if (/^\d+$/.test(rawVal)) {
       query += ` AND j.assigned_agent_id = ?`;
       params.push(Number(rawVal));
     } else {
@@ -897,62 +1155,33 @@ export async function getCallbackJobs(
 
   const jobs = await db.queryAll<any>(query, params);
 
-  // Scoped activity computation:
-  // Scoped to agents.tag = callback_settings.callback_team_tag AND agents.archived_at IS NULL,
-  // matching the job's assigned_agent_id:
-  const events = await db.queryAll<{ target_phone: string; type: string; status: string | null; timestamp: string; agent_id: number }>(
-    `SELECT e.target_phone, e.type, e.status, e.timestamp, e.agent_id
-     FROM events e
-     JOIN agents a ON e.agent_id = a.id
-     WHERE a.tag = ? AND (a.archived_at IS NULL)`,
-    [settings.callback_team_tag]
+  // Compute metrics using shared helper
+  const metricsMap = await computeCallbackJobsActivity(db, jobs);
+
+  // Fetch phones for all jobs
+  const phoneRows = await db.queryAll<{ id: number; callback_job_id: number; phone_normalised: string; source: any }>(
+    `SELECT id, callback_job_id, phone_normalised, source FROM callback_job_phones`
   );
-
-  const phoneActivityMap = new Map<string, { attempt_count: number; sms_count: number; last_attempt_at: string | null }>();
-
-  for (const ev of events) {
-    const normP = normalizePhone(ev.target_phone);
-    if (!normP) continue;
-    const key = `${normP}::${ev.agent_id}`;
-
-    let act = phoneActivityMap.get(key);
-    if (!act) {
-      act = { attempt_count: 0, sms_count: 0, last_attempt_at: null };
-      phoneActivityMap.set(key, act);
+  const phonesByJobId = new Map<number, Array<{ id: number; phone_normalised: string; source: any }>>();
+  for (const pr of phoneRows) {
+    let list = phonesByJobId.get(pr.callback_job_id);
+    if (!list) {
+      list = [];
+      phonesByJobId.set(pr.callback_job_id, list);
     }
-
-    if (ev.type === "CALL" && COUNTED_CALL_STATUSES.has(String(ev.status || "").toUpperCase())) {
-      act.attempt_count += 1;
-      if (!act.last_attempt_at || new Date(ev.timestamp) > new Date(act.last_attempt_at)) {
-        act.last_attempt_at = ev.timestamp;
-      }
-    } else if (ev.type === "SMS") {
-      act.sms_count += 1;
-    }
-  }
-
-  const jobPhoneRows = await db.queryAll<{ callback_job_id: number; phone_normalised: string }>(
-    `SELECT callback_job_id, phone_normalised FROM callback_job_phones`
-  );
-  const jobPhones = new Map<number, Set<string>>();
-  for (const row of jobPhoneRows) {
-    const set = jobPhones.get(Number(row.callback_job_id)) || new Set<string>();
-    set.add(normalizePhone(row.phone_normalised));
-    jobPhones.set(Number(row.callback_job_id), set);
+    list.push({ id: pr.id, phone_normalised: pr.phone_normalised, source: pr.source });
   }
 
   return jobs.map((job) => {
-    const phones = jobPhones.get(Number(job.id)) || new Set<string>([normalizePhone(job.client_phone)]);
-    const act = { attempt_count: 0, sms_count: 0, last_attempt_at: null as string | null };
-    for (const phone of phones) {
-      const activity = phoneActivityMap.get(`${phone}::${job.assigned_agent_id}`);
-      if (!activity) continue;
-      act.attempt_count += activity.attempt_count;
-      act.sms_count += activity.sms_count;
-      if (activity.last_attempt_at && (!act.last_attempt_at || new Date(activity.last_attempt_at) > new Date(act.last_attempt_at))) {
-        act.last_attempt_at = activity.last_attempt_at;
-      }
-    }
+    const act = metricsMap.get(job.id) || {
+      attempt_count: 0,
+      sms_count: 0,
+      last_attempt_at: null,
+    };
+
+    const phones = phonesByJobId.get(job.id) || [
+      { id: 0, phone_normalised: job.client_phone, source: "PRIMARY" as const },
+    ];
 
     return {
       id: Number(job.id),
@@ -974,6 +1203,7 @@ export async function getCallbackJobs(
       closed_at: job.closed_at,
       created_at: job.created_at,
       updated_at: job.updated_at,
+      phones,
       attempt_count: act.attempt_count,
       sms_count: act.sms_count,
       sms_sent: act.sms_count > 0,
@@ -985,13 +1215,406 @@ export async function getCallbackJobs(
 }
 
 /**
+ * Assign a callback job to an agent (or unassign).
+ * Validates agent existence, non-archived status, and callback_team_tag.
+ * When applyToClient is true, also updates every other job sharing any phone
+ * that is AMBER or currently unassigned.
+ */
+export async function assignCallbackJob(
+  db: DbAdapter,
+  jobId: number,
+  agentId: number | null,
+  applyToClient = true
+): Promise<CallbackJob> {
+  const job = await db.queryOne<{ id: number; client_phone: string; status: string }>(
+    `SELECT id, client_phone, status FROM callback_jobs WHERE id = ?`,
+    [jobId]
+  );
+  if (!job) throw new Error(`Callback job with ID ${jobId} not found.`);
+
+  if (agentId !== null) {
+    const agent = await db.queryOne<{ id: number; name: string; tag: string; archived_at: any }>(
+      `SELECT id, name, tag, archived_at FROM agents WHERE id = ?`,
+      [agentId]
+    );
+    if (!agent) throw new Error(`Agent with ID ${agentId} not found.`);
+    if (agent.archived_at) throw new Error(`Cannot assign to archived agent '${agent.name}'.`);
+
+    const settings = await getCallbackSettings(db);
+    const teamTag = (settings.callback_team_tag || "Callback Team").trim().toLowerCase();
+    const agentTag = (agent.tag || "").trim().toLowerCase();
+    if (agentTag !== teamTag) {
+      throw new Error(`Agent '${agent.name}' is tagged '${agent.tag}', which does not match the callback team (${settings.callback_team_tag}).`);
+    }
+  }
+
+  // Update target job (works for AMBER, GREEN, and RED)
+  await db.execute(
+    `UPDATE callback_jobs SET assigned_agent_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+    [agentId, jobId]
+  );
+
+  // If applyToClient is true, assign every other job of the same client
+  // (any shared phone in callback_job_phones) that is AMBER or unassigned
+  if (applyToClient) {
+    const jobPhoneRows = await db.queryAll<{ phone_normalised: string }>(
+      `SELECT phone_normalised FROM callback_job_phones WHERE callback_job_id = ?`,
+      [jobId]
+    );
+    const phones = new Set(jobPhoneRows.map((r) => r.phone_normalised).filter(Boolean));
+    if (job.client_phone) phones.add(normalizePhone(job.client_phone));
+
+    if (phones.size > 0) {
+      const phoneList = Array.from(phones);
+      const placeholders = phoneList.map(() => "?").join(",");
+
+      const matchingOtherJobs = await db.queryAll<{ id: number }>(
+        `SELECT DISTINCT j.id
+         FROM callback_jobs j
+         LEFT JOIN callback_job_phones p ON p.callback_job_id = j.id
+         WHERE (j.client_phone IN (${placeholders}) OR p.phone_normalised IN (${placeholders}))
+           AND j.id != ?
+           AND (j.status = 'AMBER' OR j.assigned_agent_id IS NULL)`,
+        [...phoneList, ...phoneList, jobId]
+      );
+
+      for (const other of matchingOtherJobs) {
+        await db.execute(
+          `UPDATE callback_jobs SET assigned_agent_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+          [agentId, other.id]
+        );
+      }
+    }
+  }
+
+  // Check matured status for freshly assigned job
+  await closeMaturedCallbackJobs(db, jobId);
+
+  const fresh = await getCallbackJobs(db, {});
+  const updated = fresh.find((j) => j.id === jobId);
+  if (!updated) throw new Error("Failed to retrieve updated job.");
+  return updated;
+}
+
+/**
+ * Bulk assign jobs
+ */
+export async function assignCallbackJobsBulk(
+  db: DbAdapter,
+  jobIds: number[],
+  agentId: number | null
+): Promise<{ updatedCount: number }> {
+  let count = 0;
+  for (const id of jobIds) {
+    try {
+      await assignCallbackJob(db, id, agentId, true);
+      count++;
+    } catch (err) {
+      console.warn(`[ASSIGN BULK] Failed to assign job ${id}:`, err);
+    }
+  }
+  return { updatedCount: count };
+}
+
+/**
+ * Add a manual phone number to a callback job
+ */
+export async function addPhoneToCallbackJob(
+  db: DbAdapter,
+  jobId: number,
+  phone: string
+): Promise<{ success: boolean; callback_job_id: number; phone_normalised: string; source: string }> {
+  const norm = normalizePhone(phone);
+  if (!norm || norm.length < 9) {
+    throw new Error("Invalid phone number (must contain at least 9 digits).");
+  }
+
+  const job = await db.queryOne<{ id: number }>("SELECT id FROM callback_jobs WHERE id = ?", [jobId]);
+  if (!job) throw new Error(`Callback job with ID ${jobId} not found.`);
+
+  await db.execute(
+    `INSERT INTO callback_job_phones (callback_job_id, phone_normalised, source)
+     VALUES (?, ?, 'MANUAL')
+     ON CONFLICT (callback_job_id, phone_normalised) DO NOTHING`,
+    [jobId, norm]
+  );
+
+  return { success: true, callback_job_id: jobId, phone_normalised: norm, source: "MANUAL" };
+}
+
+/**
+ * Get unmatched activity for the last N days
+ */
+export async function getUnmatchedActivity(
+  db: DbAdapter,
+  days = 14
+): Promise<Array<{
+  id: number;
+  timestamp: string;
+  agent_id: number | null;
+  agent_name: string;
+  type: string;
+  status: string | null;
+  target_phone: string;
+  reg_no: string | null;
+  reason: "NO_JOB_FOR_NUMBER" | "ASSIGNED_TO_OTHER_AGENT" | "UNRECOGNISED_AGENT";
+  suggested_job: {
+    id: number;
+    vehicle_reg: string;
+    assigned_agent_id: number | null;
+    assigned_agent_name: string | null;
+  } | null;
+}>> {
+  const windowDays = Math.min(Math.max(1, Number(days) || 14), 90);
+  const settings = await getCallbackSettings(db);
+  const teamTag = (settings.callback_team_tag || "Callback Team").trim().toLowerCase();
+
+  const timeCondition = db.type === "postgresql"
+    ? `CURRENT_TIMESTAMP - INTERVAL '${windowDays} days'`
+    : `datetime(CURRENT_TIMESTAMP, '-${windowDays} days')`;
+
+  // Query events made by agents tagged with teamTag OR needs_review = true,
+  // excluding Unknown Agent and internal contacts
+  const events = await db.queryAll<{
+    id: number;
+    timestamp: string;
+    agent_id: number;
+    agent_name: string;
+    agent_tag: string;
+    needs_review: any;
+    type: string;
+    status: string | null;
+    target_phone: string;
+    reg_no: string | null;
+  }>(
+    `SELECT e.id, e.timestamp, e.agent_id, COALESCE(a.name, 'Unknown Agent') as agent_name,
+            COALESCE(a.tag, 'Uncategorised') as agent_tag, COALESCE(a.needs_review, FALSE) as needs_review,
+            e.type, e.status, e.target_phone, e.reg_no
+     FROM events e
+     JOIN agents a ON e.agent_id = a.id
+     WHERE a.name != 'Unknown Agent'
+       AND (a.archived_at IS NULL)
+       AND (LOWER(TRIM(a.tag)) = LOWER(TRIM(?)) OR a.needs_review = TRUE)
+       AND e.timestamp >= ${timeCondition}
+       AND NOT EXISTS (SELECT 1 FROM internal_contacts ic WHERE ic.phone_number = e.target_phone)
+     ORDER BY e.timestamp DESC`,
+    [teamTag]
+  );
+
+  const candidateEvents = events.filter((ev) => {
+    if (ev.type === "CALL") {
+      return COUNTED_CALL_STATUSES.has(String(ev.status || "").toUpperCase());
+    }
+    if (ev.type === "SMS") {
+      return true;
+    }
+    return false;
+  });
+
+  const allJobs = await db.queryAll<{
+    id: number;
+    vehicle_reg: string;
+    vehicle_reg_raw: string;
+    client_phone: string;
+    assigned_agent_id: number | null;
+    assigned_agent_name: string | null;
+  }>(
+    `SELECT j.id, j.vehicle_reg, j.vehicle_reg_raw, j.client_phone, j.assigned_agent_id, a.name as assigned_agent_name
+     FROM callback_jobs j
+     LEFT JOIN agents a ON j.assigned_agent_id = a.id`
+  );
+
+  const allPhones = await db.queryAll<{ callback_job_id: number; phone_normalised: string }>(
+    `SELECT callback_job_id, phone_normalised FROM callback_job_phones`
+  );
+  const phonesByJobId = new Map<number, Set<string>>();
+  const jobsByPhone = new Map<string, typeof allJobs[0]>();
+
+  for (const p of allPhones) {
+    let set = phonesByJobId.get(p.callback_job_id);
+    if (!set) {
+      set = new Set();
+      phonesByJobId.set(p.callback_job_id, set);
+    }
+    set.add(p.phone_normalised);
+  }
+
+  for (const j of allJobs) {
+    if (j.client_phone) {
+      let set = phonesByJobId.get(j.id);
+      if (!set) {
+        set = new Set();
+        phonesByJobId.set(j.id, set);
+      }
+      const norm = normalizePhone(j.client_phone);
+      if (norm) set.add(norm);
+    }
+  }
+
+  for (const j of allJobs) {
+    const phones = phonesByJobId.get(j.id);
+    if (phones) {
+      for (const p of phones) {
+        if (!jobsByPhone.has(p)) {
+          jobsByPhone.set(p, j);
+        }
+      }
+    }
+  }
+
+  const jobsByRegAlpha = new Map<string, typeof allJobs[0]>();
+  for (const j of allJobs) {
+    const r = normalizeRegAlphaNumeric(j.vehicle_reg);
+    if (r && !jobsByRegAlpha.has(r)) {
+      jobsByRegAlpha.set(r, j);
+    }
+  }
+
+  const unmatchedList: Array<{
+    id: number;
+    timestamp: string;
+    agent_id: number | null;
+    agent_name: string;
+    type: string;
+    status: string | null;
+    target_phone: string;
+    reg_no: string | null;
+    reason: "NO_JOB_FOR_NUMBER" | "ASSIGNED_TO_OTHER_AGENT" | "UNRECOGNISED_AGENT";
+    suggested_job: {
+      id: number;
+      vehicle_reg: string;
+      assigned_agent_id: number | null;
+      assigned_agent_name: string | null;
+    } | null;
+  }> = [];
+
+  for (const ev of candidateEvents) {
+    const normPhone = normalizePhone(ev.target_phone);
+    const normReg = normalizeRegAlphaNumeric(ev.reg_no);
+    const isCall = ev.type === "CALL";
+    const isSms = ev.type === "SMS";
+
+    let matched = false;
+    for (const j of allJobs) {
+      if (j.assigned_agent_id === ev.agent_id) {
+        const phones = phonesByJobId.get(j.id);
+        const pMatch = Boolean(normPhone && phones && phones.has(normPhone));
+        if (isCall && pMatch) {
+          matched = true;
+          break;
+        }
+        if (isSms) {
+          const rMatch = Boolean(normReg && normReg === normalizeRegAlphaNumeric(j.vehicle_reg));
+          if (pMatch || rMatch) {
+            matched = true;
+            break;
+          }
+        }
+      }
+    }
+
+    if (matched) continue;
+
+    let reason: "NO_JOB_FOR_NUMBER" | "ASSIGNED_TO_OTHER_AGENT" | "UNRECOGNISED_AGENT" = "NO_JOB_FOR_NUMBER";
+    let suggestedJob: {
+      id: number;
+      vehicle_reg: string;
+      assigned_agent_id: number | null;
+      assigned_agent_name: string | null;
+    } | null = null;
+
+    if (Boolean(ev.needs_review)) {
+      reason = "UNRECOGNISED_AGENT";
+      const jobByP = normPhone ? jobsByPhone.get(normPhone) : null;
+      const jobByR = normReg ? jobsByRegAlpha.get(normReg) : null;
+      const cand = (isSms && jobByR) ? jobByR : (jobByP || jobByR);
+      if (cand) {
+        suggestedJob = {
+          id: cand.id,
+          vehicle_reg: cand.vehicle_reg_raw,
+          assigned_agent_id: cand.assigned_agent_id,
+          assigned_agent_name: cand.assigned_agent_name,
+        };
+      }
+    } else {
+      const jobByPhone = normPhone ? jobsByPhone.get(normPhone) : null;
+      const jobByReg = normReg ? jobsByRegAlpha.get(normReg) : null;
+
+      if (isSms && jobByReg) {
+        reason = "ASSIGNED_TO_OTHER_AGENT";
+        suggestedJob = {
+          id: jobByReg.id,
+          vehicle_reg: jobByReg.vehicle_reg_raw,
+          assigned_agent_id: jobByReg.assigned_agent_id,
+          assigned_agent_name: jobByReg.assigned_agent_name,
+        };
+      } else if (jobByPhone) {
+        reason = "ASSIGNED_TO_OTHER_AGENT";
+        suggestedJob = {
+          id: jobByPhone.id,
+          vehicle_reg: jobByPhone.vehicle_reg_raw,
+          assigned_agent_id: jobByPhone.assigned_agent_id,
+          assigned_agent_name: jobByPhone.assigned_agent_name,
+        };
+      } else {
+        reason = "NO_JOB_FOR_NUMBER";
+        suggestedJob = null;
+      }
+    }
+
+    unmatchedList.push({
+      id: ev.id,
+      timestamp: ev.timestamp,
+      agent_id: ev.agent_id,
+      agent_name: ev.agent_name,
+      type: ev.type,
+      status: ev.status,
+      target_phone: ev.target_phone,
+      reg_no: ev.reg_no,
+      reason,
+      suggested_job: suggestedJob,
+    });
+  }
+
+  return unmatchedList;
+}
+
+
+/**
  * Generate grouped Max Attempts Reached report by Channel Partner with merged chronology
  */
 export async function getMaxAttemptsReport(db: DbAdapter): Promise<MaxAttemptsReportGroup[]> {
   await closeMaturedCallbackJobs(db);
 
+  // Load allocations once, before the job loop
+  const allocations = await db.queryAll<{
+    channel_partner: string;
+    assigned_agent_id: number | null;
+    assigned_agent_name: string | null;
+  }>(
+    `SELECT cpa.channel_partner, cpa.assigned_agent_id, a.name AS assigned_agent_name
+     FROM channel_partner_allocations cpa
+     LEFT JOIN agents a ON a.id = cpa.assigned_agent_id`
+  );
+  const allocationMap = new Map<string, { assigned_agent_id: number | null; assigned_agent_name: string | null }>();
+  for (const alloc of allocations) {
+    if (alloc.channel_partner) {
+      allocationMap.set(alloc.channel_partner.trim().toLowerCase(), {
+        assigned_agent_id: alloc.assigned_agent_id ?? null,
+        assigned_agent_name: alloc.assigned_agent_name ?? null,
+      });
+    }
+  }
+
+  // Pre-load agents by name for phone mapping in outcome logs
+  const agentsByName = await db.queryAll<{ name: string; phone_number: string | null }>(
+    `SELECT name, phone_number FROM agents`
+  );
+  const agentPhoneByName = new Map(agentsByName.map((a) => [a.name, a.phone_number]));
+
   const jobs = await db.queryAll<{
     id: number;
+    vehicle_reg: string;
     vehicle_reg_raw: string;
     client_name: string | null;
     client_phone: string;
@@ -1004,17 +1627,23 @@ export async function getMaxAttemptsReport(db: DbAdapter): Promise<MaxAttemptsRe
     assigned_agent_id: number | null;
     assigned_agent_name: string | null;
   }>(
-    `SELECT j.id, j.vehicle_reg_raw, j.client_name, j.client_phone, j.client_phone_raw, j.customer_email, j.channel_partner, j.initiated_date, j.first_imported_at, j.closed_at, j.assigned_agent_id, a.name as assigned_agent_name 
+    `SELECT j.id, j.vehicle_reg, j.vehicle_reg_raw, j.client_name, j.client_phone, j.client_phone_raw, j.customer_email, j.channel_partner, j.initiated_date, j.first_imported_at, j.closed_at, j.assigned_agent_id, a.name as assigned_agent_name
      FROM callback_jobs j
      LEFT JOIN agents a ON j.assigned_agent_id = a.id
      WHERE j.latest_outcome = 'MAX_ATTEMPTS_REACHED'
      ORDER BY j.channel_partner ASC, j.closed_at DESC`
   );
 
+  // Compute counts for the report jobs using computeCallbackJobsActivity
+  const metricsMap = await computeCallbackJobsActivity(db, jobs);
+
   const groupsMap = new Map<string, MaxAttemptsReportRecord[]>();
 
   for (const job of jobs) {
+    const act = metricsMap.get(job.id) || { attempt_count: 0, sms_count: 0, last_attempt_at: null };
     const partner = String(job.channel_partner || "Unassigned Partner").trim() || "Unassigned Partner";
+    const alloc = allocationMap.get(partner.toLowerCase());
+    const partnerAllocatedAgentId = alloc?.assigned_agent_id ?? null;
 
     // 1. Fetch outcome logs
     const rawLogs = await db.queryAll<{
@@ -1041,46 +1670,55 @@ export async function getMaxAttemptsReport(db: DbAdapter): Promise<MaxAttemptsRe
 
     const normP = job.client_phone || normalizePhone(job.client_phone_raw);
 
-    // 2. Fetch every CALL event for this phone, scoped to the job's own assigned agent
-    const callEvents = await db.queryAll<{
-      status: string;
-      timestamp: string;
-      agent_name: string | null;
-      agent_phone: string | null;
-    }>(
-      `SELECT e.status, e.timestamp, a.name as agent_name, a.phone_number as agent_phone
-       FROM events e
-       JOIN agents a ON e.agent_id = a.id
-       WHERE e.type = 'CALL'
-         AND (e.target_phone = ? OR e.target_phone LIKE ?)
-         AND a.id = ?`,
-      [normP, `%${normP}%`, job.assigned_agent_id]
+    // Build distinct non-null agent IDs from [job.assigned_agent_id, partner's allocated_agent_id]
+    const candidateAgentIds = Array.from(
+      new Set(
+        [job.assigned_agent_id, partnerAllocatedAgentId].filter(
+          (id): id is number => id !== null && id !== undefined
+        )
+      )
     );
 
-    // 3. Fetch every SMS event for this phone, scoped the same way, no date window,
-    // so nothing real gets silently excluded the way it was before.
-    const smsEvents = await db.queryAll<{
-      status: string;
-      timestamp: string;
-      agent_name: string | null;
-      agent_phone: string | null;
-    }>(
-      `SELECT e.status, e.timestamp, a.name as agent_name, a.phone_number as agent_phone
-       FROM events e
-       JOIN agents a ON e.agent_id = a.id
-       WHERE e.type = 'SMS'
-         AND (e.target_phone = ? OR e.target_phone LIKE ?)
-         AND a.id = ?`,
-      [normP, `%${normP}%`, job.assigned_agent_id]
-    );
+    let callEvents: Array<{ status: string; timestamp: string; agent_name: string | null; agent_phone: string | null }> = [];
+    let smsEvents: Array<{ status: string; timestamp: string; agent_name: string | null; agent_phone: string | null }> = [];
 
-    // 4. Resolve a phone number for each outcome log's logged_by name too, "System" won't match, that's expected
-    const agentsByName = await db.queryAll<{ name: string; phone_number: string | null }>(
-      `SELECT name, phone_number FROM agents`
-    );
-    const agentPhoneByName = new Map(agentsByName.map((a) => [a.name, a.phone_number]));
+    if (candidateAgentIds.length > 0) {
+      const inPlaceholders = candidateAgentIds.map(() => "?").join(", ");
 
-    // 5. Build the merged chronological trail, all three sources together
+      // 2. Fetch CALL events for this phone matching candidate agent IDs
+      callEvents = await db.queryAll<{
+        status: string;
+        timestamp: string;
+        agent_name: string | null;
+        agent_phone: string | null;
+      }>(
+        `SELECT e.status, e.timestamp, a.name as agent_name, a.phone_number as agent_phone
+         FROM events e
+         JOIN agents a ON e.agent_id = a.id
+         WHERE e.type = 'CALL'
+           AND (e.target_phone = ? OR e.target_phone LIKE ?)
+           AND a.id IN (${inPlaceholders})`,
+        [normP, `%${normP}%`, ...candidateAgentIds]
+      );
+
+      // 3. Fetch SMS events for this phone matching candidate agent IDs
+      smsEvents = await db.queryAll<{
+        status: string;
+        timestamp: string;
+        agent_name: string | null;
+        agent_phone: string | null;
+      }>(
+        `SELECT e.status, e.timestamp, a.name as agent_name, a.phone_number as agent_phone
+         FROM events e
+         JOIN agents a ON e.agent_id = a.id
+         WHERE e.type = 'SMS'
+           AND (e.target_phone = ? OR e.target_phone LIKE ?)
+           AND a.id IN (${inPlaceholders})`,
+        [normP, `%${normP}%`, ...candidateAgentIds]
+      );
+    }
+
+    // 5. Build the merged chronological trail with counted flag
     const chronology: MaxAttemptsChronologyEntry[] = [
       ...rawLogs.map((l) => ({
         kind: "OUTCOME" as const,
@@ -1089,6 +1727,7 @@ export async function getMaxAttemptsReport(db: DbAdapter): Promise<MaxAttemptsRe
         logged_by: l.logged_by,
         logged_by_phone: agentPhoneByName.get(l.logged_by) || null,
         timestamp: l.created_at,
+        counted: false,
       })),
       ...callEvents.map((c) => ({
         kind: "CALL" as const,
@@ -1096,6 +1735,7 @@ export async function getMaxAttemptsReport(db: DbAdapter): Promise<MaxAttemptsRe
         logged_by: c.agent_name || "Unknown",
         logged_by_phone: c.agent_phone || null,
         timestamp: c.timestamp,
+        counted: String(c.status || "").toUpperCase() === "OUTGOING",
       })),
       ...smsEvents.map((s) => ({
         kind: "SMS" as const,
@@ -1104,6 +1744,7 @@ export async function getMaxAttemptsReport(db: DbAdapter): Promise<MaxAttemptsRe
         logged_by: s.agent_name || "System",
         logged_by_phone: s.agent_phone || null,
         timestamp: s.timestamp,
+        counted: true,
       })),
     ];
 
@@ -1118,6 +1759,8 @@ export async function getMaxAttemptsReport(db: DbAdapter): Promise<MaxAttemptsRe
       closed_at: job.closed_at,
       assigned_agent_id: job.assigned_agent_id,
       assigned_agent_name: job.assigned_agent_name,
+      outgoing_calls_count: act.attempt_count,
+      sms_count: act.sms_count,
       attempts,
       chronology,
     };
@@ -1130,8 +1773,11 @@ export async function getMaxAttemptsReport(db: DbAdapter): Promise<MaxAttemptsRe
 
   const result: MaxAttemptsReportGroup[] = [];
   for (const [partner, records] of groupsMap.entries()) {
+    const alloc = allocationMap.get(partner.toLowerCase());
     result.push({
       channel_partner: partner,
+      allocated_agent_id: alloc?.assigned_agent_id ?? null,
+      allocated_agent_name: alloc?.assigned_agent_name ?? null,
       records,
     });
   }
@@ -1164,3 +1810,15 @@ export async function updateCallbackJobStatus(
   const jobs = await getCallbackJobs(db, {});
   return jobs.find((j) => j.id === id) || null;
 }
+
+export {
+  planClosureReopen,
+  runOneTimeClosureReopen,
+  CLOSURE_REOPEN_JOB_KEY,
+} from "./closureReopenJob";
+
+export type {
+  ClosureReopenAction,
+  ClosureReopenJobInput,
+  ClosureReopenDecision,
+} from "./closureReopenJob";

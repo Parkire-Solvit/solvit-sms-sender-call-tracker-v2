@@ -10,6 +10,7 @@ export interface DbAdapter {
   queryAll<T = any>(sql: string, params?: any[]): Promise<T[]>;
   queryOne<T = any>(sql: string, params?: any[]): Promise<T | null>;
   execute(sql: string, params?: any[]): Promise<{ lastInsertId: number; affectedRows: number }>;
+  transaction<T>(work: (tx: DbAdapter) => Promise<T>): Promise<T>;
 }
 
 let pool: pg.Pool | null = null;
@@ -64,6 +65,40 @@ export async function initDatabase(): Promise<DbAdapter> {
       if (/^INSERT\s/i.test(statement) && !/\bRETURNING\b/i.test(statement)) statement += " RETURNING id";
       const result = await pool!.query(statement, params);
       return { lastInsertId: Number(result.rows[0]?.id ?? 0), affectedRows: result.rowCount ?? 0 };
+    },
+    async transaction<T>(work: (tx: DbAdapter) => Promise<T>) {
+      const client = await pool!.connect();
+      const tx: DbAdapter = {
+        type: "postgresql",
+        isConnected: true,
+        statusMessage: "PostgreSQL transaction",
+        async queryAll<U = any>(sql: string, params: any[] = []) {
+          return (await client.query(postgresSql(sql), params)).rows as U[];
+        },
+        async queryOne<U = any>(sql: string, params: any[] = []) {
+          return ((await client.query(postgresSql(sql), params)).rows[0] as U) ?? null;
+        },
+        async execute(sql: string, params: any[] = []) {
+          let statement = postgresSql(sql).trim().replace(/;$/, "");
+          if (/^INSERT\s/i.test(statement) && !/\bRETURNING\b/i.test(statement)) statement += " RETURNING id";
+          const result = await client.query(statement, params);
+          return { lastInsertId: Number(result.rows[0]?.id ?? 0), affectedRows: result.rowCount ?? 0 };
+        },
+        async transaction<U>(nested: (inner: DbAdapter) => Promise<U>) {
+          return nested(tx);
+        },
+      };
+      try {
+        await client.query("BEGIN");
+        const result = await work(tx);
+        await client.query("COMMIT");
+        return result;
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      } finally {
+        client.release();
+      }
     },
   };
   return activeAdapter;
