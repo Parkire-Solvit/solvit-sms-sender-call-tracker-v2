@@ -221,7 +221,6 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
   const [settingsSuccess, setSettingsSuccess] = useState(false);
   const [showAgentReview, setShowAgentReview] = useState(false);
   const [showUnmatchedActivity, setShowUnmatchedActivity] = useState(false);
-  const [reviewingHistoricalClosures, setReviewingHistoricalClosures] = useState(false);
 
   // Outcome Logging Modal State
   const [outcomeJob, setOutcomeJob] = useState<CallbackJob | null>(null);
@@ -882,34 +881,6 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
     }
   };
 
-  const handleHistoricalClosureReview = async () => {
-    setReviewingHistoricalClosures(true);
-    try {
-      const previewResponse = await fetch('/api/callback-jobs/historical-reopen/preview');
-      const preview = await previewResponse.json();
-      if (!previewResponse.ok) throw new Error(preview.error || 'Unable to preview historical records');
-      if (!preview.count) {
-        alert('No historical callback records need reopening under the corrected call-and-SMS rule.');
-        return;
-      }
-      if (!confirm(`${preview.count} historical callback record(s) were closed under the old rule and should be reopened. Review and apply this one-time correction now?`)) return;
-      const phrase = prompt('Type REOPEN REVIEWED RECORDS to apply the audited one-time correction:');
-      if (phrase !== 'REOPEN REVIEWED RECORDS') return;
-      const applyResponse = await fetch('/api/callback-jobs/historical-reopen/apply', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ confirmation: phrase }),
-      });
-      const result = await applyResponse.json();
-      if (!applyResponse.ok) throw new Error(result.error || 'Historical correction failed');
-      alert(`${result.reopened} callback record(s) reopened. An audit snapshot was retained.`);
-      fetchJobs();
-    } catch (err) {
-      alert((err as Error).message);
-    } finally {
-      setReviewingHistoricalClosures(false);
-    }
-  };
-
   // Handle Excel upload & robust client-side parsing via SheetJS
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files.length > 0) {
@@ -1482,9 +1453,6 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
             </button>
             <button onClick={() => setShowUnmatchedActivity(true)} className="px-3 py-2 border border-indigo-200 bg-indigo-50 text-indigo-800 rounded-xl text-xs font-bold">
               Unmatched activity
-            </button>
-            <button disabled={reviewingHistoricalClosures} onClick={handleHistoricalClosureReview} className="px-3 py-2 border border-slate-200 bg-white text-slate-700 rounded-xl text-xs font-bold disabled:opacity-50">
-              {reviewingHistoricalClosures ? 'Checking…' : 'Review old closures'}
             </button>
             <button
               id="btn-open-max-attempts-report"

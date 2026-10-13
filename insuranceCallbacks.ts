@@ -1139,62 +1139,6 @@ export async function getMaxAttemptsReport(db: DbAdapter): Promise<MaxAttemptsRe
   return result.sort((a, b) => a.channel_partner.localeCompare(b.channel_partner));
 }
 
-export async function previewHistoricalClosureReopen(db: DbAdapter): Promise<Array<{
-  id: number; vehicle_reg: string; assigned_agent_name: string | null;
-  attempt_count: number; sms_count: number; reason: string;
-}>> {
-  const settings = await getCallbackSettings(db);
-  const jobs = await getCallbackJobs(db, {});
-  return jobs
-    .filter((job) => job.status === 'RED' && job.latest_outcome === 'MAX_ATTEMPTS_REACHED')
-    .filter((job) => !hasReachedMaxAttempts(job, settings))
-    .map((job) => ({
-      id: job.id,
-      vehicle_reg: job.vehicle_reg_raw,
-      assigned_agent_name: job.assigned_agent_name || null,
-      attempt_count: job.attempt_count,
-      sms_count: job.sms_count,
-      reason: `Closed under the old rule but does not meet ${settings.max_attempts} outgoing calls and ${settings.max_sms_attempts} SMS.`,
-    }));
-}
-
-export async function applyHistoricalClosureReopen(db: DbAdapter): Promise<{ reopened: number }> {
-  const jobKey = 'callback-closure-rule-v2';
-  const prior = await db.queryOne(`SELECT id FROM one_time_job_runs WHERE job_key = ?`, [jobKey]);
-  if (prior) throw new Error('The historical callback correction has already been applied.');
-  const preview = await previewHistoricalClosureReopen(db);
-  const runToken = `reopen-${Date.now()}`;
-  for (const item of preview) {
-    const job = await db.queryOne<any>(`SELECT * FROM callback_jobs WHERE id = ?`, [item.id]);
-    if (!job) continue;
-    await db.execute(
-      `INSERT INTO callback_reopen_snapshot
-       (job_key, callback_job_id, action, previous_status, previous_closed_at,
-        previous_latest_outcome, previous_assigned_agent_id, new_assigned_agent_id,
-        outgoing_calls, sms_count)
-       VALUES (?, ?, 'REOPENED', ?, ?, ?, ?, ?, ?, ?)`,
-      [jobKey, item.id, job.status, job.closed_at, job.latest_outcome,
-       job.assigned_agent_id, job.assigned_agent_id, item.attempt_count, item.sms_count]
-    );
-    await db.execute(
-      `UPDATE callback_jobs SET status = 'AMBER', closed_at = NULL,
-       latest_outcome = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
-      [item.id]
-    );
-    await db.execute(
-      `INSERT INTO callback_job_logs
-       (callback_job_id, outcome, comment, logged_by, resulting_status, created_at)
-       VALUES (?, 'HISTORICAL_RULE_CORRECTION', ?, 'System', 'AMBER', CURRENT_TIMESTAMP)`,
-      [item.id, item.reason]
-    );
-  }
-  await db.execute(
-    `INSERT INTO one_time_job_runs (job_key, run_token, summary) VALUES (?, ?, ?)`,
-    [jobKey, runToken, JSON.stringify({ reopened: preview.length })]
-  );
-  return { reopened: preview.length };
-}
-
 /**
  * Update single job status
  */

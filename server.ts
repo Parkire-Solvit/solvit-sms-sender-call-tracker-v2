@@ -24,8 +24,6 @@ import {
   getChannelPartnerAllocations,
   setChannelPartnerAllocation,
   normalizePhone,
-  previewHistoricalClosureReopen,
-  applyHistoricalClosureReopen,
 } from "./insuranceCallbacks";
 import * as XLSX from "xlsx";
 import { seedDefaultAdmin, hashPassword, verifyPassword } from "./auth";
@@ -1330,26 +1328,6 @@ function computeActivitySummary(events: any[], totalAgents: number = 0) {
     } catch (err) {
       console.error('[API] Unable to load unmatched callback activity:', err);
       res.status(500).json({ error: (err as Error).message });
-    }
-  });
-
-  app.get('/api/callback-jobs/historical-reopen/preview', requireAdmin, async (_req, res) => {
-    try {
-      const records = await previewHistoricalClosureReopen(db);
-      res.json({ count: records.length, records });
-    } catch (err) {
-      res.status(500).json({ error: (err as Error).message });
-    }
-  });
-
-  app.post('/api/callback-jobs/historical-reopen/apply', requireAdmin, async (req, res) => {
-    if (req.body?.confirmation !== 'REOPEN REVIEWED RECORDS') {
-      return res.status(400).json({ error: 'Exact confirmation phrase is required.' });
-    }
-    try {
-      res.json(await applyHistoricalClosureReopen(db));
-    } catch (err) {
-      res.status(409).json({ error: (err as Error).message });
     }
   });
 
