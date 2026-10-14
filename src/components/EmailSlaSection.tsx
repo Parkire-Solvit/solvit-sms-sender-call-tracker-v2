@@ -252,7 +252,7 @@ export function EmailSlaSection({ employeeEmail }: { employeeEmail?: string }) {
   return <main className="max-w-7xl mx-auto px-3 sm:px-6 py-7 space-y-6">
     <div className="flex flex-wrap items-center justify-between gap-3">
       <div><h2 className="text-xl font-bold flex items-center gap-2"><Mail className="w-5 h-5 text-[#ff353e]" /> {isEmployee ? 'My CS emails' : 'Email SLA'}</h2>
-        <p className="text-sm text-slate-500">{isEmployee ? `Assigned to ${employeeEmail}. Any CS reply closes the ticket automatically after sync.` : 'One actionable inbound email, one response ticket'}</p></div>
+        <p className="text-sm text-slate-500">{isEmployee ? 'Your assigned customer emails. The first CS reply completes the response ticket.' : 'One customer subject, one response ticket'}</p></div>
       <div className="flex gap-2">
         {!isEmployee && <button onClick={() => setShowSettings(!showSettings)} className="px-3 py-2 rounded-lg border text-sm flex items-center gap-2"><Settings2 className="w-4 h-4" /> Settings</button>}
         <button onClick={() => { void refresh(); setReportRefreshToken(value => value + 1); }} className="px-3 py-2 rounded-lg border text-sm flex items-center gap-2"><RefreshCw className="w-4 h-4" /> Refresh</button>
@@ -263,11 +263,7 @@ export function EmailSlaSection({ employeeEmail }: { employeeEmail?: string }) {
         <p className="font-semibold">{unhealthySync.length ? `Mailbox sync needs attention (${unhealthySync.length})` : `Mailbox sync healthy (${requiredSync.length} folders)`}</p>
         <p className="text-xs">Inbox and Sent Items must sync within 5 minutes.</p>
       </div>
-      {unhealthySync.length > 0 && <ul className="mt-2 space-y-1 text-xs">
-        {unhealthySync.map((row) => <li key={`${row.mailbox}:${row.folder}`}>
-          {row.mailbox} · {row.folder} · {row.last_error_code || (row.last_successful_sync_at ? 'sync is stale' : 'never synced')}
-        </li>)}
-      </ul>}
+      {unhealthySync.length > 0 && <p className="mt-2 text-xs">Technical details are available in the service logs. Individual mailbox addresses are hidden here to keep the queue focused.</p>}
     </section>}
     {outlookNotice && <p role="status" className="p-3 rounded-lg border border-blue-200 bg-blue-50 text-blue-800 text-sm">{outlookNotice}</p>}
     {error && <p role="alert" className="p-3 rounded-lg bg-red-50 text-red-700 text-sm">{error}</p>}

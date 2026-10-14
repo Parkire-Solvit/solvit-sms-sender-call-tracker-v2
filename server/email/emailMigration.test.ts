@@ -127,3 +127,31 @@ test('migration 014 recalculates old night-time deadlines and preserves the prev
     assert.equal(alerts.rows.length, 0);
   } finally { await db.close(); }
 });
+
+test('migration 026 retains one ticket per customer subject and preserves a detected response', async () => {
+  const db = new PGlite();
+  try {
+    const directory = new URL('../../migrations/', import.meta.url);
+    for (const file of ['009_email_sla_foundation.sql', '012_email_assignment_notifications.sql',
+      '013_email_resolution_audit.sql', '015_cs_email_routing.sql', '017_email_workflow_reliability.sql',
+      '019_email_ticket_response_lifecycle.sql']) {
+      await db.exec(await fs.readFile(new URL(file, directory), 'utf8'));
+    }
+    await db.query("INSERT INTO email_team_members(email,display_name) VALUES ('irene@solvit.co.ke','Irene'),('twangui@solvit.co.ke','Teresiah')");
+    await db.query(`INSERT INTO email_threads
+      (mailbox,root_internet_message_id,subject,customer_email,received_at,response_due_at,resolution_due_at,assigned_member_id,status)
+      VALUES
+      ('cs@solvit.co.ke','original','[EXTERNAL] Valuation report KDA 001A','client@example.com','2026-10-01 08:00Z','2026-10-01 08:30Z','2026-10-01 10:00Z',1,'AWAITING_RESPONSE'),
+      ('cs@solvit.co.ke','thanks','Re: Valuation report KDA 001A','client@example.com','2026-10-01 09:00Z','2026-10-01 09:30Z','2026-10-01 11:00Z',2,'RESOLVED')`);
+    await db.query(`UPDATE email_threads SET first_response_at='2026-10-01 08:15Z',resolved_at='2026-10-01 08:15Z',responded_by='twangui@solvit.co.ke' WHERE root_internet_message_id='thanks'`);
+    await db.query("INSERT INTO email_alerts(email_thread_id,alert_type) VALUES (2,'RESPONSE_BREACH')");
+    await db.exec(await fs.readFile(new URL('026_email_responder_assignment.sql', directory), 'utf8'));
+    const tickets = await db.query<Record<string, unknown>>('SELECT * FROM email_threads ORDER BY id');
+    assert.equal(tickets.rows[0].responded_by, 'twangui@solvit.co.ke');
+    assert.equal(Number(tickets.rows[0].assigned_member_id), 2);
+    assert.equal(tickets.rows[0].assignment_method, 'RESPONDER');
+    assert.equal(tickets.rows[1].sla_exclusion_reason, 'Duplicate customer subject ticket');
+    const alert = await db.query<{ acknowledged_at: string | null }>('SELECT acknowledged_at FROM email_alerts WHERE email_thread_id=2');
+    assert.ok(alert.rows[0].acknowledged_at);
+  } finally { await db.close(); }
+});

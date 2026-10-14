@@ -10,7 +10,7 @@ import { resolveEmailThreadSql } from './emailResolution';
 import { replyConversationCandidatesSql } from './replyFallback';
 import { emailExclusionReason } from './emailActionability';
 import { lockAssignableEmailSql } from './emailAssignmentAuthorization';
-import { normalizedReplySubject } from './replySubjectFallback';
+import { firstMatchingSubjectTicket, normalizedReplySubject } from './replySubjectFallback';
 
 type Client = pg.PoolClient;
 type SqlRow = Record<string, any>;
@@ -49,6 +49,43 @@ async function rememberMailboxCopy(client: Client, mailbox: string, message: Gra
      VALUES ($1,$2,$3,$4,$5) ON CONFLICT (source_mailbox,graph_message_id) DO UPDATE
      SET graph_conversation_id=EXCLUDED.graph_conversation_id,internet_message_id=EXCLUDED.internet_message_id`,
     [address(mailbox), message.id, threadId, message.conversationId || null,emailIdentity(message).internetMessageId]);
+}
+
+async function storeInboundMessage(client: Client, sourceMailbox: string, message: GraphMessage,
+  threadId: number, sender: string, receivedAt: Date): Promise<void> {
+  const identity = emailIdentity(message);
+  await rememberMailboxCopy(client, sourceMailbox, message, threadId);
+  await client.query(
+    `INSERT INTO email_messages (email_thread_id,graph_message_id,internet_message_id,graph_conversation_id,
+     source_mailbox,sender_email,recipient_data,direction,sent_or_received_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,'INBOUND',$8)
+     ON CONFLICT DO NOTHING`,
+    [threadId, message.id, identity.internetMessageId, message.conversationId || null, sourceMailbox, sender,
+      JSON.stringify(recipients(message)), receivedAt],
+  );
+}
+
+async function findExistingInboundTicket(client: Client, message: GraphMessage, sender: string): Promise<number | null> {
+  const identity = emailIdentity(message);
+  const referenced = [identity.inReplyTo, ...identity.references].filter((value): value is string => Boolean(value));
+  if (referenced.length) {
+    const known = await client.query<SqlRow>(
+      `SELECT email_thread_id FROM email_messages
+       WHERE internet_message_id = ANY($1::text[])
+       ORDER BY sent_or_received_at ASC LIMIT 1`,
+      [referenced],
+    );
+    if (known.rows[0]) return Number(known.rows[0].email_thread_id);
+  }
+
+  const candidates = await client.query<SqlRow>(
+    `SELECT id,subject FROM email_threads
+     WHERE customer_email=$1 AND sla_exclusion_reason IS NULL
+     ORDER BY received_at ASC,id ASC`,
+    [sender],
+  );
+  const match = firstMatchingSubjectTicket(message.subject, candidates.rows);
+  return match ? Number(match.id) : null;
 }
 
 export async function getEmailSettings(): Promise<EmailSlaSettings> {
@@ -167,6 +204,11 @@ export async function storeInbound(
       }
       return null;
     }
+    const existingTicketId = await findExistingInboundTicket(client, message, sender);
+    if (existingTicketId) {
+      await storeInboundMessage(client, sourceMailbox, message, existingTicketId, sender, receivedAt);
+      return null;
+    }
     const assignment = await assignOwner(client, groupAddress, message);
     const thread = await client.query<SqlRow>(
       `INSERT INTO email_threads (mailbox,graph_conversation_id,root_internet_message_id,subject,customer_email,
@@ -180,15 +222,7 @@ export async function storeInbound(
     );
     const threadId = Number(thread.rows[0]?.id || (await client.query<SqlRow>(
       'SELECT id FROM email_threads WHERE root_internet_message_id=$1', [internetId])).rows[0]?.id);
-    await rememberMailboxCopy(client, sourceMailbox, message, threadId);
-    await client.query(
-      `INSERT INTO email_messages (email_thread_id,graph_message_id,internet_message_id,graph_conversation_id,
-       source_mailbox,sender_email,recipient_data,direction,sent_or_received_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,'INBOUND',$8)
-       ON CONFLICT DO NOTHING`,
-      [threadId, message.id, internetId, message.conversationId || null, sourceMailbox, sender,
-        JSON.stringify(recipients(message)), receivedAt],
-    );
+    await storeInboundMessage(client, sourceMailbox, message, threadId, sender, receivedAt);
     if (thread.rows[0] && assignment.memberId) {
       const history = await client.query<SqlRow>(
         `INSERT INTO email_assignment_history (email_thread_id,new_member_id,method,changed_by)
@@ -236,7 +270,7 @@ export async function storeOutbound(sourceMailbox: string, message: GraphMessage
       if (subject) {
         const candidates = await client.query<SqlRow>(
           `SELECT id,subject FROM email_threads
-           WHERE first_response_at IS NULL AND sla_exclusion_reason IS NULL
+           WHERE sla_exclusion_reason IS NULL
              AND received_at <= $1 AND received_at >= $1::timestamptz - interval '14 days'
              AND customer_email=ANY($2::text[]) AND root_internet_message_id <> $3
            ORDER BY received_at DESC LIMIT 100`,
@@ -262,11 +296,27 @@ export async function storeOutbound(sourceMailbox: string, message: GraphMessage
       resolvedAt: row.resolved_at ? new Date(row.resolved_at) : null,
       responseBreached: row.response_breached, resolutionBreached: row.resolution_breached,
     }, sentAt);
+    const responder = (await client.query<SqlRow>(
+      `SELECT id FROM email_team_members WHERE lower(email)=lower($1) AND is_monitored=true LIMIT 1`,
+      [address(sourceMailbox)],
+    )).rows[0];
     await client.query(
       `UPDATE email_threads SET first_response_at=$2,response_breached=$3,
-       resolved_at=$2,responded_by=$4,status='RESOLVED',updated_at=now() WHERE id=$1`,
-      [threadId, state.firstResponseAt, state.responseBreached, address(sourceMailbox)],
+       resolved_at=$2,responded_by=$4,status='RESOLVED',
+       assigned_member_id=COALESCE($5,assigned_member_id),
+       assignment_method=CASE WHEN $5::bigint IS NULL THEN assignment_method ELSE 'RESPONDER' END,
+       assignment_reason=CASE WHEN $5::bigint IS NULL THEN assignment_reason ELSE 'Assigned to the CS member who sent the first response' END,
+       updated_at=now() WHERE id=$1`,
+      [threadId, state.firstResponseAt, state.responseBreached, address(sourceMailbox), responder?.id || null],
     );
+    if (responder && Number(row.assigned_member_id) !== Number(responder.id)) {
+      await client.query(
+        `INSERT INTO email_assignment_history
+         (email_thread_id,previous_member_id,new_member_id,method,changed_by,changed_at)
+         VALUES ($1,$2,$3,'RESPONDER',$4,$5)`,
+        [threadId, row.assigned_member_id || null, responder.id, address(sourceMailbox), sentAt],
+      );
+    }
     await client.query(
       `UPDATE email_alerts SET acknowledged_at=now()
        WHERE email_thread_id=$1 AND acknowledged_at IS NULL`,

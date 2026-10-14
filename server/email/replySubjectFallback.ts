@@ -10,3 +10,12 @@ export function normalizedReplySubject(value: string | undefined): string {
   }
   return subject.replace(/\s+/g, ' ').toLowerCase();
 }
+
+export function firstMatchingSubjectTicket<T extends { subject?: string }>(
+  incomingSubject: string | undefined,
+  ticketsInOriginalOrder: readonly T[],
+): T | undefined {
+  const subject = normalizedReplySubject(incomingSubject);
+  if (!subject) return undefined;
+  return ticketsInOriginalOrder.find((ticket) => normalizedReplySubject(ticket.subject) === subject);
+}
