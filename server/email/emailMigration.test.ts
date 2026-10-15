@@ -55,6 +55,8 @@ test('numeric migration sequence survives the two legacy 004 files and repairs S
     assert.equal(applied014.rows.length, 1);
     const applied015 = await db.query<{ version: number }>('SELECT version FROM schema_migrations WHERE version=15');
     assert.equal(applied015.rows.length, 1);
+    const applied027 = await db.query<{ version: number }>('SELECT version FROM schema_migrations WHERE version=27');
+    assert.equal(applied027.rows.length, 1);
     const resolutionColumns = await db.query<{ column_name: string }>(
       "SELECT column_name FROM information_schema.columns WHERE table_name='email_threads' AND column_name IN ('resolved_by','resolution_note') ORDER BY column_name",
     );
