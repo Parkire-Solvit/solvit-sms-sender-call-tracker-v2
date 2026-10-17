@@ -38,7 +38,8 @@ import {
   Tag as TagIcon,
   ExternalLink,
   Car,
-  Mail
+  Mail,
+  ClipboardList
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { clsx, type ClassValue } from 'clsx';
@@ -54,6 +55,7 @@ import { CardDrilldownModal, DrilldownCardType } from './components/CardDrilldow
 import { InsuranceCallbackSection } from './components/InsuranceCallbackSection';
 import { AgentPerformanceNarrative } from './components/AgentPerformanceNarrative';
 import { EmailSlaSection } from './components/EmailSlaSection';
+import PendingSubmissionsSection from './components/PendingSubmissionsSection';
 import { SystemSettings, TurnaroundTimeReport, Obligation, AgentComplianceSummary, TagGroupCompliance } from './types/compliance';
 
 function cn(...inputs: ClassValue[]) {
@@ -87,7 +89,7 @@ const getNairobiYesterday = () => {
 };
 
 export default function App() {
-  const [view, setView] = useState<'admin' | 'insurance-callbacks' | 'email'>('admin');
+  const [view, setView] = useState<'admin' | 'insurance-callbacks' | 'pending-submissions' | 'email'>('admin');
   const [agentName, setAgentName] = useState<string>('Kelvin Kimathi');
   const [customTemplate, setCustomTemplate] = useState<string>(
     'Hi, this is {agent_name} from Solvit. I tried calling you regarding your inquiry. Please call me back when convenient so we can assist you.'
@@ -365,6 +367,17 @@ export default function App() {
                 <Mail className="w-3.5 h-3.5" />
                 <span>Email SLA</span>
               </button>
+              <button
+                id="nav-tab-pending-submissions"
+                onClick={() => setView('pending-submissions')}
+                className={cn(
+                  "px-3.5 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer",
+                  view === 'pending-submissions' ? "bg-white text-[#ff353e] shadow-xs" : "text-slate-600 hover:text-[#ff353e]"
+                )}
+              >
+                <ClipboardList className="w-3.5 h-3.5" />
+                <span>Pending Submissions</span>
+              </button>
             </div>
             )}
 
@@ -455,6 +468,10 @@ export default function App() {
       ) : view === 'email' ? (
         <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-6">
           <EmailSlaSection employeeEmail={memberEmail || undefined} />
+        </main>
+      ) : view === 'pending-submissions' ? (
+        <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-6">
+          <PendingSubmissionsSection isAdmin />
         </main>
       ) : view === 'insurance-callbacks' ? (
         <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-6">

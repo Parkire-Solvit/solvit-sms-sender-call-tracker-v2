@@ -994,8 +994,8 @@ export async function logCallbackOutcome(
   db: DbAdapter,
   jobId: number,
   outcome: string,
-  comment: string,
-  loggedBy: string
+  comment: string | null = null,
+  loggedBy: string | null = null
 ): Promise<CallbackJob> {
   const cleanOutcome = String(outcome || "").trim().toUpperCase();
   const cleanComment = String(comment || "").trim();

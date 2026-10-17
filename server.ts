@@ -33,12 +33,35 @@ import {
 } from "./insuranceCallbacks";
 import * as XLSX from "xlsx";
 import { seedDefaultAdmin, hashPassword, verifyPassword } from "./auth";
+import {
+  getPendingSubmissionSettings,
+  updatePendingSubmissionSettings,
+  getValidSubmissionAgents,
+  importPendingSubmissions,
+  getPendingSubmissionJobs,
+  logPendingSubmissionOutcome,
+  getPendingSubmissionLogs,
+  closeMaturedPendingSubmissions,
+  getPendingSubmissionMaxAttemptsReport,
+  getPendingSubmissionJobById,
+  getPendingSubmissionTeam,
+  reassignOpenSubmissions,
+  syncPendingSubmissionAssignments,
+} from "./pendingSubmissions";
+import { sendError, HttpError } from "./httpError";
+import { getPendingSubmissionAgentKpis, getCallbackAgentKpis } from "./agentKpiService";
+import { notifySolver } from "./solverNotifications";
+import { INTEGRATIONS, getIntegrationPublicView, updateIntegrationSettings, getHostPinnacleConfig } from "./integrationSettings";
+import { sendSms, toInternationalMobile } from "./hostPinnacle";
+import { createRateLimiter } from "./rateLimit";
+import { AGENT_OUTCOMES } from "./pendingSubmissionOutcomes";
 
 // SSE Clients for real-time agent name push
 const agentClients = new Map<number, any>();
 
 async function startServer() {
   const app = express();
+  app.set("trust proxy", 1);
   // Browser access is same-origin by default. Native Android requests are not
   // affected by CORS, which is a browser policy.
   const allowedOrigins = new Set((process.env.CORS_ALLOWED_ORIGINS || '').split(',').map((s) => s.trim()).filter(Boolean));
@@ -447,11 +470,24 @@ async function startServer() {
     }
   });
 
+  // Keep pending-submission ownership aligned whenever the callback team changes.
+  const syncPendingAssignments = async (reason: string) => {
+    try {
+      const result = await syncPendingSubmissionAssignments(db);
+      if (result.assigned > 0 || result.rebalanced > 0) {
+        console.log(`[PENDING] Assignment sync (${reason}): assigned ${result.assigned}, rebalanced ${result.rebalanced}.`);
+      }
+    } catch (error) {
+      console.error(`[PENDING] Assignment sync (${reason}) failed:`, error);
+    }
+  };
+
   app.post("/api/agents/:id/keep-separate", requireAdmin, async (req, res) => {
     const id = Number(req.params.id);
     const tag = String(req.body?.tag || "Callback Team").trim() || "Callback Team";
     if (!id) return res.status(400).json({ error: "Valid agent ID is required" });
     await db.execute("UPDATE agents SET tag = ?, needs_review = FALSE WHERE id = ?", [tag, id]);
+    await syncPendingAssignments("agent kept separate");
     res.json({ success: true, tag });
   });
 
@@ -487,6 +523,7 @@ async function startServer() {
       client.release();
     }
     agentClients.delete(sourceId);
+    await syncPendingAssignments("agent merge");
     res.json({ success: true, source_id: sourceId, target_id: targetId });
   });
 
@@ -497,6 +534,7 @@ async function startServer() {
 
     try {
       await db.execute("UPDATE agents SET tag = ?, needs_review = FALSE WHERE id = ?", [tag, id]);
+      await syncPendingAssignments("agent tag change");
       res.json({ success: true });
     } catch (err) {
       console.error(err);
@@ -540,6 +578,7 @@ async function startServer() {
         [reason, req.params.id]
       );
       if (!result.affectedRows) return res.status(404).json({ error: "Active agent not found" });
+      await syncPendingAssignments("agent archived");
       res.json({ success: true });
     } catch (err) {
       console.error("[API] Unable to archive agent:", err);
@@ -554,6 +593,7 @@ async function startServer() {
         [req.params.id]
       );
       if (!result.affectedRows) return res.status(404).json({ error: "Archived agent not found" });
+      await syncPendingAssignments("agent reactivated");
       res.json({ success: true });
     } catch (err) {
       console.error("[API] Unable to reactivate agent:", err);
@@ -570,6 +610,7 @@ async function startServer() {
         [req.params.id]
       );
       if (!result.affectedRows) return res.status(404).json({ error: "Agent not found" });
+      await syncPendingAssignments("agent deleted");
       res.json({ success: true });
     } catch (err) {
       console.error("[API] Unable to delete agent:", err);
@@ -1570,6 +1611,197 @@ function computeActivitySummary(events: any[], totalAgents: number = 0) {
       res.send(buffer);
     } catch (err) {
       res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // --- Pending Submissions Endpoints ---
+  const pendingSettingsPaths = ["/api/pending-submissions/settings", "/api/pending-submission-settings"];
+
+  app.get(pendingSettingsPaths, requireAdmin, async (_req, res) => {
+    try {
+      const workflow = await getPendingSubmissionSettings(db);
+      res.json({ ...workflow, workflow });
+    } catch (err) {
+      sendError(res, err, "Error fetching pending submission settings");
+    }
+  });
+
+  const savePendingSettings = async (req: express.Request, res: express.Response) => {
+    try {
+      const body = req.body || {};
+      const updated = await updatePendingSubmissionSettings(db, body.workflow || body);
+      await syncPendingAssignments("pending settings saved");
+      res.json({ ...updated, workflow: updated });
+    } catch (err) {
+      sendError(res, err, "Error updating pending submission settings");
+    }
+  };
+  app.put(pendingSettingsPaths, requireAdmin, savePendingSettings);
+  app.post(pendingSettingsPaths, requireAdmin, savePendingSettings);
+
+  app.get("/api/pending-submissions/outcomes", requireAdmin, (_req, res) => {
+    res.json(AGENT_OUTCOMES.map((outcome) => ({
+      value: outcome.value,
+      label: outcome.label,
+      status: outcome.status,
+      closes: outcome.closes,
+    })));
+  });
+
+  app.get("/api/pending-submissions/agents", requireAdmin, async (_req, res) => {
+    try {
+      const settings = await getPendingSubmissionSettings(db);
+      res.json(await getValidSubmissionAgents(db, settings.callback_team_tag));
+    } catch (err) {
+      sendError(res, err, "Error fetching submission agents");
+    }
+  });
+
+  app.post("/api/pending-submissions/import", requireAdmin, async (req, res) => {
+    try {
+      const { file_name, imported_by, rows, confirmed } = req.body || {};
+      if (!Array.isArray(rows) || rows.length === 0) return res.status(400).json({ error: "No rows provided for import." });
+      res.json(await importPendingSubmissions(
+        db,
+        typeof file_name === "string" && file_name ? file_name : "PENDING_SUBMISSIONS.xlsx",
+        typeof imported_by === "string" && imported_by ? imported_by : "System",
+        rows,
+        { confirmed: confirmed === true }
+      ));
+    } catch (err) {
+      sendError(res, err, "Error importing pending submissions");
+    }
+  });
+
+  app.get("/api/pending-submissions/jobs", requireAdmin, async (req, res) => {
+    try {
+      const { status, agent_id, search, company } = req.query as Record<string, string | undefined>;
+      await closeMaturedPendingSubmissions(db);
+      res.json(await getPendingSubmissionJobs(db, { status, agent_id, search, company }));
+    } catch (err) {
+      sendError(res, err, "Error fetching pending submission jobs");
+    }
+  });
+
+  app.get("/api/pending-submissions/max-attempts-report", requireAdmin, async (_req, res) => {
+    try {
+      res.json(await getPendingSubmissionMaxAttemptsReport(db));
+    } catch (err) {
+      sendError(res, err, "Error building max attempts report");
+    }
+  });
+
+  app.post("/api/pending-submissions/jobs/:id/log", requireAdmin, async (req, res) => {
+    try {
+      const jobId = Number(req.params.id);
+      const result = await logPendingSubmissionOutcome(db, jobId, req.body || {});
+      let sms: { status: string; message: string } | null = null;
+      if (req.body?.outcome === "SCHEDULED") {
+        try {
+          sms = await notifySolver(db, jobId, "auto");
+        } catch (smsErr) {
+          console.error("[API] Automatic solver SMS failed unexpectedly:", (smsErr as Error)?.name);
+          sms = { status: "FAILED", message: "The solver SMS could not be sent. Use Resend SMS on the job." };
+        }
+      }
+      const job = sms ? await getPendingSubmissionJobById(db, jobId) : result.job;
+      res.json({
+        success: true,
+        job,
+        sms,
+        smsDispatched: sms?.status === "SENT",
+        smsMessage: sms && sms.status === "FAILED" ? sms.message : undefined,
+      });
+    } catch (err) {
+      sendError(res, err, "Error logging pending submission outcome");
+    }
+  });
+
+  app.get("/api/pending-submissions/jobs/:id/logs", requireAdmin, async (req, res) => {
+    try {
+      res.json(await getPendingSubmissionLogs(db, Number(req.params.id)));
+    } catch (err) {
+      sendError(res, err, "Error fetching pending submission logs");
+    }
+  });
+
+  app.post("/api/pending-submissions/jobs/:id/resend-notification", requireAdmin, async (req, res) => {
+    try {
+      const result = await notifySolver(db, Number(req.params.id), "manual");
+      res.json({ success: result.status === "SENT", status: result.status, message: result.message });
+    } catch (err) {
+      sendError(res, err, "Error sending solver notification");
+    }
+  });
+
+  app.get("/api/pending-submissions/team", requireAdmin, async (_req, res) => {
+    try {
+      res.json(await getPendingSubmissionTeam(db));
+    } catch (err) {
+      sendError(res, err, "Error fetching team overview");
+    }
+  });
+
+  app.post("/api/pending-submissions/reassign-open", requireAdmin, async (req, res) => {
+    try {
+      const dryRunInput = req.body?.dry_run;
+      if (dryRunInput !== undefined && typeof dryRunInput !== "boolean") throw new HttpError(400, "dry_run must be true or false.");
+      res.json(await reassignOpenSubmissions(db, { dryRun: dryRunInput !== false }));
+    } catch (err) {
+      sendError(res, err, "Error reassigning open records");
+    }
+  });
+
+  app.get("/api/agent-kpi/pending-submissions", requireAdmin, async (_req, res) => {
+    try {
+      res.json(await getPendingSubmissionAgentKpis(db));
+    } catch (err) {
+      sendError(res, err, "Error building the pending submissions agent KPI");
+    }
+  });
+
+  app.get("/api/agent-kpi/callbacks", requireAdmin, async (_req, res) => {
+    try {
+      res.json(await getCallbackAgentKpis(db));
+    } catch (err) {
+      sendError(res, err, "Error building the callbacks agent KPI");
+    }
+  });
+
+  app.get("/api/pending-submissions/integrations", requireAdmin, async (_req, res) => {
+    try {
+      const output: Record<string, unknown> = {};
+      for (const name of Object.keys(INTEGRATIONS)) output[name] = await getIntegrationPublicView(db, name);
+      res.json(output);
+    } catch (err) {
+      sendError(res, err, "Error fetching integrations");
+    }
+  });
+
+  app.put("/api/pending-submissions/integrations/:integration", requireAdmin, async (req, res) => {
+    try {
+      res.json(await updateIntegrationSettings(db, String(req.params.integration), req.body || {}, "Admin"));
+    } catch (err) {
+      sendError(res, err, "Error updating integration");
+    }
+  });
+
+  const testSmsLimiter = createRateLimiter({ windowMs: 10 * 60 * 1000, max: 3 });
+  app.post("/api/pending-submissions/integrations/host_pinnacle/test-sms", requireAdmin, async (req, res) => {
+    try {
+      const gate = testSmsLimiter.check(String(req.ip || "unknown"));
+      if (!gate.allowed) {
+        res.setHeader("Retry-After", String(gate.retryAfterSeconds));
+        throw new HttpError(429, `Too many test messages. Try again in ${gate.retryAfterSeconds} seconds.`);
+      }
+      const hostPinnacle = await getHostPinnacleConfig(db);
+      if (!hostPinnacle.config) throw new HttpError(400, `Host Pinnacle is missing: ${hostPinnacle.missing.join(", ")}.`);
+      const phone = typeof req.body?.phone === "string" ? req.body.phone : "";
+      if (!toInternationalMobile(phone, hostPinnacle.config.countryCode)) throw new HttpError(400, "Enter a valid phone number.");
+      const result = await sendSms(hostPinnacle.config, phone, "Solvit test message: Host Pinnacle SMS is connected.");
+      res.json({ success: result.ok, transactionId: result.transactionId, error: result.error });
+    } catch (err) {
+      sendError(res, err, "Error sending test SMS");
     }
   });
 

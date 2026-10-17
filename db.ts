@@ -1,7 +1,13 @@
 import pg from "pg";
 
 const { Pool } = pg;
-const REQUIRED_SCHEMA_VERSION = 27;
+const REQUIRED_SCHEMA_VERSION = 31;
+
+export interface DbTransactionClient {
+  queryAll<T = any>(sql: string, params?: any[]): Promise<T[]>;
+  queryOne<T = any>(sql: string, params?: any[]): Promise<T | null>;
+  execute(sql: string, params?: any[]): Promise<{ lastInsertId: number; affectedRows: number }>;
+}
 
 export interface DbAdapter {
   type: "postgresql";
@@ -10,7 +16,7 @@ export interface DbAdapter {
   queryAll<T = any>(sql: string, params?: any[]): Promise<T[]>;
   queryOne<T = any>(sql: string, params?: any[]): Promise<T | null>;
   execute(sql: string, params?: any[]): Promise<{ lastInsertId: number; affectedRows: number }>;
-  transaction<T>(work: (tx: DbAdapter) => Promise<T>): Promise<T>;
+  transaction<T>(work: (tx: DbTransactionClient) => Promise<T>): Promise<T>;
 }
 
 let pool: pg.Pool | null = null;

@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
+import AgentKpiPanel from './AgentKpiPanel';
 import * as XLSX from 'xlsx';
 import {
   Car,
@@ -2118,6 +2119,11 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
           </div>
         </div>
       </div>
+
+      <AgentKpiPanel
+        section="callbacks"
+        focusAgentName={selectedAgent !== 'ALL' && selectedAgent !== '__unassigned__' ? selectedAgent : null}
+      />
 
       {/* Upload Success Banner */}
       {uploadSummary && (
