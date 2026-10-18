@@ -114,9 +114,8 @@ async function main() {
   const j1 = jobs.find((j: any) => j.external_id === 1)!.id;
   await expectHttp(400, "unknown outcome", () => ps.logPendingSubmissionOutcome(db, j1, { outcome: "CLIENT_REFUSED", comment: "x" }), HttpError);
   await expectHttp(400, "system outcome", () => ps.logPendingSubmissionOutcome(db, j1, { outcome: "MAX_ATTEMPTS_REACHED", comment: "x" }), HttpError);
-  await expectHttp(400, "empty comment", () => ps.logPendingSubmissionOutcome(db, j1, { outcome: "CALL_BACK", comment: "   " }), HttpError);
-  await expectHttp(400, "scheduled without place", () => ps.logPendingSubmissionOutcome(db, j1, { outcome: "SCHEDULED", comment: "ok", scheduled_at: "2026-10-20T10:00:00+03:00" }), HttpError);
-  await expectHttp(400, "scheduled without time", () => ps.logPendingSubmissionOutcome(db, j1, { outcome: "SCHEDULED", comment: "ok", scheduled_place: "Nairobi" }), HttpError);
+  // The note and the schedule details are optional now (the agent only records the outcome).
+  await expectHttp(400, "scheduled with an invalid time", () => ps.logPendingSubmissionOutcome(db, j1, { outcome: "SCHEDULED", scheduled_at: "not a date" }), HttpError);
   await expectHttp(404, "missing job", () => ps.logPendingSubmissionOutcome(db, 99999, { outcome: "CALL_BACK", comment: "x" }), HttpError);
 
   // --- outcome logging: status mapping ---

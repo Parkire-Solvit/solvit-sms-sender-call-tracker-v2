@@ -3,6 +3,7 @@ import { DbAdapter, DbTransactionClient } from "./db";
 import { COUNTED_CALL_STATUSES, hasReachedMaxAttempts, normalizeRegAlphaNumeric } from "./insuranceCallbacks";
 import { HttpError } from "./httpError";
 import { ABSENT_CLOSE_OUTCOMES, isAgentOutcome, statusForAgentOutcome } from "./pendingSubmissionOutcomes";
+import { markImportRecords } from "./dataReset";
 import { planRebalance, RebalanceUnit } from "./pendingRebalance";
 
 /** Anything that can run queries: a DbAdapter or a transaction client. */
@@ -742,9 +743,11 @@ export async function importPendingSubmissions(
 
   // 6. Write everything in one transaction. Inside the callback use ONLY `tx`, never `db`.
   const counts = { added: 0, refreshed: 0, reopened: 0, absentClosed: 0 };
+  const createdJobIds: number[] = [];
+  const absentClosedJobIds: number[] = [];
   await db.transaction(async (tx) => {
     for (const r of newRows) {
-      await tx.execute(
+      const inserted = await tx.execute(
         `INSERT INTO pending_submission_jobs (
            external_id, solver_name, solver_contact, solver_contact_raw, solver_email,
            vehicle_reg, vehicle_reg_raw, insurance_company, client_phone, client_phone_raw,
@@ -757,6 +760,7 @@ export async function importPendingSubmissions(
           r.customer_email, r.schedule_date, r.latest_pending_reason, plan.get(r.client_phone) ?? null,
         ]
       );
+      createdJobIds.push(Number(inserted.lastInsertId));
       counts.added += 1;
     }
 
@@ -819,16 +823,19 @@ export async function importPendingSubmissions(
            VALUES (?, 'ABSENT_FROM_LATEST_EXPORT', 'No longer present in the latest pending submissions export; assumed resolved.', 'System', 'GREEN')`,
           [m.id]
         );
+        absentClosedJobIds.push(Number(m.id));
         counts.absentClosed += 1;
       }
     }
 
-    await tx.execute(
+    const importInsert = await tx.execute(
       `INSERT INTO pending_submission_imports (
          file_name, imported_by, row_count_total, new_records_count, skipped_open_count, skipped_closed_count, auto_closed_absent_count
        ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
       [fileName, importedBy, rows.length, counts.added, counts.refreshed, skippedClosed, counts.absentClosed]
     );
+    // Remember what this upload created and closed, so "Remove last upload" can undo it.
+    await markImportRecords(tx, "pending-submissions", Number(importInsert.lastInsertId), createdJobIds, absentClosedJobIds);
   });
 
   await closeMaturedPendingSubmissions(db);
@@ -992,19 +999,23 @@ export async function logPendingSubmissionOutcome(
   const outcome = typeof data.outcome === "string" ? data.outcome : "";
   if (!isAgentOutcome(outcome)) throw new HttpError(400, "That outcome cannot be selected.");
   const comment = typeof data.comment === "string" ? data.comment.trim() : "";
-  if (!comment) throw new HttpError(400, "A comment is required.");
+  // The note is optional: the agent only has to record the outcome.
   if (comment.length > 2000) throw new HttpError(400, "The comment must be 2000 characters or fewer.");
   const loggedBy = (typeof data.logged_by === "string" ? data.logged_by.trim() : "").slice(0, 255) || "Agent";
 
   let scheduledIso: string | null = null;
   let scheduledPlace: string | null = null;
   if (outcome === "SCHEDULED") {
-    const ms = typeof data.scheduled_at === "string" ? Date.parse(data.scheduled_at) : NaN;
-    if (isNaN(ms)) throw new HttpError(400, "A valid scheduled date and time is required.");
-    scheduledIso = new Date(ms).toISOString();
-    scheduledPlace = typeof data.scheduled_place === "string" ? data.scheduled_place.trim() : "";
-    if (!scheduledPlace) throw new HttpError(400, "A scheduled place is required.");
-    if (scheduledPlace.length > 500) throw new HttpError(400, "The scheduled place must be 500 characters or fewer.");
+    // Schedule details are optional now. They are stored only when they are supplied and valid.
+    if (typeof data.scheduled_at === "string" && data.scheduled_at.trim() !== "") {
+      const ms = Date.parse(data.scheduled_at);
+      if (isNaN(ms)) throw new HttpError(400, "The scheduled date and time is not valid.");
+      scheduledIso = new Date(ms).toISOString();
+    }
+    if (typeof data.scheduled_place === "string" && data.scheduled_place.trim() !== "") {
+      scheduledPlace = data.scheduled_place.trim();
+      if (scheduledPlace.length > 500) throw new HttpError(400, "The scheduled place must be 500 characters or fewer.");
+    }
   }
 
   const job = await db.queryOne<{ id: number; status: string }>(`SELECT id, status FROM pending_submission_jobs WHERE id = ?`, [jobId]);

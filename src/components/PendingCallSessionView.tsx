@@ -24,7 +24,7 @@ import {
 } from 'lucide-react';
 import type { PendingSubmissionJob, PendingSubmissionLog } from './PendingSubmissionsSection';
 import { groupByCustomerOldestFirst, CustomerGroup } from '../lib/submissionQueue';
-import { nairobiInputToIso } from '../lib/nairobiTime';
+import { saveOutcome } from '../lib/safeSave';
 
 export interface SessionOutcomeOption {
   value: string;
@@ -232,18 +232,12 @@ export const PendingCallSessionView: React.FC<PendingCallSessionViewProps> = ({
 
   const currentClient = queue[0];
 
-  // Every vehicle needs an outcome and a comment. SCHEDULED also needs a valid time and a place.
+  // Every vehicle needs an outcome. The note is optional and there are no schedule details to capture.
   const isFormValid = useMemo(() => {
     if (!currentClient || currentClient.records.length === 0) return false;
     return currentClient.records.every((v) => {
       const f = vehicleForm[v.id];
-      if (!f || !f.outcome) return false;
-      if (f.comment.trim() === '') return false;
-      if (f.outcome === 'SCHEDULED') {
-        if (nairobiInputToIso(f.scheduledAt) === null) return false;
-        if (f.scheduledPlace.trim() === '') return false;
-      }
-      return true;
+      return !!f && !!f.outcome;
     });
   }, [currentClient, vehicleForm]);
 
@@ -261,31 +255,18 @@ export const PendingCallSessionView: React.FC<PendingCallSessionViewProps> = ({
     const settled = await Promise.allSettled(
       vehicles.map(async (v) => {
         const f = vehicleForm[v.id];
-        const isScheduled = f.outcome === 'SCHEDULED';
-        const res = await fetch(`/api/pending-submissions/jobs/${v.id}/log`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            outcome: f.outcome,
-            comment: f.comment.trim(),
-            logged_by: selectedAgentName,
-            scheduled_at: isScheduled ? nairobiInputToIso(f.scheduledAt) : null,
-            scheduled_place: isScheduled ? f.scheduledPlace.trim() : null,
-          }),
-        });
-        if (!res.ok) {
-          let detail = 'Request failed';
-          try {
-            const j = await res.json();
-            if (j.error) detail = j.error;
-          } catch (_) {
-            detail = await res.text();
-          }
-          throw new Error(`Failed to log ${v.vehicle_reg_raw || v.vehicle_reg}: ${detail}`);
+        const saved = await saveOutcome(
+          `/api/pending-submissions/jobs/${v.id}/log`,
+          { outcome: f.outcome, comment: f.comment.trim(), logged_by: selectedAgentName },
+          v.vehicle_reg_raw || v.vehicle_reg
+        );
+        // Only a confirmation from the server counts as saved. Otherwise this vehicle stays on screen and the outcome is kept on this device.
+        if (!saved.ok) {
+          throw new Error(`Failed to log ${v.vehicle_reg_raw || v.vehicle_reg}: ${saved.error || 'Request failed'}`);
         }
-        const body = await res.json();
-        if (body.job && onJobUpdated) onJobUpdated(body.job);
-        return { vehicle: v, body, scheduled: isScheduled };
+        const body = saved.data;
+        if (body && body.job && onJobUpdated) onJobUpdated(body.job);
+        return { vehicle: v, body };
       })
     );
 
@@ -297,17 +278,6 @@ export const PendingCallSessionView: React.FC<PendingCallSessionViewProps> = ({
       const reg = v.vehicle_reg_raw || v.vehicle_reg;
       if (s.status === 'fulfilled') {
         savedIds.add(v.id);
-        if (s.value.scheduled) {
-          const solver = v.solver_name || 'the solver';
-          const b = s.value.body;
-          if (b.smsDispatched) {
-            newNotices.push({ key: `sms-${v.id}`, text: `${reg}: scheduled. Solver SMS sent to ${solver}.`, error: false });
-          } else if (b.smsMessage || b.sms?.message) {
-            newNotices.push({ key: `sms-${v.id}`, text: `${reg}: scheduled. ${b.smsMessage || b.sms.message}`, error: true });
-          } else {
-            newNotices.push({ key: `sms-${v.id}`, text: `${reg}: scheduled.`, error: false });
-          }
-        }
       } else {
         failures.push(s.reason?.message || `Failed to log ${reg}`);
       }
@@ -840,49 +810,10 @@ export const PendingCallSessionView: React.FC<PendingCallSessionViewProps> = ({
                     </div>
                   </div>
 
-                  {/* Scheduled: date, time and place. The solver SMS is sent automatically when the outcome is saved. */}
-                  {isScheduled && (
-                    <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-xl space-y-2.5">
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                        <div>
-                          <label className="block text-[11px] font-bold text-emerald-950 mb-1">
-                            Inspection Date &amp; Time (Nairobi time) <span className="text-red-500">*</span>
-                          </label>
-                          <input
-                            id={`input-pending-scheduled-at-${vehicle.id}`}
-                            type="datetime-local"
-                            value={form.scheduledAt}
-                            onChange={(e) => updateForm(vehicle.id, { scheduledAt: e.target.value })}
-                            className="w-full px-3 py-2 bg-white border border-emerald-300 rounded-xl text-xs font-semibold focus:outline-none"
-                          />
-                        </div>
-                        <div>
-                          <label className="block text-[11px] font-bold text-emerald-950 mb-1">
-                            Agreed Location / Place <span className="text-red-500">*</span>
-                          </label>
-                          <input
-                            id={`input-pending-scheduled-place-${vehicle.id}`}
-                            type="text"
-                            value={form.scheduledPlace}
-                            onChange={(e) => updateForm(vehicle.id, { scheduledPlace: e.target.value })}
-                            placeholder="e.g. TotalEnergies Westlands, client residence"
-                            className="w-full px-3 py-2 bg-white border border-emerald-300 rounded-xl text-xs font-semibold focus:outline-none"
-                          />
-                        </div>
-                      </div>
-                      <p className="text-[11px] text-emerald-800 flex items-center gap-1.5">
-                        <MessageSquare className="w-3.5 h-3.5" />
-                        <span>
-                          An SMS with these details is sent to {vehicle.solver_name || 'the solver'} automatically when you save.
-                        </span>
-                      </p>
-                    </div>
-                  )}
-
-                  {/* Comment (required for every outcome) */}
+                  {/* Comment (optional) */}
                   <div>
                     <label className="block text-[11px] font-bold text-slate-700 mb-1">
-                      Notes &amp; Summary <span className="text-red-500">*</span>
+                      Notes &amp; Summary <span className="text-slate-400 font-normal">(optional)</span>
                     </label>
                     <textarea
                       id={`textarea-pending-comment-${vehicle.id}`}
@@ -906,9 +837,9 @@ export const PendingCallSessionView: React.FC<PendingCallSessionViewProps> = ({
               <div className="flex items-center gap-1.5 text-amber-700 font-semibold">
                 <AlertCircle className="w-4 h-4 text-amber-500 flex-shrink-0" />
                 <span>
-                  Select an outcome and add a note for all{' '}
+                  Select an outcome for all{' '}
                   <span className="font-bold text-amber-900">{currentClient.records.length}</span> vehicle
-                  {currentClient.records.length === 1 ? '' : 's'} (and the time and place for any Scheduled) to enable Save &amp; Next.
+                  {currentClient.records.length === 1 ? '' : 's'} to enable Save &amp; Next.
                 </span>
               </div>
             ) : (

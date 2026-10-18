@@ -56,6 +56,8 @@ import { InsuranceCallbackSection } from './components/InsuranceCallbackSection'
 import { AgentPerformanceNarrative } from './components/AgentPerformanceNarrative';
 import { EmailSlaSection } from './components/EmailSlaSection';
 import PendingSubmissionsSection from './components/PendingSubmissionsSection';
+import SaveStatusBanner from './components/SaveStatusBanner';
+import { startSessionGuard } from './lib/safeSave';
 import { SystemSettings, TurnaroundTimeReport, Obligation, AgentComplianceSummary, TagGroupCompliance } from './types/compliance';
 
 function cn(...inputs: ClassValue[]) {
@@ -177,6 +179,11 @@ export default function App() {
     }).catch(() => setIsAdminAuthenticated(false));
   }, []);
 
+  // Keep unsaved outcomes on this device, retry them safely, and warn early if the session expires.
+  useEffect(() => {
+    startSessionGuard();
+  }, []);
+
   // Fetch Database engine status
   const fetchDbStatus = async () => {
     try {
@@ -289,6 +296,7 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-[#F8FAFC] font-sans text-slate-900 pb-24">
+      <SaveStatusBanner />
       {/* Navigation */}
       <nav className="bg-white border-b border-slate-200 sticky top-0 z-40 px-6 py-3.5 shadow-xs">
         <div className="max-w-7xl mx-auto flex flex-col md:flex-row md:items-center justify-between gap-4">

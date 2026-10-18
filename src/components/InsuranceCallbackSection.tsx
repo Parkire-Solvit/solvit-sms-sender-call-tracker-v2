@@ -49,6 +49,8 @@ import {
   ChannelPartnerAllocation,
 } from '../types/callbacks';
 import { CallSessionView } from './CallSessionView';
+import DataResetPanel from './DataResetPanel';
+import { saveOutcome } from '../lib/safeSave';
 import { OnboardingTour } from './OnboardingTour';
 import { AgentReviewModal } from './AgentReviewModal';
 import { UnmatchedActivityModal } from './UnmatchedActivityModal';
@@ -744,22 +746,16 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
     setOutcomeError(null);
 
     try {
-      const res = await fetch(`/api/callback-jobs/${outcomeJob.id}/outcome`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          outcome: selectedOutcome,
-          comment: outcomeComment.trim(),
-          logged_by: outcomeLoggedBy.trim() || 'Agent',
-        }),
-      });
+      const saved = await saveOutcome(
+        `/api/callback-jobs/${outcomeJob.id}/outcome`,
+        { outcome: selectedOutcome, comment: outcomeComment.trim(), logged_by: outcomeLoggedBy.trim() || 'Agent' },
+        outcomeJob.vehicle_reg_raw || outcomeJob.vehicle_reg
+      );
+      // Only a confirmation from the server counts as saved. Otherwise the form stays open and the outcome is kept on this device.
+      if (!saved.ok) throw new Error(saved.error || 'Failed to log outcome.');
+      if (saved.duplicate) fetchJobs();
 
-      if (!res.ok) {
-        const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.error || 'Failed to log outcome.');
-      }
-
-      const updated: CallbackJob = await res.json();
+      const updated: CallbackJob = saved.data;
       setJobs((prev) => prev.map((j) => (j.id === updated.id ? { ...j, ...updated } : j)));
       // Refresh cached history if expanded or cached
       try {
@@ -1889,6 +1885,7 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
                   Unrecognised agent names from Android app logs need merge or confirmation.
                 </span>
               </div>
+
             </div>
             <button
               type="button"
@@ -3742,6 +3739,8 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
                   </div>
                 )}
               </div>
+
+              <DataResetPanel section="callbacks" onChanged={() => fetchJobs()} />
             </div>
 
             {/* Pinned Modal Footer (Always visible at bottom) */}

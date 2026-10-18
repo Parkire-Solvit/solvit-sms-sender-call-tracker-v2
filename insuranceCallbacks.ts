@@ -1,4 +1,5 @@
 import { DbAdapter } from "./db";
+import { markImportRecords } from "./dataReset";
 import { 
   CallbackJob, 
   CallbackSettings, 
@@ -538,6 +539,8 @@ export async function importCallbackJobs(
   let newRecordsCount = 0;
   let skippedOpenCount = 0;
   let skippedClosedCount = 0;
+  const createdJobIds: number[] = [];
+  const absentClosedJobIds: number[] = [];
 
   // Load existing partner allocations
   const allocations = await db.queryAll<{ channel_partner: string; assigned_agent_id: number | null }>(
@@ -654,6 +657,7 @@ export async function importCallbackJobs(
       );
 
       const newJobId = insertResult.lastInsertId;
+      createdJobIds.push(Number(newJobId));
 
       // Store all extracted numbers in callback_job_phones
       for (let i = 0; i < extractedPhones.length; i++) {
@@ -727,6 +731,7 @@ export async function importCallbackJobs(
         ) VALUES (?, 'ABSENT_FROM_LATEST_EXPORT', 'Vehicle no longer present in Brian''s latest export; assumed scheduled.', 'System', 'GREEN', CURRENT_TIMESTAMP)`,
         [job.id]
       );
+      absentClosedJobIds.push(Number(job.id));
       autoClosedAbsentCount++;
     }
   }
@@ -734,7 +739,7 @@ export async function importCallbackJobs(
   const parsedEndDateStr = parsedEndDate ? parsedEndDate.toISOString().split('T')[0] : null;
 
   // Insert callback_imports record
-  await db.execute(
+  const importInsert = await db.execute(
     `INSERT INTO callback_imports (
       file_name, imported_by, row_count_total, new_records_count, skipped_open_count, skipped_closed_count, auto_closed_absent_count, parsed_end_date, imported_at
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
@@ -749,6 +754,14 @@ export async function importCallbackJobs(
       parsedEndDateStr,
     ]
   );
+
+  // Remember what this upload created and closed, so "Remove last upload" can undo it.
+  // A failure here must never fail the upload itself.
+  try {
+    await markImportRecords(db, "callbacks", Number(importInsert.lastInsertId), createdJobIds, absentClosedJobIds);
+  } catch (err) {
+    console.error("[CALLBACKS] Could not record upload markers:", err);
+  }
 
   // Full sweep of matured callback jobs
   await closeMaturedCallbackJobs(db);

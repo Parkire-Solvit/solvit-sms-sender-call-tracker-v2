@@ -22,6 +22,7 @@ import {
   Mail,
 } from 'lucide-react';
 import { CallbackJob, CallbackSettings, CallbackJobLog } from '../types/callbacks';
+import { saveOutcome } from '../lib/safeSave';
 
 export interface CallSessionClientGroup {
   client_phone: string;
@@ -432,29 +433,17 @@ export const CallSessionView: React.FC<CallSessionViewProps> = ({
       // Submit one POST /api/callback-jobs/:id/log per vehicle (comment is optional)
       const promises = currentClient.vehicles.map(async (v) => {
         const formData = vehicleForm[v.id];
-        const res = await fetch(`/api/callback-jobs/${v.id}/log`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            outcome: formData.outcome,
-            comment: (formData.comment || '').trim(),
-            logged_by: loggedBy,
-          }),
-        });
-
-        if (!res.ok) {
-          let errDetail = 'Request failed';
-          try {
-            const errJson = await res.json();
-            if (errJson.error) errDetail = errJson.error;
-          } catch (_) {
-            errDetail = await res.text();
-          }
-          throw new Error(`Failed to log ${v.vehicle_reg_raw}: ${errDetail}`);
+        const saved = await saveOutcome(
+          `/api/callback-jobs/${v.id}/log`,
+          { outcome: formData.outcome, comment: (formData.comment || '').trim(), logged_by: loggedBy },
+          v.vehicle_reg_raw || v.vehicle_reg
+        );
+        // Only a confirmation from the server counts as saved. A retry after a partial failure is safe because the server ignores duplicates.
+        if (!saved.ok) {
+          throw new Error(`Failed to log ${v.vehicle_reg_raw}: ${saved.error || 'Request failed'}`);
         }
-
-        const updated = await res.json();
-        if (onJobUpdated) onJobUpdated(updated);
+        const updated = saved.data;
+        if (onJobUpdated && !saved.duplicate) onJobUpdated(updated);
         return updated;
       });
 

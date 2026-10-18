@@ -55,6 +55,10 @@ import { INTEGRATIONS, getIntegrationPublicView, updateIntegrationSettings, getH
 import { sendSms, toInternationalMobile } from "./hostPinnacle";
 import { createRateLimiter } from "./rateLimit";
 import { AGENT_OUTCOMES } from "./pendingSubmissionOutcomes";
+import { getDataResetPreview, buildDataBackup, deleteAllRecords, undoLastUpload, verifyResetKey, parseResetSection } from "./dataReset";
+import { claimOutcomeReceipt, releaseOutcomeReceipt } from "./outcomeReceipts";
+import { isSolverSmsEnabled } from "./solverSmsSwitch";
+import { getPendingMaxAttemptsTimeline, filterMaxAttemptsGroups, buildPendingMaxAttemptsWorkbook } from "./pendingMaxAttemptsReport";
 
 // SSE Clients for real-time agent name push
 const agentClients = new Map<number, any>();
@@ -1390,7 +1394,15 @@ function computeActivitySummary(events: any[], totalAgents: number = 0) {
         return res.status(400).json({ error: "Comment is required." });
       }
 
-      const updatedJob = await logCallbackOutcome(db, id, outcome, comment, logged_by || "Agent");
+      const claim = await claimOutcomeReceipt(db, "callbacks", req.body?.client_request_id, id);
+      if (claim === "duplicate") return res.json({ id, success: true, duplicate: true });
+      let updatedJob: Awaited<ReturnType<typeof logCallbackOutcome>>;
+      try {
+        updatedJob = await logCallbackOutcome(db, id, outcome, comment, logged_by || "Agent");
+      } catch (saveError) {
+        if (claim === "new") await releaseOutcomeReceipt(db, req.body?.client_request_id);
+        throw saveError;
+      }
       res.json(updatedJob);
     } catch (err: any) {
       console.error("[API] Error logging callback outcome:", err);
@@ -1620,7 +1632,7 @@ function computeActivitySummary(events: any[], totalAgents: number = 0) {
   app.get(pendingSettingsPaths, requireAdmin, async (_req, res) => {
     try {
       const workflow = await getPendingSubmissionSettings(db);
-      res.json({ ...workflow, workflow });
+      res.json({ ...workflow, workflow, solver_sms_enabled: isSolverSmsEnabled() });
     } catch (err) {
       sendError(res, err, "Error fetching pending submission settings");
     }
@@ -1694,9 +1706,19 @@ function computeActivitySummary(events: any[], totalAgents: number = 0) {
   app.post("/api/pending-submissions/jobs/:id/log", requireAdmin, async (req, res) => {
     try {
       const jobId = Number(req.params.id);
-      const result = await logPendingSubmissionOutcome(db, jobId, req.body || {});
+      const claim = await claimOutcomeReceipt(db, "pending-submissions", req.body?.client_request_id, jobId);
+      if (claim === "duplicate") {
+        return res.json({ success: true, duplicate: true, job: await getPendingSubmissionJobById(db, jobId), sms: null, smsDispatched: false });
+      }
+      let result: Awaited<ReturnType<typeof logPendingSubmissionOutcome>>;
+      try {
+        result = await logPendingSubmissionOutcome(db, jobId, req.body || {});
+      } catch (saveError) {
+        if (claim === "new") await releaseOutcomeReceipt(db, req.body?.client_request_id);
+        throw saveError;
+      }
       let sms: { status: string; message: string } | null = null;
-      if (req.body?.outcome === "SCHEDULED") {
+      if (isSolverSmsEnabled() && req.body?.outcome === "SCHEDULED") {
         try {
           sms = await notifySolver(db, jobId, "auto");
         } catch (smsErr) {
@@ -1727,6 +1749,7 @@ function computeActivitySummary(events: any[], totalAgents: number = 0) {
 
   app.post("/api/pending-submissions/jobs/:id/resend-notification", requireAdmin, async (req, res) => {
     try {
+      if (!isSolverSmsEnabled()) throw new HttpError(404, "Solver SMS is switched off.");
       const result = await notifySolver(db, Number(req.params.id), "manual");
       res.json({ success: result.status === "SENT", status: result.status, message: result.message });
     } catch (err) {
@@ -1802,6 +1825,65 @@ function computeActivitySummary(events: any[], totalAgents: number = 0) {
       res.json({ success: result.ok, transactionId: result.transactionId, error: result.error });
     } catch (err) {
       sendError(res, err, "Error sending test SMS");
+    }
+  });
+
+  app.get("/api/pending-submissions/max-attempts-report/excel", requireAdmin, async (req, res) => {
+    try {
+      const agent = String(req.query.assigned_agent_name || req.query.agent || "").trim();
+      const company = String(req.query.insurance_company || "").trim();
+      const groups = filterMaxAttemptsGroups(await getPendingMaxAttemptsTimeline(db), agent, company);
+      const report = buildPendingMaxAttemptsWorkbook(groups, agent, company);
+      res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+      res.setHeader("Content-Disposition", `attachment; filename="${report.filename}"`);
+      res.send(report.buffer);
+    } catch (err) {
+      sendError(res, err, "Error generating the pending submissions max attempts Excel");
+    }
+  });
+
+  app.get("/api/session-ping", requireAdmin, (_req, res) => {
+    res.setHeader("Cache-Control", "no-store");
+    res.json({ ok: true, server_time: new Date().toISOString() });
+  });
+
+  app.get("/api/data-reset/:section/preview", requireAdmin, async (req, res) => {
+    try {
+      res.json(await getDataResetPreview(db, req.params.section));
+    } catch (err) {
+      sendError(res, err, "Error building the data reset preview");
+    }
+  });
+
+  app.post("/api/data-reset/:section/backup", requireAdmin, async (req, res) => {
+    try {
+      parseResetSection(req.params.section);
+      verifyResetKey(req.body?.reset_key);
+      const backup = await buildDataBackup(db, req.params.section);
+      res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+      res.setHeader("Content-Disposition", `attachment; filename="${backup.filename}"`);
+      res.setHeader("X-Backup-Token", backup.token);
+      res.setHeader("X-Backup-Filename", backup.filename);
+      res.setHeader("Access-Control-Expose-Headers", "X-Backup-Token, X-Backup-Filename, Content-Disposition");
+      res.send(backup.buffer);
+    } catch (err) {
+      sendError(res, err, "Error building the data backup");
+    }
+  });
+
+  app.post("/api/data-reset/:section/delete-all", requireAdmin, async (req, res) => {
+    try {
+      res.json(await deleteAllRecords(db, req.params.section, req.body || {}));
+    } catch (err) {
+      sendError(res, err, "Error deleting all records");
+    }
+  });
+
+  app.post("/api/data-reset/:section/undo-last-upload", requireAdmin, async (req, res) => {
+    try {
+      res.json(await undoLastUpload(db, req.params.section, req.body || {}));
+    } catch (err) {
+      sendError(res, err, "Error undoing the last upload");
     }
   });
 
