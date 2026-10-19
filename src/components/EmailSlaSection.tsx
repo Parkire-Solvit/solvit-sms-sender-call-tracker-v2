@@ -20,7 +20,6 @@ type TeamMember = {
   is_available: boolean; round_robin_enabled: boolean; is_monitored: boolean;
 };
 type Alert = { id: number; email_thread_id: number; alert_type: string; emitted_at: string; subject: string; owner_name: string | null };
-type AssignmentNotice = { id: number; email_thread_id: number; created_at: string; subject: string; customer_email: string; method: string };
 type SyncHealth = {
   mailbox: string; folder: string; last_successful_sync_at: string | null;
   last_error_at: string | null; last_error_code: string | null;
@@ -109,7 +108,6 @@ export function EmailSlaSection({ employeeEmail }: { employeeEmail?: string }) {
   const [threads, setThreads] = useState<Thread[]>([]);
   const [members, setMembers] = useState<TeamMember[]>([]);
   const [alerts, setAlerts] = useState<Alert[]>([]);
-  const [assignmentNotices, setAssignmentNotices] = useState<AssignmentNotice[]>([]);
   const [summary, setSummary] = useState<Summary | null>(null);
   const [settings, setSettings] = useState<Settings | null>(null);
   const [filter, setFilter] = useState(isEmployee ? 'awaiting' : 'all');
@@ -140,15 +138,14 @@ export function EmailSlaSection({ employeeEmail }: { employeeEmail?: string }) {
         ...(receivedFrom ? { from: receivedFrom } : {}),
         ...(receivedTo ? { to: receivedTo } : {}),
       });
-      const [nextThreads, nextMembers, nextAlerts, nextSummary, nextSettings, nextNotices] = await Promise.all([
+      const [nextThreads, nextMembers, nextAlerts, nextSummary, nextSettings] = await Promise.all([
         api<Thread[]>(`/api/email/threads?${query}`), api<TeamMember[]>(isEmployee ? '/api/email/assignment-targets' : '/api/email/team'),
         api<Alert[]>('/api/email/alerts'), api<Summary>('/api/email/summary'), api<Settings>('/api/email/settings'),
-        isEmployee ? api<AssignmentNotice[]>('/api/email/assignment-notifications') : Promise.resolve([] as AssignmentNotice[]),
       ]);
       // A slower older request must never overwrite a newer refresh.
       if (sequence !== refreshSequence.current) return;
       setThreads(nextThreads); setMembers(nextMembers); setAlerts(nextAlerts);
-      setSummary(nextSummary); setSettings(nextSettings); setAssignmentNotices(nextNotices);
+      setSummary(nextSummary); setSettings(nextSettings);
       setLastUpdatedAt(Date.now()); setError('');
     } catch (cause) { if (sequence === refreshSequence.current) setError((cause as Error).message); }
   }, [filter, owner, receivedFrom, receivedTo, isEmployee]);
@@ -271,13 +268,6 @@ export function EmailSlaSection({ employeeEmail }: { employeeEmail?: string }) {
     {enabled && <nav aria-label="Email SLA views" className="flex gap-2 border-b border-slate-200 pb-3">{(['queue','reports'] as const).map(tab => <button key={tab} onClick={() => setView(tab)} aria-pressed={view === tab} className={`rounded-lg px-4 py-2 text-sm font-medium ${view === tab ? 'bg-blue-50 text-blue-700' : 'text-slate-500 hover:bg-slate-100'}`}>{tab === 'queue' ? 'Email queue' : 'Reports'}</button>)}</nav>}
     {enabled && view === 'reports' && <EmailSlaReports employeeEmail={employeeEmail} members={members} refreshToken={reportRefreshToken} />}
     {enabled && view === 'queue' && <>
-      {isEmployee && assignmentNotices.length > 0 && <section className="p-4 rounded-xl border border-blue-200 bg-blue-50">
-        <h3 className="font-semibold text-sm">New assignments ({assignmentNotices.length})</h3>
-        <div className="mt-2 space-y-2">{assignmentNotices.map((notice) => <div key={notice.id} className="flex flex-wrap justify-between gap-2 text-xs">
-          <span>#{notice.email_thread_id} · {notice.subject || '(no subject)'} · {notice.customer_email} · {notice.method.toLowerCase().replaceAll('_', ' ')}</span>
-          <button disabled={busy} onClick={() => void action(`/api/email/assignment-notifications/${notice.id}/seen`)} className="font-semibold underline">Mark seen</button>
-        </div>)}</div>
-      </section>}
       <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3">
         {cards.map(([label, value]) => <div key={label} className="p-4 rounded-xl border bg-white"><p className="text-xs text-slate-500">{label}</p><p className="text-2xl font-bold mt-1">{value}</p></div>)}
       </div>
