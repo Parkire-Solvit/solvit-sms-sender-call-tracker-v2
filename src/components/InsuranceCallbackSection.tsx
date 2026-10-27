@@ -153,6 +153,7 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
   const [selectedPartner, setSelectedPartner] = useState('ALL');
   const [selectedStatus, setSelectedStatus] = useState<string>('ALL');
   const [selectedAgent, setSelectedAgent] = useState<string>('ALL');
+  const [kpiRefreshToken, setKpiRefreshToken] = useState(0);
 
   // Focused One-at-a-Time Call Session
   const [isCallSessionActive, setIsCallSessionActive] = useState(false);
@@ -757,6 +758,10 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
 
       const updated: CallbackJob = saved.data;
       setJobs((prev) => prev.map((j) => (j.id === updated.id ? { ...j, ...updated } : j)));
+      // Completion is served by a separate KPI endpoint. Refresh it immediately
+      // after an outcome changes a record instead of leaving the old percentage
+      // visible until the panel's five-minute background refresh.
+      setKpiRefreshToken((value) => value + 1);
       // Refresh cached history if expanded or cached
       try {
         const logsRes = await fetch(`/api/callback-jobs/${outcomeJob.id}/logs`);
@@ -2120,6 +2125,7 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
       <AgentKpiPanel
         section="callbacks"
         focusAgentName={selectedAgent !== 'ALL' && selectedAgent !== '__unassigned__' ? selectedAgent : null}
+        refreshToken={kpiRefreshToken}
       />
 
       {/* Upload Success Banner */}
