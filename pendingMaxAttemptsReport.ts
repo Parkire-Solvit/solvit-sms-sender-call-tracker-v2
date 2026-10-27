@@ -1,6 +1,7 @@
-// V18 pendingMaxAttemptsReport.ts
+// V19 pendingMaxAttemptsReport.ts
 // Pending Submissions max attempts Excel report, in the same format as the Callbacks max attempts report:
 // a Summary sheet, one sheet per insurance company (the Callbacks version uses channel partner), and a Raw Data sheet.
+// One report per job type. An inspection job counts the client's number, a submission job counts the solver's number.
 import * as XLSX from "xlsx";
 import { DbAdapter } from "./db";
 import { normalizeRegAlphaNumeric } from "./insuranceCallbacks";
@@ -9,11 +10,14 @@ import {
   ContactJob,
   PendingSubmissionJobView,
   countClientContacts,
+  countingStartMs,
   getPendingSubmissionMaxAttemptsReport,
   getPendingSubmissionSettings,
   normalizePhone,
   parseDbTimestamp,
+  primaryPhoneOf,
 } from "./pendingSubmissions";
+import { PendingJobType } from "./pendingSubmissionOutcomes";
 
 export type ChronologyEntry =
   | { kind: "OUTCOME"; outcome: string; comment: string; logged_by: string; logged_by_phone: string | null; timestamp: string; counted: false }
@@ -32,9 +36,9 @@ export interface PendingMaxAttemptsGroup {
 
 const DAY_MS = 86_400_000;
 
-/** Every record that reached max attempts, grouped by insurance company, each with its merged call, SMS and outcome trail. */
-export async function getPendingMaxAttemptsTimeline(db: DbAdapter): Promise<PendingMaxAttemptsGroup[]> {
-  const grouped = await getPendingSubmissionMaxAttemptsReport(db);
+/** Every record of one job type that reached max attempts, grouped by insurance company, each with its merged call, SMS and outcome trail. */
+export async function getPendingMaxAttemptsTimeline(db: DbAdapter, jobType: PendingJobType = "INSPECTION"): Promise<PendingMaxAttemptsGroup[]> {
+  const grouped = await getPendingSubmissionMaxAttemptsReport(db, jobType);
   const allJobs = grouped.flatMap((g) => g.jobs);
   if (allJobs.length === 0) return [];
 
@@ -90,7 +94,7 @@ export async function getPendingMaxAttemptsTimeline(db: DbAdapter): Promise<Pend
     if (job.assigned_agent_id !== null && job.assigned_agent_id !== undefined) {
       const agentId = Number(job.assigned_agent_id);
       const agent = agentById.get(agentId);
-      const firstMs = parseDbTimestamp(job.first_imported_at);
+      const firstMs = countingStartMs(job);
       const ctx: ContactJob = {
         id: job.id,
         assigned_agent_id: agentId,
@@ -98,8 +102,10 @@ export async function getPendingMaxAttemptsTimeline(db: DbAdapter): Promise<Pend
         solver_contact: job.solver_contact,
         vehicle_reg: job.vehicle_reg,
         first_imported_at: job.first_imported_at,
+        job_type: job.job_type,
+        type_changed_at: job.type_changed_at,
       };
-      const clientPhone = normalizePhone(job.client_phone);
+      const clientPhone = primaryPhoneOf(job);
       const reg = normalizeRegAlphaNumeric(job.vehicle_reg);
       for (const ev of eventsByAgent.get(agentId) ?? []) {
         const ts = parseDbTimestamp(ev.timestamp);
@@ -163,10 +169,21 @@ export function filterMaxAttemptsGroups(groups: PendingMaxAttemptsGroup[], agent
   return out;
 }
 
-export function buildPendingMaxAttemptsWorkbook(groups: PendingMaxAttemptsGroup[], agentFilter: string, companyFilter: string, nowMs: number = Date.now()) {
+export function buildPendingMaxAttemptsWorkbook(
+  groups: PendingMaxAttemptsGroup[],
+  agentFilter: string,
+  companyFilter: string,
+  nowMs: number = Date.now(),
+  jobType: PendingJobType = "INSPECTION"
+) {
   const wb = XLSX.utils.book_new();
+  const isSubmission = jobType === "SUBMISSION";
+  // The number that is counted: the client's for an inspection job, the solver's for a submission job.
+  const primaryLabel = isSubmission ? "Solver Phone" : "Client Phone";
+  const primaryOf = (j: PendingSubmissionJobView) =>
+    isSubmission ? j.solver_contact_raw || j.solver_contact || "" : j.client_phone_raw || j.client_phone || "";
 
-  // Sheet 1: Summary. One row per client phone with the maximum counts for that phone.
+  // Sheet 1: Summary. One row per counted phone with the maximum counts for that phone.
   type SummaryRow = {
     solverName: string;
     clientPhone: string;
@@ -179,7 +196,7 @@ export function buildPendingMaxAttemptsWorkbook(groups: PendingMaxAttemptsGroup[
   const byPhone = new Map<string, SummaryRow>();
   for (const g of groups) {
     for (const r of g.records) {
-      const phone = r.job.client_phone_raw || r.job.client_phone;
+      const phone = primaryOf(r.job);
       let entry = byPhone.get(phone);
       if (!entry) {
         entry = {
@@ -201,7 +218,7 @@ export function buildPendingMaxAttemptsWorkbook(groups: PendingMaxAttemptsGroup[
   }
   const summaryRows = [...byPhone.values()].map((e) => ({
     "Solver Name": e.solverName,
-    "Client Phone": e.clientPhone,
+    [primaryLabel]: e.clientPhone,
     "Insurance Company(ies)": [...e.companies].join(", "),
     "Vehicles": [...e.vehicles].join(", "),
     "Vehicle Count": e.vehicles.size,
@@ -218,7 +235,8 @@ export function buildPendingMaxAttemptsWorkbook(groups: PendingMaxAttemptsGroup[
       const base = {
         "Vehicle Registration": j.vehicle_reg_raw || j.vehicle_reg,
         "Solver Name": j.solver_name || "N/A",
-        "Client Phone": j.client_phone_raw || j.client_phone || "",
+        [primaryLabel]: primaryOf(j),
+        ...(isSubmission ? { "Client Phone": j.client_phone_raw || j.client_phone || "" } : {}),
         "Insurance Company": company,
       };
       const agent = j.assigned_agent_name || "Unassigned";
@@ -267,7 +285,7 @@ export function buildPendingMaxAttemptsWorkbook(groups: PendingMaxAttemptsGroup[
   const agentPart = agentFilter && agentFilter.toUpperCase() !== "ALL" ? clean(agentFilter) : "all";
   const companyPart = companyFilter && companyFilter.toUpperCase() !== "ALL" ? clean(companyFilter) : "all";
   const today = new Date(nowMs).toISOString().split("T")[0];
-  return { buffer, filename: `pending_max_attempts_report_${agentPart}_${companyPart}_${today}.xlsx`, summaryRows: summaryRows.length };
+  const typePart = isSubmission ? "submission" : "inspection";
+  return { buffer, filename: `pending_${typePart}_max_attempts_report_${agentPart}_${companyPart}_${today}.xlsx`, summaryRows: summaryRows.length };
 }
-// V18 END pendingMaxAttemptsReport.ts
-
+// V19 END pendingMaxAttemptsReport.ts

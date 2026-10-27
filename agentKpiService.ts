@@ -25,8 +25,9 @@ import {
   getPendingSubmissionSettings,
   getValidSubmissionAgents,
   parseDbTimestamp,
+  primaryPhoneOf,
 } from "./pendingSubmissions";
-import { ABSENT_CLOSE_OUTCOMES } from "./pendingSubmissionOutcomes";
+import { ABSENT_CLOSE_OUTCOMES, PendingJobType, normalizeJobType } from "./pendingSubmissionOutcomes";
 
 const DAY_MS = 86_400_000;
 
@@ -106,19 +107,26 @@ async function buildReport(
 // Pending Submissions
 // ---------------------------------------------------------------------------
 
-export async function getPendingSubmissionAgentKpis(db: DbAdapter, nowMs: number = Date.now()): Promise<AgentKpiReport> {
+/** With a job type, only that type's jobs are counted (the two tabs of Pending Submissions have their own KPI). */
+export async function getPendingSubmissionAgentKpis(
+  db: DbAdapter,
+  nowMs: number = Date.now(),
+  jobType?: PendingJobType
+): Promise<AgentKpiReport> {
   await closeMaturedPendingSubmissions(db);
   const settings = await getPendingSubmissionSettings(db);
   const agents = await getValidSubmissionAgents(db, settings.callback_team_tag);
   const lowerBound = dateOnly(nowMs - (KPI_WINDOW_DAYS + 1) * DAY_MS);
 
   const rows = await db.queryAll<any>(
-    `SELECT id, assigned_agent_id, client_phone, solver_contact, vehicle_reg, status, latest_outcome, closed_at, schedule_date, first_imported_at
+    `SELECT id, assigned_agent_id, client_phone, solver_contact, vehicle_reg, status, latest_outcome, closed_at, schedule_date, first_imported_at, job_type, type_changed_at
      FROM pending_submission_jobs
      WHERE status = 'AMBER' OR (closed_at IS NOT NULL AND closed_at >= ?)`,
     [lowerBound]
   );
-  const jobs = rows.map((r) => ({ ...r, id: num(r.id), assigned_agent_id: r.assigned_agent_id === null || r.assigned_agent_id === undefined ? null : num(r.assigned_agent_id) }));
+  const jobs = rows
+    .map((r) => ({ ...r, id: num(r.id), assigned_agent_id: r.assigned_agent_id === null || r.assigned_agent_id === undefined ? null : num(r.assigned_agent_id) }))
+    .filter((j) => jobType === undefined || normalizeJobType(j.job_type) === jobType);
   const open = jobs.filter((j) => j.status === "AMBER");
   const activity = await computePendingSubmissionActivity(db, open);
 
@@ -126,7 +134,7 @@ export async function getPendingSubmissionAgentKpis(db: DbAdapter, nowMs: number
     const act = activity.get(j.id);
     return {
       agent_id: j.assigned_agent_id,
-      customer_key: String(j.client_phone),
+      customer_key: primaryPhoneOf(j) || String(j.client_phone),
       status: j.status,
       closed_by_upload: j.status === "GREEN" && ABSENT_CLOSE_OUTCOMES.includes(j.latest_outcome ?? ""),
       closed_at: j.closed_at,
@@ -136,7 +144,7 @@ export async function getPendingSubmissionAgentKpis(db: DbAdapter, nowMs: number
     };
   });
 
-  return buildReport(db, "pending_submissions", nowMs, agents, records, { calls: settings.max_attempts, sms: settings.max_sms_attempts }, "Submitted");
+  return buildReport(db, "pending_submissions", nowMs, agents, records, { calls: settings.max_attempts, sms: settings.max_sms_attempts }, "Closed by upload");
 }
 
 // ---------------------------------------------------------------------------
@@ -193,4 +201,3 @@ export async function getCallbackAgentKpis(db: DbAdapter, nowMs: number = Date.n
   return buildReport(db, "callbacks", nowMs, agents, records, { calls: settings.max_attempts, sms: settings.max_sms_attempts }, "Closed by upload");
 }
 // V15 END agentKpiService.ts
-

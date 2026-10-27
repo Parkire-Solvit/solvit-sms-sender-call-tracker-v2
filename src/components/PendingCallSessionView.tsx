@@ -43,6 +43,8 @@ export interface PendingCallSessionViewProps {
   onJobUpdated?: (updatedJob: PendingSubmissionJob) => void;
   initialCompany?: string;
   availableCompanies?: string[];
+  /** Which tab the session was started from. A submission session works through the solver, one solver at a time. */
+  jobType?: 'INSPECTION' | 'SUBMISSION';
 }
 
 interface VehicleForm {
@@ -62,9 +64,10 @@ const EMPTY_FORM: VehicleForm = { outcome: '', comment: '', scheduledAt: '', sch
 
 const SYSTEM_OUTCOME_LABELS: Record<string, string> = {
   MAX_ATTEMPTS_REACHED: 'Max Attempts Reached',
-  ABSENT_FROM_LATEST_EXPORT: 'Submitted (absent from export)',
+  ABSENT_FROM_LATEST_EXPORT: 'Closed by upload (absent from the list)',
   REOPENED_BY_SYSTEM: 'Reopened by System',
   REASSIGNED_BY_SYSTEM: 'Reassigned by System',
+  TYPE_CHANGED_BY_SYSTEM: 'Moved to the other tab by System',
 };
 
 function statusText(status: string): string {
@@ -83,7 +86,12 @@ export const PendingCallSessionView: React.FC<PendingCallSessionViewProps> = ({
   onJobUpdated,
   initialCompany = 'ALL',
   availableCompanies = [],
+  jobType = 'INSPECTION',
 }) => {
+  // On the Pending Submission tab the agent works with the solver: the solver's number is the one called and counted,
+  // and all of one solver's jobs are on one screen. The client's number is shown as an optional extra contact.
+  const isSub = jobType === 'SUBMISSION';
+  const groupKey = (j: PendingSubmissionJob) => (isSub ? j.solver_contact : j.client_phone);
   const [loading, setLoading] = useState<boolean>(true);
   const [refreshing, setRefreshing] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
@@ -164,7 +172,7 @@ export const PendingCallSessionView: React.FC<PendingCallSessionViewProps> = ({
       company === 'ALL'
         ? open
         : open.filter((j) => (j.insurance_company || '').trim().toLowerCase() === company.trim().toLowerCase());
-    return groupByCustomerOldestFirst(filtered);
+    return groupByCustomerOldestFirst(filtered, groupKey);
   };
 
   const initializeClientForm = (group: CustomerGroup<PendingSubmissionJob> | undefined) => {
@@ -185,12 +193,16 @@ export const PendingCallSessionView: React.FC<PendingCallSessionViewProps> = ({
     setError(null);
 
     try {
-      const res = await fetch(`/api/pending-submissions/jobs?agent_id=${encodeURIComponent(String(selectedAgentId))}&status=AMBER`);
+      const res = await fetch(
+        `/api/pending-submissions/jobs?agent_id=${encodeURIComponent(String(selectedAgentId))}&status=AMBER&job_type=${jobType}`
+      );
       if (!res.ok) throw new Error(`Failed to load queue (${res.status})`);
       const rawJobs: PendingSubmissionJob[] = await res.json();
 
       // Only this agent's open records are queued
-      const mine = rawJobs.filter((j) => j.status === 'AMBER' && Number(j.assigned_agent_id) === selectedAgentId);
+      const mine = rawJobs.filter(
+        (j) => j.status === 'AMBER' && Number(j.assigned_agent_id) === selectedAgentId && (j.job_type ?? 'INSPECTION') === jobType
+      );
       setAllOpenJobs(mine);
 
       const groups = buildQueue(mine, selectedCompany);
@@ -213,7 +225,7 @@ export const PendingCallSessionView: React.FC<PendingCallSessionViewProps> = ({
 
   useEffect(() => {
     fetchCallingQueue(false);
-  }, [selectedAgentId]);
+  }, [selectedAgentId, jobType]);
 
   const handleCompanyChange = (company: string) => {
     setSelectedCompany(company);
@@ -329,7 +341,7 @@ export const PendingCallSessionView: React.FC<PendingCallSessionViewProps> = ({
         <div>
           <h3 className="text-base font-black text-slate-900">Preparing Focused Call Queue</h3>
           <p className="text-xs text-slate-500 mt-1">
-            Loading open pending submissions for <span className="font-bold text-slate-800">{selectedAgentName}</span>, oldest schedule date first...
+            Loading open {isSub ? 'pending submission' : 'pending inspection'} jobs for <span className="font-bold text-slate-800">{selectedAgentName}</span>, oldest schedule date first...
           </p>
         </div>
       </div>
@@ -357,7 +369,7 @@ export const PendingCallSessionView: React.FC<PendingCallSessionViewProps> = ({
 
             <div className="bg-slate-50 rounded-2xl p-4 border border-slate-100 flex items-center justify-around">
               <div>
-                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Clients Handled</span>
+                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">{isSub ? 'Solvers Handled' : 'Clients Handled'}</span>
                 <span className="text-xl font-black text-slate-900">{completedCount}</span>
               </div>
               <div className="w-px h-8 bg-slate-200" />
@@ -393,8 +405,10 @@ export const PendingCallSessionView: React.FC<PendingCallSessionViewProps> = ({
 
   const phoneDigits = (currentClient.client_phone || '').replace(/\D/g, '').slice(-9);
   const dialNumber = `+254${phoneDigits}`;
-  const displayNumber = currentClient.records[0]?.client_phone_raw || `0${phoneDigits}`;
-  const customerEmail = currentClient.records.find((v) => v.customer_email)?.customer_email || null;
+  // The group key is the number being called: the client's for an inspection, the solver's for a submission job.
+  const displayNumber = (isSub ? currentClient.records[0]?.solver_contact_raw : currentClient.records[0]?.client_phone_raw) || `0${phoneDigits}`;
+  const customerEmail = (isSub ? currentClient.records.find((v) => v.solver_email)?.solver_email : currentClient.records.find((v) => v.customer_email)?.customer_email) || null;
+  const solverName = currentClient.records.find((v) => v.solver_name)?.solver_name || null;
   const customerCompanies = Array.from(new Set(currentClient.records.map((v) => (v.insurance_company || '').trim()).filter(Boolean)));
 
   return (
@@ -465,10 +479,10 @@ export const PendingCallSessionView: React.FC<PendingCallSessionViewProps> = ({
         <div className="pt-3">
           <div className="flex items-center justify-between text-xs mb-1.5">
             <span className="font-black text-slate-800 tracking-tight">
-              Client {currentClientNumber} of {displayTotal}
+              {isSub ? 'Solver' : 'Client'} {currentClientNumber} of {displayTotal}
             </span>
             <span className="text-[11px] font-semibold text-slate-500">
-              {queue.length} client{queue.length === 1 ? '' : 's'} remaining in queue
+              {queue.length} {isSub ? 'solver' : 'client'}{queue.length === 1 ? '' : 's'} remaining in queue
             </span>
           </div>
           <div className="w-full h-2 bg-slate-100 rounded-full overflow-hidden">
@@ -500,7 +514,9 @@ export const PendingCallSessionView: React.FC<PendingCallSessionViewProps> = ({
               </div>
               <div>
                 <div className="flex items-center gap-2 flex-wrap">
-                  <h3 className="text-base font-black text-slate-900 uppercase tracking-wide">Valuation Client</h3>
+                  <h3 className="text-base font-black text-slate-900 uppercase tracking-wide">
+                    {isSub ? `Solver${solverName ? `: ${solverName}` : ''}` : 'Valuation Client'}
+                  </h3>
                   {customerCompanies.map((company) => (
                     <span
                       key={company}
@@ -522,7 +538,7 @@ export const PendingCallSessionView: React.FC<PendingCallSessionViewProps> = ({
                 <div className="flex flex-wrap items-center gap-2 mt-2">
                   <div className="flex items-center gap-1.5">
                     <a
-                      id={`link-call-pending-client-phone-${phoneDigits}`}
+                      id={`link-call-pending-${isSub ? 'solver' : 'client'}-phone-${phoneDigits}`}
                       href={`tel:${dialNumber}`}
                       className="text-base sm:text-lg font-black font-mono tracking-wide text-slate-900 hover:text-[#ff353e] flex items-center gap-2 transition-colors bg-white hover:bg-red-50 px-3 py-1.5 rounded-xl border border-slate-200 shadow-2xs"
                       title={`Click to dial ${dialNumber}`}
@@ -550,7 +566,7 @@ export const PendingCallSessionView: React.FC<PendingCallSessionViewProps> = ({
 
             <div className="flex items-center gap-2 self-start sm:self-center">
               <span className="text-xs font-bold text-slate-600 bg-white px-3 py-1.5 rounded-xl border border-slate-200 shadow-2xs">
-                {currentClient.records.length} {currentClient.records.length === 1 ? 'Open Vehicle' : 'Open Vehicles'} for this client
+                {currentClient.records.length} {currentClient.records.length === 1 ? 'Open Vehicle' : 'Open Vehicles'} for this {isSub ? 'solver' : 'client'}
               </span>
             </div>
           </div>
@@ -621,7 +637,7 @@ export const PendingCallSessionView: React.FC<PendingCallSessionViewProps> = ({
                         className={`text-[11px] font-bold px-2.5 py-1 rounded-lg border flex items-center gap-1 ${
                           callsMet ? 'bg-red-50 text-red-700 border-red-200 font-black' : 'bg-slate-100 text-slate-700 border-slate-200'
                         }`}
-                        title={`Outgoing calls: ${callsCount} / ${maxCalls}`}
+                        title={`Outgoing calls${isSub ? ' to the solver' : ''}: ${callsCount} / ${maxCalls}`}
                       >
                         <Clock className="w-3 h-3" />
                         <span>
@@ -633,7 +649,7 @@ export const PendingCallSessionView: React.FC<PendingCallSessionViewProps> = ({
                         className={`text-[11px] font-bold px-2.5 py-1 rounded-lg border flex items-center gap-1 ${
                           smsMet ? 'bg-red-50 text-red-700 border-red-200 font-black' : 'bg-slate-100 text-slate-700 border-slate-200'
                         }`}
-                        title={`SMS sent: ${smsCount} / ${maxSms}`}
+                        title={`SMS sent${isSub ? ' to the solver' : ''}: ${smsCount} / ${maxSms}`}
                       >
                         <MessageSquare className="w-3 h-3 text-slate-400" />
                         <span>
@@ -655,11 +671,24 @@ export const PendingCallSessionView: React.FC<PendingCallSessionViewProps> = ({
                   </div>
 
                   <div className="text-xs text-slate-600 flex flex-wrap items-center gap-x-4 gap-y-1">
-                    <span>
-                      <span className="font-bold text-slate-700">Solver: </span>
-                      {vehicle.solver_name || 'Valuer'}{' '}
-                      <span className="font-mono text-slate-500">{vehicle.solver_contact_raw || vehicle.solver_contact}</span>
-                    </span>
+                    {isSub ? (
+                      <span className="flex items-center gap-1.5 flex-wrap">
+                        <span className="font-bold text-slate-700">Client (optional contact, not counted): </span>
+                        <a
+                          href={`tel:+254${(vehicle.client_phone || '').replace(/\D/g, '').slice(-9)}`}
+                          className="font-mono text-slate-700 hover:text-[#ff353e] underline decoration-dotted"
+                          title="Call the client or their broker if the solver needs help getting a document. This call is not counted."
+                        >
+                          {vehicle.client_phone_raw || vehicle.client_phone}
+                        </a>
+                      </span>
+                    ) : (
+                      <span>
+                        <span className="font-bold text-slate-700">Solver: </span>
+                        {vehicle.solver_name || 'Valuer'}{' '}
+                        <span className="font-mono text-slate-500">{vehicle.solver_contact_raw || vehicle.solver_contact}</span>
+                      </span>
+                    )}
                     <span className="text-[10px] text-slate-400 font-mono">Ext ID: #{vehicle.external_id}</span>
                   </div>
 
@@ -820,7 +849,11 @@ export const PendingCallSessionView: React.FC<PendingCallSessionViewProps> = ({
                       rows={2}
                       value={form.comment}
                       onChange={(e) => updateForm(vehicle.id, { comment: e.target.value })}
-                      placeholder={`e.g. Spoke with customer regarding ${vehicle.vehicle_reg_raw || vehicle.vehicle_reg}; appointment agreed / call back requested...`}
+                      placeholder={
+                        isSub
+                          ? `e.g. Spoke with the solver about ${vehicle.vehicle_reg_raw || vehicle.vehicle_reg}; will submit today / waiting for the logbook...`
+                          : `e.g. Spoke with customer regarding ${vehicle.vehicle_reg_raw || vehicle.vehicle_reg}; appointment agreed / call back requested...`
+                      }
                       className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-800 font-medium placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-[#ff353e]/20 focus:border-[#ff353e] resize-none"
                     />
                   </div>
@@ -880,4 +913,3 @@ export const PendingCallSessionView: React.FC<PendingCallSessionViewProps> = ({
   );
 };
 // V15 END src/components/PendingCallSessionView.tsx
-

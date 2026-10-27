@@ -54,7 +54,7 @@ import { notifySolver } from "./solverNotifications";
 import { INTEGRATIONS, getIntegrationPublicView, updateIntegrationSettings, getHostPinnacleConfig } from "./integrationSettings";
 import { sendSms, toInternationalMobile } from "./hostPinnacle";
 import { createRateLimiter } from "./rateLimit";
-import { AGENT_OUTCOMES } from "./pendingSubmissionOutcomes";
+import { outcomesFor, parseJobTypeParam } from "./pendingSubmissionOutcomes";
 import { getDataResetPreview, buildDataBackup, deleteAllRecords, undoLastUpload, verifyResetKey, parseResetSection } from "./dataReset";
 import { claimOutcomeReceipt, releaseOutcomeReceipt } from "./outcomeReceipts";
 import { isSolverSmsEnabled } from "./solverSmsSwitch";
@@ -1651,8 +1651,9 @@ function computeActivitySummary(events: any[], totalAgents: number = 0) {
   app.put(pendingSettingsPaths, requireAdmin, savePendingSettings);
   app.post(pendingSettingsPaths, requireAdmin, savePendingSettings);
 
-  app.get("/api/pending-submissions/outcomes", requireAdmin, (_req, res) => {
-    res.json(AGENT_OUTCOMES.map((outcome) => ({
+  app.get("/api/pending-submissions/outcomes", requireAdmin, (req, res) => {
+    const jobType = parseJobTypeParam(req.query.job_type) ?? "INSPECTION";
+    res.json(outcomesFor(jobType).map((outcome) => ({
       value: outcome.value,
       label: outcome.label,
       status: outcome.status,
@@ -1689,15 +1690,21 @@ function computeActivitySummary(events: any[], totalAgents: number = 0) {
     try {
       const { status, agent_id, search, company } = req.query as Record<string, string | undefined>;
       await closeMaturedPendingSubmissions(db);
-      res.json(await getPendingSubmissionJobs(db, { status, agent_id, search, company }));
+      res.json(await getPendingSubmissionJobs(db, {
+        status,
+        agent_id,
+        search,
+        company,
+        job_type: parseJobTypeParam(req.query.job_type),
+      }));
     } catch (err) {
       sendError(res, err, "Error fetching pending submission jobs");
     }
   });
 
-  app.get("/api/pending-submissions/max-attempts-report", requireAdmin, async (_req, res) => {
+  app.get("/api/pending-submissions/max-attempts-report", requireAdmin, async (req, res) => {
     try {
-      res.json(await getPendingSubmissionMaxAttemptsReport(db));
+      res.json(await getPendingSubmissionMaxAttemptsReport(db, parseJobTypeParam(req.query.job_type)));
     } catch (err) {
       sendError(res, err, "Error building max attempts report");
     }
@@ -1775,9 +1782,9 @@ function computeActivitySummary(events: any[], totalAgents: number = 0) {
     }
   });
 
-  app.get("/api/agent-kpi/pending-submissions", requireAdmin, async (_req, res) => {
+  app.get("/api/agent-kpi/pending-submissions", requireAdmin, async (req, res) => {
     try {
-      res.json(await getPendingSubmissionAgentKpis(db));
+      res.json(await getPendingSubmissionAgentKpis(db, Date.now(), parseJobTypeParam(req.query.job_type)));
     } catch (err) {
       sendError(res, err, "Error building the pending submissions agent KPI");
     }
@@ -1832,8 +1839,9 @@ function computeActivitySummary(events: any[], totalAgents: number = 0) {
     try {
       const agent = String(req.query.assigned_agent_name || req.query.agent || "").trim();
       const company = String(req.query.insurance_company || "").trim();
-      const groups = filterMaxAttemptsGroups(await getPendingMaxAttemptsTimeline(db), agent, company);
-      const report = buildPendingMaxAttemptsWorkbook(groups, agent, company);
+      const jobType = parseJobTypeParam(req.query.job_type) ?? "INSPECTION";
+      const groups = filterMaxAttemptsGroups(await getPendingMaxAttemptsTimeline(db, jobType), agent, company);
+      const report = buildPendingMaxAttemptsWorkbook(groups, agent, company, Date.now(), jobType);
       res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
       res.setHeader("Content-Disposition", `attachment; filename="${report.filename}"`);
       res.send(report.buffer);

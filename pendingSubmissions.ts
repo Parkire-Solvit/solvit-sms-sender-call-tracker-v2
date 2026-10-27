@@ -2,7 +2,16 @@
 import { DbAdapter, DbTransactionClient } from "./db";
 import { COUNTED_CALL_STATUSES, hasReachedMaxAttempts, normalizeRegAlphaNumeric } from "./insuranceCallbacks";
 import { HttpError } from "./httpError";
-import { ABSENT_CLOSE_OUTCOMES, isAgentOutcome, statusForAgentOutcome } from "./pendingSubmissionOutcomes";
+import {
+  ABSENT_CLOSE_OUTCOMES,
+  PENDING_JOB_TYPES,
+  PendingJobType,
+  isAgentOutcome,
+  normalizeJobType,
+  parseJobStatus,
+  JOB_TYPE_LABELS,
+  statusForAgentOutcome,
+} from "./pendingSubmissionOutcomes";
 import { markImportRecords } from "./dataReset";
 import { planRebalance, RebalanceUnit } from "./pendingRebalance";
 
@@ -39,6 +48,10 @@ export interface RawPendingSubmissionRow {
   customer_email?: string;
   schedule_date?: string;
   latest_pending_reason?: string;
+  /** "Pending Inspection" or "Pending Submission". Required: a row without a recognised value is skipped. */
+  job_status?: string;
+  /** The spreadsheet row number, so a skipped row can be reported correctly. */
+  row_number?: number;
 }
 
 export interface PendingSubmissionJobView {
@@ -56,6 +69,8 @@ export interface PendingSubmissionJobView {
   customer_email: string | null;
   schedule_date: string | null;
   latest_pending_reason: string | null;
+  job_type: PendingJobType;
+  type_changed_at: string | null;
   status: "GREEN" | "AMBER" | "RED";
   latest_outcome: string | null;
   assigned_agent_id: number | null;
@@ -323,6 +338,54 @@ export function planAssignments(
   return out;
 }
 
+/**
+ * The key that keeps a customer's vehicles together for one agent: the client's number for an inspection job and the
+ * solver's number for a submission job (the solver is the person the agent works with on a submission job).
+ */
+export function groupKeyFor(job: { job_type?: unknown; client_phone: string; solver_contact: string }): string {
+  return normalizeJobType(job.job_type) === "SUBMISSION" ? job.solver_contact : job.client_phone;
+}
+
+/**
+ * Applies planAssignments to each job type on its own, so the inspection work and the submission work are each
+ * shared equally. `held` is the open work already held by ACTIVE agents. The result is keyed `${job_type}|${key}`.
+ */
+export function planAssignmentsByType(
+  pool: Array<{ job_type: PendingJobType; key: string }>,
+  agents: Array<{ id: number; name: string }>,
+  held: Array<{ job_type: PendingJobType; key: string; agent_id: number }>
+): Map<string, number | null> {
+  const out = new Map<string, number | null>();
+  for (const type of PENDING_JOB_TYPES) {
+    const groupCounts = new Map<string, number>();
+    for (const r of pool) if (r.job_type === type) groupCounts.set(r.key, (groupCounts.get(r.key) ?? 0) + 1);
+    if (groupCounts.size === 0) continue;
+
+    const openLoad = new Map<number, number>();
+    const stickyCounts = new Map<string, Map<number, number>>();
+    for (const j of held) {
+      if (j.job_type !== type) continue;
+      openLoad.set(j.agent_id, (openLoad.get(j.agent_id) ?? 0) + 1);
+      const perKey = stickyCounts.get(j.key) ?? new Map<number, number>();
+      perKey.set(j.agent_id, (perKey.get(j.agent_id) ?? 0) + 1);
+      stickyCounts.set(j.key, perKey);
+    }
+    const sticky = new Map<string, number>();
+    for (const [key, perAgent] of stickyCounts) {
+      sticky.set(key, [...perAgent.entries()].sort((a, b) => b[1] - a[1] || a[0] - b[0])[0][0]);
+    }
+    // AssignmentGroup.client_phone carries the group key (client number or solver number).
+    const plan = planAssignments(
+      [...groupCounts.entries()].map(([client_phone, count]) => ({ client_phone, count })),
+      agents,
+      openLoad,
+      sticky
+    );
+    for (const [key, agentId] of plan) out.set(`${type}|${key}`, agentId);
+  }
+  return out;
+}
+
 // ---------------------------------------------------------------------------
 // Overdue (pure)
 // ---------------------------------------------------------------------------
@@ -356,6 +419,23 @@ export interface ContactJob {
   solver_contact: string;
   vehicle_reg: string;
   first_imported_at: unknown;
+  /** Missing means INSPECTION. */
+  job_type?: string;
+  /** When the job moved from one type to the other. Counting restarts from here. */
+  type_changed_at?: unknown;
+}
+
+/** The number whose calls and SMS count for this job: the client for an inspection job, the solver for a submission job. */
+export function primaryPhoneOf(job: { job_type?: unknown; client_phone: string; solver_contact: string }): string {
+  return normalizePhone(normalizeJobType(job.job_type) === "SUBMISSION" ? job.solver_contact : job.client_phone);
+}
+
+/** Counting starts at the later of the first import and the last type change. NaN when the import time is unreadable. */
+export function countingStartMs(job: { first_imported_at: unknown; type_changed_at?: unknown }): number {
+  const first = parseDbTimestamp(job.first_imported_at);
+  if (isNaN(first)) return NaN;
+  const changed = job.type_changed_at ? parseDbTimestamp(job.type_changed_at) : NaN;
+  return isNaN(changed) ? first : Math.max(first, changed);
 }
 
 export interface ContactEvent {
@@ -379,6 +459,9 @@ export interface ContactEvent {
  * Pending Submissions keeps one rule Callbacks does not have: an event only counts if it happened on or after
  * the job's first_imported_at.
  * Solver calls are informational: any team agent, OUTGOING, phone equals the solver's phone.
+ * A submission job (the car was inspected but the solver has not submitted the data) counts the SOLVER's number as
+ * its primary contact, exactly as an inspection job counts the client's. Calls to any other number (the client, a
+ * broker) are not counted. Counting starts at the later of first_imported_at and type_changed_at.
  */
 export function countClientContacts(
   jobs: ContactJob[],
@@ -407,10 +490,11 @@ export function countClientContacts(
     else m.set(key, [job]);
   };
   for (const j of jobs) {
-    const ms = parseDbTimestamp(j.first_imported_at);
+    const ms = countingStartMs(j);
     if (isNaN(ms)) continue;
     firstMs.set(j.id, ms);
-    push(byClient, normalizePhone(j.client_phone), j);
+    // byClient holds the PRIMARY contact: the client for an inspection job, the solver for a submission job.
+    push(byClient, primaryPhoneOf(j), j);
     push(byReg, normalizeRegAlphaNumeric(j.vehicle_reg), j);
     push(bySolver, normalizePhone(j.solver_contact), j);
   }
@@ -507,7 +591,7 @@ export async function computePendingSubmissionActivity(db: Q, jobs: ContactJob[]
  */
 export async function closeMaturedPendingSubmissions(db: DbAdapter, opts: { jobId?: number } = {}): Promise<number> {
   const settings = await getPendingSubmissionSettings(db);
-  let sql = `SELECT id, assigned_agent_id, client_phone, solver_contact, vehicle_reg, first_imported_at FROM pending_submission_jobs WHERE status = 'AMBER'`;
+  let sql = `SELECT id, assigned_agent_id, client_phone, solver_contact, vehicle_reg, first_imported_at, job_type, type_changed_at FROM pending_submission_jobs WHERE status = 'AMBER'`;
   const params: any[] = [];
   if (opts.jobId !== undefined) {
     sql += ` AND id = ?`;
@@ -572,9 +656,35 @@ export interface ImportResult {
   auto_closed_absent_count: number;
   reopened_count: number;
   invalid_rows_count: number;
-  invalid_rows: Array<{ row: number; reason: string }>;
+  /** Every skipped row (up to MAX_REPORTED_INVALID_ROWS), so the summary can show exactly which rows have a problem. */
+  invalid_rows: InvalidImportRow[];
   duplicate_in_file_count: number;
+  /** Open or closed jobs that reappeared with the other job type and were moved (attempt counts restart). */
+  type_changed_count: number;
+  by_type: Record<PendingJobType, ImportTypeSummary>;
 }
+
+export interface InvalidImportRow {
+  /** The spreadsheet row number (the header is row 1). */
+  row: number;
+  reason: string;
+  external_id: string;
+  vehicle_reg: string;
+  job_status: string;
+}
+
+export interface ImportTypeSummary {
+  rows_in_file: number;
+  new_records: number;
+  refreshed: number;
+  /** Jobs that moved into this type from the other type in this upload. */
+  moved_in: number;
+  /** Jobs closed as absent by an earlier upload that reappeared in this type. */
+  reopened: number;
+  auto_closed_absent: number;
+}
+
+const MAX_REPORTED_INVALID_ROWS = 1000;
 
 export interface ImportConfirmation {
   requires_confirmation: true;
@@ -599,17 +709,33 @@ interface CleanRow {
   customer_email: string | null;
   schedule_date: string | null;
   latest_pending_reason: string | null;
+  job_type: PendingJobType;
 }
+
+const JOB_STATUS_HINT = "expected Pending Inspection or Pending Submission";
 
 function cleanImportRow(raw: RawPendingSubmissionRow): CleanRow | string {
   const idText = String(raw.external_id ?? "").trim();
   if (!/^\d+$/.test(idText) || !Number.isSafeInteger(Number(idText))) return "ID is missing or not a whole number";
+  const jobStatusText = String(raw.job_status ?? "").trim();
+  const jobType = parseJobStatus(jobStatusText);
+  if (jobType === null) {
+    return jobStatusText === ""
+      ? `job_status is missing (${JOB_STATUS_HINT})`
+      : `job_status "${jobStatusText.slice(0, 40)}" is not recognised (${JOB_STATUS_HINT})`;
+  }
   const clientPhoneRaw = String(raw.client_phone ?? "").trim();
   const clientPhone = normalizePhone(clientPhoneRaw);
   if (clientPhoneRaw.replace(/\D/g, "").length < 9) return "Client number has fewer than 9 digits";
   const vehicleRegRaw = String(raw.vehicle_reg ?? "").trim();
   if (!vehicleRegRaw) return "Vehicle registration is missing";
   const solverContactRaw = String(raw.solver_contact ?? "").trim();
+  // A submission job is worked through the solver, so the solver's number is required for it.
+  if (jobType === "SUBMISSION" && solverContactRaw.replace(/\D/g, "").length < 9) {
+    return solverContactRaw === ""
+      ? "Solver number is missing, which a Pending Submission job needs"
+      : "Solver number has fewer than 9 digits, which a Pending Submission job needs";
+  }
   const sched = raw.schedule_date ? parseDbTimestamp(raw.schedule_date) : NaN;
   const text = (v: unknown) => {
     const t = String(v ?? "").trim();
@@ -629,6 +755,7 @@ function cleanImportRow(raw: RawPendingSubmissionRow): CleanRow | string {
     customer_email: text(raw.customer_email),
     schedule_date: isNaN(sched) ? null : new Date(sched).toISOString(),
     latest_pending_reason: text(raw.latest_pending_reason),
+    job_type: jobType,
   };
 }
 
@@ -641,13 +768,19 @@ export async function importPendingSubmissions(
 ): Promise<ImportResult | ImportConfirmation> {
   // 1. Validate and de-duplicate rows (no writes yet).
   const clean: CleanRow[] = [];
-  const invalid: Array<{ row: number; reason: string }> = [];
+  const invalid: InvalidImportRow[] = [];
   const seen = new Set<number>();
   let duplicateInFile = 0;
   rows.forEach((raw, index) => {
     const result = cleanImportRow(raw);
     if (typeof result === "string") {
-      invalid.push({ row: index + 2, reason: result });
+      invalid.push({
+        row: Number.isInteger(raw.row_number) && (raw.row_number as number) > 0 ? (raw.row_number as number) : index + 2,
+        reason: result,
+        external_id: String(raw.external_id ?? "").trim(),
+        vehicle_reg: String(raw.vehicle_reg ?? "").trim(),
+        job_status: String(raw.job_status ?? "").trim(),
+      });
     } else if (seen.has(result.external_id)) {
       duplicateInFile += 1;
     } else {
@@ -656,7 +789,10 @@ export async function importPendingSubmissions(
     }
   });
   if (clean.length === 0) {
-    throw new HttpError(400, "No valid rows in the upload.", { invalid_rows: invalid.slice(0, 20), invalid_rows_count: invalid.length });
+    throw new HttpError(400, "No valid rows in the upload.", {
+      invalid_rows: invalid.slice(0, MAX_REPORTED_INVALID_ROWS),
+      invalid_rows_count: invalid.length,
+    });
   }
 
   const settings = await getPendingSubmissionSettings(db);
@@ -671,15 +807,28 @@ export async function importPendingSubmissions(
       status: string;
       latest_outcome: string | null;
       client_phone: string;
+      solver_contact: string;
+      job_type: string | null;
       assigned_agent_id: number | null;
-    }>(`SELECT id, external_id, status, latest_outcome, client_phone, assigned_agent_id FROM pending_submission_jobs`)
-  ).map((r) => ({ ...r, id: num(r.id), external_id: num(r.external_id), assigned_agent_id: numOrNull(r.assigned_agent_id) }));
+    }>(
+      `SELECT id, external_id, status, latest_outcome, client_phone, solver_contact, job_type, assigned_agent_id FROM pending_submission_jobs`
+    )
+  ).map((r) => ({
+    ...r,
+    id: num(r.id),
+    external_id: num(r.external_id),
+    assigned_agent_id: numOrNull(r.assigned_agent_id),
+    job_type: normalizeJobType(r.job_type),
+  }));
   const existing = new Map(existingRows.map((r) => [Number(r.external_id), r]));
   const openJobs = existingRows.filter((r) => r.status === "AMBER");
 
-  // 3. Safety check BEFORE any write.
-  const missing = openJobs.filter((r) => !seen.has(Number(r.external_id)));
-  const totalOpen = openJobs.length;
+  // 3. Safety check BEFORE any write. A record is only ever closed as absent when its own job type is present in the file,
+  // so an upload that contains one type never closes the open jobs of the other type.
+  const typesInFile = new Set<PendingJobType>(clean.map((r) => r.job_type));
+  const openInScope = openJobs.filter((r) => typesInFile.has(r.job_type));
+  const missing = openInScope.filter((r) => !seen.has(Number(r.external_id)));
+  const totalOpen = openInScope.length;
   const pct = totalOpen > 0 ? Math.round((missing.length / totalOpen) * 100) : 0;
   const exceeds = missing.length > settings.disappearance_alert_fixed_count || pct > settings.disappearance_alert_percentage;
   if (exceeds && !options.confirmed) {
@@ -694,57 +843,72 @@ export async function importPendingSubmissions(
   }
 
   // 4. Classify rows.
+  const statusOf = (r: CleanRow) => existing.get(r.external_id);
   const newRows = clean.filter((r) => !existing.has(r.external_id));
-  const refreshRows = clean.filter((r) => existing.get(r.external_id)?.status === "AMBER");
-  const reopenRows = clean.filter((r) => {
-    const e = existing.get(r.external_id);
-    return e !== undefined && e.status === "GREEN" && ABSENT_CLOSE_OUTCOMES.includes(e.latest_outcome ?? "");
+  // Same type and still open: refresh.
+  const refreshRows = clean.filter((r) => {
+    const e = statusOf(r);
+    return e !== undefined && e.status === "AMBER" && e.job_type === r.job_type;
+  });
+  // Open, but now the other type: the job moves to the other type and its attempt counts restart.
+  const typeChangeOpenRows = clean.filter((r) => {
+    const e = statusOf(r);
+    return e !== undefined && e.status === "AMBER" && e.job_type !== r.job_type;
+  });
+  // Closed as absent by an earlier upload and back in the same type: reopen (unchanged rule).
+  const reopenAbsentRows = clean.filter((r) => {
+    const e = statusOf(r);
+    return e !== undefined && e.status === "GREEN" && ABSENT_CLOSE_OUTCOMES.includes(e.latest_outcome ?? "") && e.job_type === r.job_type;
+  });
+  // Closed (scheduled, submitted, withdrawn, max attempts or absent) and now the other type: a new task, reopen it.
+  const reopenTypeRows = clean.filter((r) => {
+    const e = statusOf(r);
+    return e !== undefined && e.status !== "AMBER" && e.job_type !== r.job_type;
   });
   const skippedClosed =
     clean.filter((r) => {
-      const e = existing.get(r.external_id);
+      const e = statusOf(r);
       return e !== undefined && e.status !== "AMBER";
-    }).length - reopenRows.length;
+    }).length -
+    reopenAbsentRows.length -
+    reopenTypeRows.length;
 
-  // 5. Plan assignments: new rows plus reopened rows whose agent is no longer active.
-  const openLoad = new Map<number, number>();
-  const stickyCounts = new Map<string, Map<number, number>>();
+  // 5. Plan assignments, each job type on its own. The pool is the new rows, the rows that change type, and reopened rows
+  // whose agent is no longer active. A reopened row that keeps its agent counts as that agent's load.
+  const leavingIds = new Set<number>(typeChangeOpenRows.map((r) => statusOf(r)!.id));
+  const held: Array<{ job_type: PendingJobType; key: string; agent_id: number }> = [];
   for (const j of openJobs) {
+    if (leavingIds.has(j.id)) continue;
     if (j.assigned_agent_id === null || !activeAgentIds.has(j.assigned_agent_id)) continue;
-    openLoad.set(j.assigned_agent_id, (openLoad.get(j.assigned_agent_id) ?? 0) + 1);
-    const perClient = stickyCounts.get(j.client_phone) ?? new Map<number, number>();
-    perClient.set(j.assigned_agent_id, (perClient.get(j.assigned_agent_id) ?? 0) + 1);
-    stickyCounts.set(j.client_phone, perClient);
-  }
-  const sticky = new Map<string, number>();
-  for (const [phone, perAgent] of stickyCounts) {
-    const best = [...perAgent.entries()].sort((a, b) => b[1] - a[1] || a[0] - b[0])[0];
-    sticky.set(phone, best[0]);
+    held.push({ job_type: j.job_type, key: groupKeyFor(j), agent_id: j.assigned_agent_id });
   }
   const reopenKeepsAgent = (r: CleanRow) => {
-    const e = existing.get(r.external_id)!;
+    const e = statusOf(r)!;
     return e.assigned_agent_id !== null && activeAgentIds.has(e.assigned_agent_id);
   };
-  for (const r of reopenRows) {
-    if (reopenKeepsAgent(r)) {
-      const id = existing.get(r.external_id)!.assigned_agent_id!;
-      openLoad.set(id, (openLoad.get(id) ?? 0) + 1);
-    }
+  for (const r of reopenAbsentRows) {
+    if (reopenKeepsAgent(r)) held.push({ job_type: r.job_type, key: groupKeyFor(r), agent_id: statusOf(r)!.assigned_agent_id! });
   }
-  const pool = [...newRows, ...reopenRows.filter((r) => !reopenKeepsAgent(r))];
-  const groupCounts = new Map<string, number>();
-  for (const r of pool) groupCounts.set(r.client_phone, (groupCounts.get(r.client_phone) ?? 0) + 1);
-  const plan = planAssignments(
-    [...groupCounts.entries()].map(([client_phone, count]) => ({ client_phone, count })),
+  const pool = [...newRows, ...typeChangeOpenRows, ...reopenTypeRows, ...reopenAbsentRows.filter((r) => !reopenKeepsAgent(r))];
+  const plan = planAssignmentsByType(
+    pool.map((r) => ({ job_type: r.job_type, key: groupKeyFor(r) })),
     agents,
-    openLoad,
-    sticky
+    held
   );
+  const plannedAgent = (r: CleanRow) => plan.get(`${r.job_type}|${groupKeyFor(r)}`) ?? null;
 
   // 6. Write everything in one transaction. Inside the callback use ONLY `tx`, never `db`.
-  const counts = { added: 0, refreshed: 0, reopened: 0, absentClosed: 0 };
+  const emptyType = (): ImportTypeSummary => ({ rows_in_file: 0, new_records: 0, refreshed: 0, moved_in: 0, reopened: 0, auto_closed_absent: 0 });
+  const byType: Record<PendingJobType, ImportTypeSummary> = { INSPECTION: emptyType(), SUBMISSION: emptyType() };
+  for (const r of clean) byType[r.job_type].rows_in_file += 1;
+  const counts = { added: 0, refreshed: 0, reopened: 0, absentClosed: 0, typeChanged: 0 };
   const createdJobIds: number[] = [];
   const absentClosedJobIds: number[] = [];
+  const refreshFields = (r: CleanRow) => [
+    r.latest_pending_reason, r.schedule_date, r.solver_name,
+    r.solver_contact, r.solver_contact, r.solver_contact_raw, r.solver_contact_raw,
+    r.solver_email, r.insurance_company,
+  ];
   await db.transaction(async (tx) => {
     for (const r of newRows) {
       const inserted = await tx.execute(
@@ -752,20 +916,21 @@ export async function importPendingSubmissions(
            external_id, solver_name, solver_contact, solver_contact_raw, solver_email,
            vehicle_reg, vehicle_reg_raw, insurance_company, client_phone, client_phone_raw,
            customer_email, schedule_date, latest_pending_reason, status, assigned_agent_id,
-           first_imported_at, last_seen_in_import_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'AMBER', ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+           first_imported_at, last_seen_in_import_at, job_type
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'AMBER', ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?)`,
         [
           r.external_id, r.solver_name, r.solver_contact, r.solver_contact_raw, r.solver_email,
           r.vehicle_reg, r.vehicle_reg_raw, r.insurance_company, r.client_phone, r.client_phone_raw,
-          r.customer_email, r.schedule_date, r.latest_pending_reason, plan.get(r.client_phone) ?? null,
+          r.customer_email, r.schedule_date, r.latest_pending_reason, plannedAgent(r), r.job_type,
         ]
       );
       createdJobIds.push(Number(inserted.lastInsertId));
       counts.added += 1;
+      byType[r.job_type].new_records += 1;
     }
 
     for (const r of refreshRows) {
-      const e = existing.get(r.external_id)!;
+      const e = statusOf(r)!;
       await tx.execute(
         `UPDATE pending_submission_jobs
          SET last_seen_in_import_at = CURRENT_TIMESTAMP,
@@ -778,18 +943,77 @@ export async function importPendingSubmissions(
              insurance_company = COALESCE(?, insurance_company),
              updated_at = CURRENT_TIMESTAMP
          WHERE id = ? AND status = 'AMBER'`,
-        [
-          r.latest_pending_reason, r.schedule_date, r.solver_name,
-          r.solver_contact, r.solver_contact, r.solver_contact_raw, r.solver_contact_raw,
-          r.solver_email, r.insurance_company, e.id,
-        ]
+        [...refreshFields(r), e.id]
       );
       counts.refreshed += 1;
+      byType[r.job_type].refreshed += 1;
     }
 
-    for (const r of reopenRows) {
-      const e = existing.get(r.external_id)!;
-      const agentId = reopenKeepsAgent(r) ? e.assigned_agent_id : plan.get(r.client_phone) ?? null;
+    // An open job that is now the other type: move it, and restart its attempt counts from this moment.
+    for (const r of typeChangeOpenRows) {
+      const e = statusOf(r)!;
+      const upd = await tx.execute(
+        `UPDATE pending_submission_jobs
+         SET job_type = ?, type_changed_at = CURRENT_TIMESTAMP, assigned_agent_id = ?, latest_outcome = 'TYPE_CHANGED_BY_SYSTEM',
+             last_seen_in_import_at = CURRENT_TIMESTAMP,
+             latest_pending_reason = COALESCE(?, latest_pending_reason),
+             schedule_date = COALESCE(?, schedule_date),
+             solver_name = COALESCE(?, solver_name),
+             solver_contact = CASE WHEN ? <> '' THEN ? ELSE solver_contact END,
+             solver_contact_raw = CASE WHEN ? <> '' THEN ? ELSE solver_contact_raw END,
+             solver_email = COALESCE(?, solver_email),
+             insurance_company = COALESCE(?, insurance_company),
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = ? AND status = 'AMBER' AND job_type = ?`,
+        [r.job_type, plannedAgent(r), ...refreshFields(r), e.id, e.job_type]
+      );
+      if (upd.affectedRows === 1) {
+        await tx.execute(
+          `INSERT INTO pending_submission_logs (pending_submission_job_id, outcome, comment, logged_by, resulting_status)
+           VALUES (?, 'TYPE_CHANGED_BY_SYSTEM', ?, 'System', 'AMBER')`,
+          [e.id, `Moved from ${JOB_TYPE_LABELS[e.job_type]} to ${JOB_TYPE_LABELS[r.job_type]}. Attempt counts restart.`]
+        );
+        counts.typeChanged += 1;
+        byType[r.job_type].moved_in += 1;
+      }
+    }
+
+    // A closed job that reappeared as the other type is a new task: reopen it and restart its attempt counts.
+    for (const r of reopenTypeRows) {
+      const e = statusOf(r)!;
+      const upd = await tx.execute(
+        `UPDATE pending_submission_jobs
+         SET status = 'AMBER', closed_at = NULL, job_type = ?, type_changed_at = CURRENT_TIMESTAMP, assigned_agent_id = ?,
+             latest_outcome = 'TYPE_CHANGED_BY_SYSTEM',
+             last_seen_in_import_at = CURRENT_TIMESTAMP,
+             latest_pending_reason = COALESCE(?, latest_pending_reason),
+             schedule_date = COALESCE(?, schedule_date),
+             solver_name = COALESCE(?, solver_name),
+             solver_contact = CASE WHEN ? <> '' THEN ? ELSE solver_contact END,
+             solver_contact_raw = CASE WHEN ? <> '' THEN ? ELSE solver_contact_raw END,
+             solver_email = COALESCE(?, solver_email),
+             insurance_company = COALESCE(?, insurance_company),
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = ? AND status <> 'AMBER' AND job_type = ?`,
+        [r.job_type, plannedAgent(r), ...refreshFields(r), e.id, e.job_type]
+      );
+      if (upd.affectedRows === 1) {
+        await tx.execute(
+          `INSERT INTO pending_submission_logs (pending_submission_job_id, outcome, comment, logged_by, resulting_status)
+           VALUES (?, 'TYPE_CHANGED_BY_SYSTEM', ?, 'System', 'AMBER')`,
+          [
+            e.id,
+            `Reappeared as ${JOB_TYPE_LABELS[r.job_type]} after being closed as ${JOB_TYPE_LABELS[e.job_type]}. Reopened as a new task. Attempt counts restart.`,
+          ]
+        );
+        counts.typeChanged += 1;
+        byType[r.job_type].moved_in += 1;
+      }
+    }
+
+    for (const r of reopenAbsentRows) {
+      const e = statusOf(r)!;
+      const agentId = reopenKeepsAgent(r) ? e.assigned_agent_id : plannedAgent(r);
       const upd = await tx.execute(
         `UPDATE pending_submission_jobs
          SET status = 'AMBER', closed_at = NULL, latest_outcome = 'REOPENED_BY_SYSTEM', assigned_agent_id = ?,
@@ -807,6 +1031,7 @@ export async function importPendingSubmissions(
           [e.id]
         );
         counts.reopened += 1;
+        byType[r.job_type].reopened += 1;
       }
     }
 
@@ -825,6 +1050,7 @@ export async function importPendingSubmissions(
         );
         absentClosedJobIds.push(Number(m.id));
         counts.absentClosed += 1;
+        byType[m.job_type].auto_closed_absent += 1;
       }
     }
 
@@ -858,8 +1084,10 @@ export async function importPendingSubmissions(
     auto_closed_absent_count: counts.absentClosed,
     reopened_count: counts.reopened,
     invalid_rows_count: invalid.length,
-    invalid_rows: invalid.slice(0, 20),
+    invalid_rows: invalid.slice(0, MAX_REPORTED_INVALID_ROWS),
     duplicate_in_file_count: duplicateInFile,
+    type_changed_count: counts.typeChanged,
+    by_type: byType,
   };
 }
 
@@ -869,7 +1097,7 @@ export async function importPendingSubmissions(
 
 export async function getPendingSubmissionJobs(
   db: DbAdapter,
-  filters: { status?: string; agent_id?: string; search?: string; company?: string; id?: number } = {}
+  filters: { status?: string; agent_id?: string; search?: string; company?: string; id?: number; job_type?: string } = {}
 ): Promise<PendingSubmissionJobView[]> {
   const settings = await getPendingSubmissionSettings(db);
 
@@ -882,7 +1110,7 @@ export async function getPendingSubmissionJobs(
       j.solver_notification_status, j.solver_notified_at, j.solver_notification_error,
       j.solver_notification_message, j.solver_notification_transaction_id,
       j.solver_notification_attempts, j.solver_notification_attempted_at,
-      j.first_imported_at, j.last_seen_in_import_at, j.closed_at, j.created_at, j.updated_at
+      j.first_imported_at, j.last_seen_in_import_at, j.closed_at, j.created_at, j.updated_at, j.job_type, j.type_changed_at
     FROM pending_submission_jobs j
     LEFT JOIN agents a ON a.id = j.assigned_agent_id
     WHERE 1=1
@@ -908,6 +1136,10 @@ export async function getPendingSubmissionJobs(
   if (filters.company && filters.company !== "ALL") {
     sql += ` AND LOWER(TRIM(j.insurance_company)) = LOWER(TRIM(?))`;
     params.push(filters.company);
+  }
+  if (filters.job_type === "INSPECTION" || filters.job_type === "SUBMISSION") {
+    sql += ` AND j.job_type = ?`;
+    params.push(filters.job_type);
   }
   if (filters.search) {
     const term = `%${filters.search.trim().toLowerCase()}%`;
@@ -950,6 +1182,8 @@ export async function getPendingSubmissionJobs(
       customer_email: r.customer_email,
       schedule_date: r.schedule_date,
       latest_pending_reason: r.latest_pending_reason,
+      job_type: normalizeJobType(r.job_type),
+      type_changed_at: r.type_changed_at ?? null,
       status: r.status,
       latest_outcome: r.latest_outcome,
       assigned_agent_id: r.assigned_agent_id,
@@ -1018,8 +1252,15 @@ export async function logPendingSubmissionOutcome(
     }
   }
 
-  const job = await db.queryOne<{ id: number; status: string }>(`SELECT id, status FROM pending_submission_jobs WHERE id = ?`, [jobId]);
+  const job = await db.queryOne<{ id: number; status: string; job_type: string | null }>(
+    `SELECT id, status, job_type FROM pending_submission_jobs WHERE id = ?`,
+    [jobId]
+  );
   if (!job) throw new HttpError(404, `Record #${jobId} was not found.`);
+  // SCHEDULED belongs to inspection jobs and SOLVER_SUBMITTED to submission jobs.
+  if (!isAgentOutcome(outcome, normalizeJobType(job.job_type))) {
+    throw new HttpError(400, "That outcome is not available for this type of job.");
+  }
   if (job.status !== "AMBER") throw new HttpError(409, "This record is already closed.");
 
   const resultingStatus = statusForAgentOutcome(outcome);
@@ -1062,10 +1303,13 @@ export async function getPendingSubmissionLogs(db: Q, jobId: number): Promise<Pe
 // ---------------------------------------------------------------------------
 
 export async function getPendingSubmissionMaxAttemptsReport(
-  db: DbAdapter
+  db: DbAdapter,
+  jobType?: PendingJobType
 ): Promise<Array<{ insurance_company: string; jobs: Array<PendingSubmissionJobView & { logs: PendingSubmissionLog[] }> }>> {
   await closeMaturedPendingSubmissions(db);
-  const jobs = (await getPendingSubmissionJobs(db)).filter((j) => j.latest_outcome === "MAX_ATTEMPTS_REACHED" && j.status === "RED");
+  const jobs = (await getPendingSubmissionJobs(db, { job_type: jobType })).filter(
+    (j) => j.latest_outcome === "MAX_ATTEMPTS_REACHED" && j.status === "RED"
+  );
   if (jobs.length === 0) return [];
 
   const logsByJob = new Map<number, PendingSubmissionLog[]>();
@@ -1158,34 +1402,27 @@ export async function reassignOpenSubmissions(db: DbAdapter, opts: { dryRun: boo
   }
   const activeIds = new Set(agents.map((a) => a.id));
 
-  const open = await db.queryAll<{ id: unknown; client_phone: string; assigned_agent_id: unknown }>(
-    `SELECT id, client_phone, assigned_agent_id FROM pending_submission_jobs WHERE status = 'AMBER'`
-  );
-  const openLoad = new Map<number, number>();
-  const stickyCounts = new Map<string, Map<number, number>>();
-  const pool: Array<{ id: number; client_phone: string }> = [];
+  const open = await db.queryAll<{
+    id: unknown;
+    client_phone: string;
+    solver_contact: string;
+    job_type: unknown;
+    assigned_agent_id: unknown;
+  }>(`SELECT id, client_phone, solver_contact, job_type, assigned_agent_id FROM pending_submission_jobs WHERE status = 'AMBER'`);
+  // Each job type is shared out on its own. A customer (client for inspections, solver for submissions) is never split.
+  const held: Array<{ job_type: PendingJobType; key: string; agent_id: number }> = [];
+  const pool: Array<{ id: number; job_type: PendingJobType; key: string }> = [];
   for (const j of open) {
     const agentId = numOrNull(j.assigned_agent_id);
-    if (agentId !== null && activeIds.has(agentId)) {
-      openLoad.set(agentId, (openLoad.get(agentId) ?? 0) + 1);
-      const perClient = stickyCounts.get(j.client_phone) ?? new Map<number, number>();
-      perClient.set(agentId, (perClient.get(agentId) ?? 0) + 1);
-      stickyCounts.set(j.client_phone, perClient);
-    } else {
-      pool.push({ id: num(j.id), client_phone: j.client_phone });
-    }
+    const jobType = normalizeJobType(j.job_type);
+    const key = groupKeyFor(j);
+    if (agentId !== null && activeIds.has(agentId)) held.push({ job_type: jobType, key, agent_id: agentId });
+    else pool.push({ id: num(j.id), job_type: jobType, key });
   }
-  const sticky = new Map<string, number>();
-  for (const [phone, perAgent] of stickyCounts) {
-    sticky.set(phone, [...perAgent.entries()].sort((a, b) => b[1] - a[1] || a[0] - b[0])[0][0]);
-  }
-  const groupCounts = new Map<string, number>();
-  for (const r of pool) groupCounts.set(r.client_phone, (groupCounts.get(r.client_phone) ?? 0) + 1);
-  const plan = planAssignments(
-    [...groupCounts.entries()].map(([client_phone, count]) => ({ client_phone, count })),
+  const plan = planAssignmentsByType(
+    pool.map((r) => ({ job_type: r.job_type, key: r.key })),
     agents,
-    openLoad,
-    sticky
+    held
   );
   const agentsUsed = new Set<number>();
   for (const v of plan.values()) if (v !== null) agentsUsed.add(v);
@@ -1193,7 +1430,7 @@ export async function reassignOpenSubmissions(db: DbAdapter, opts: { dryRun: boo
   const summary: ReassignResult = {
     dry_run: opts.dryRun,
     records: pool.length,
-    clients: groupCounts.size,
+    clients: new Set(pool.map((r) => `${r.job_type}|${r.key}`)).size,
     agents_used: agentsUsed.size,
   };
   if (opts.dryRun || pool.length === 0) return summary;
@@ -1202,7 +1439,7 @@ export async function reassignOpenSubmissions(db: DbAdapter, opts: { dryRun: boo
     for (const r of pool) {
       const upd = await tx.execute(
         `UPDATE pending_submission_jobs SET assigned_agent_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'AMBER'`,
-        [plan.get(r.client_phone) ?? null, r.id]
+        [plan.get(`${r.job_type}|${r.key}`) ?? null, r.id]
       );
       if (upd.affectedRows === 1) {
         await tx.execute(
@@ -1293,8 +1530,10 @@ async function rebalanceUntouchedSubmissions(db: DbAdapter, agents: Array<{ id: 
       solver_contact: string;
       vehicle_reg: string;
       first_imported_at: unknown;
+      job_type: unknown;
+      type_changed_at: unknown;
     }>(
-      `SELECT id, assigned_agent_id, client_phone, solver_contact, vehicle_reg, first_imported_at
+      `SELECT id, assigned_agent_id, client_phone, solver_contact, vehicle_reg, first_imported_at, job_type, type_changed_at
        FROM pending_submission_jobs WHERE status = 'AMBER'`
     )
   )
@@ -1305,6 +1544,8 @@ async function rebalanceUntouchedSubmissions(db: DbAdapter, agents: Array<{ id: 
       solver_contact: r.solver_contact,
       vehicle_reg: r.vehicle_reg,
       first_imported_at: r.first_imported_at,
+      job_type: normalizeJobType(r.job_type),
+      type_changed_at: r.type_changed_at,
     }))
     .filter((j) => j.assigned_agent_id !== null && activeIds.has(j.assigned_agent_id));
   if (open.length === 0) return 0;
@@ -1323,18 +1564,23 @@ async function rebalanceUntouchedSubmissions(db: DbAdapter, agents: Array<{ id: 
     return (a ? a.client_attempt_count > 0 || a.client_sms_count > 0 : false) || loggedByPerson.has(jobId);
   };
 
-  // One unit per customer per agent.
-  const units = new Map<string, RebalanceUnit & { job_ids: number[] }>();
+  // One unit per customer per agent, kept separate for each job type (the client for inspections, the solver for submissions).
+  const units = new Map<string, RebalanceUnit & { job_ids: number[]; job_type: PendingJobType }>();
   for (const j of open) {
-    const key = `${j.client_phone}|${j.assigned_agent_id}`;
-    const u = units.get(key) ?? { key, agent_id: j.assigned_agent_id as number, size: 0, movable: true, job_ids: [] };
+    const key = `${j.job_type}|${groupKeyFor(j)}|${j.assigned_agent_id}`;
+    const u =
+      units.get(key) ?? { key, agent_id: j.assigned_agent_id as number, size: 0, movable: true, job_ids: [], job_type: j.job_type };
     u.size += 1;
     u.job_ids.push(j.id);
     if (isTouched(j.id)) u.movable = false;
     units.set(key, u);
   }
 
-  const moves = planRebalance([...units.values()], agents);
+  // Each job type is balanced on its own, so the inspection work and the submission work are each shared equally.
+  const moves: Array<{ key: string; from: number; to: number }> = [];
+  for (const type of PENDING_JOB_TYPES) {
+    moves.push(...planRebalance([...units.values()].filter((u) => u.job_type === type), agents));
+  }
   if (moves.length === 0) return 0;
 
   let movedJobs = 0;
@@ -1361,4 +1607,3 @@ async function rebalanceUntouchedSubmissions(db: DbAdapter, agents: Array<{ id: 
   return movedJobs;
 }
 // FIXPASS END pendingSubmissions.ts
-

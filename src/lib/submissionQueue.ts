@@ -39,12 +39,16 @@ export interface CustomerGroup<T extends QueueRecord> {
  * the customer's OLDEST vehicle, oldest first, so the longest overdue work is always at the top whatever the company.
  * Ties: the lowest external_id in the group, then the phone.
  */
-export function groupByCustomerOldestFirst<T extends QueueRecord>(records: T[]): CustomerGroup<T>[] {
+export function groupByCustomerOldestFirst<T extends QueueRecord>(
+  records: T[],
+  groupKey: (record: T) => string = (record) => record.client_phone,
+): CustomerGroup<T>[] {
   const map = new Map<string, T[]>();
   for (const r of records) {
-    const list = map.get(r.client_phone);
+    const key = groupKey(r);
+    const list = map.get(key);
     if (list) list.push(r);
-    else map.set(r.client_phone, [r]);
+    else map.set(key, [r]);
   }
   const groups: CustomerGroup<T>[] = [];
   for (const [client_phone, list] of map) {

@@ -51,6 +51,8 @@ interface AgentKpiPanelProps {
   focusAgentName?: string | null;
   /** Increase this number to make the panel reload (for example after a list refresh). */
   refreshToken?: number;
+  /** Pending Submissions only: show the KPI of one job type (a Pending Inspection or a Pending Submission). */
+  jobType?: 'INSPECTION' | 'SUBMISSION';
 }
 
 const SECTION_TITLE: Record<AgentKpiPanelProps['section'], string> = {
@@ -58,13 +60,20 @@ const SECTION_TITLE: Record<AgentKpiPanelProps['section'], string> = {
   pending_submissions: 'Pending Submissions',
 };
 
-export default function AgentKpiPanel({ section, focusAgentId = null, focusAgentName = null, refreshToken = 0 }: AgentKpiPanelProps) {
+export default function AgentKpiPanel({ section, focusAgentId = null, focusAgentName = null, refreshToken = 0, jobType }: AgentKpiPanelProps) {
   const [report, setReport] = useState<AgentKpiReportData | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<boolean>(true);
 
-  const path = section === 'callbacks' ? '/api/agent-kpi/callbacks' : '/api/agent-kpi/pending-submissions';
+  const basePath = section === 'callbacks' ? '/api/agent-kpi/callbacks' : '/api/agent-kpi/pending-submissions';
+  const path = section === 'pending_submissions' && jobType ? `${basePath}?job_type=${jobType}` : basePath;
+  const title =
+    section === 'pending_submissions' && jobType
+      ? jobType === 'SUBMISSION'
+        ? 'Pending Submission'
+        : 'Pending Inspection'
+      : SECTION_TITLE[section];
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -118,7 +127,7 @@ export default function AgentKpiPanel({ section, focusAgentId = null, focusAgent
             <Target className="w-4 h-4" />
           </div>
           <div>
-            <h3 className="text-sm font-black text-slate-900 leading-tight">Agent Completion KPI: {SECTION_TITLE[section]}</h3>
+            <h3 className="text-sm font-black text-slate-900 leading-tight">Agent Completion KPI: {title}</h3>
             <p className="text-[11px] text-slate-500 mt-0.5">
               Success means every record is contacted to the maximum ({report ? `${report.requirements.calls} calls and ${report.requirements.sms} SMS` : 'calls and SMS'}) or closed.
             </p>
@@ -247,4 +256,3 @@ export default function AgentKpiPanel({ section, focusAgentId = null, focusAgent
   );
 }
 // V15 END src/components/AgentKpiPanel.tsx
-

@@ -30,7 +30,7 @@ import {
   UserCheck,
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
-import { parsePendingSubmissionRows } from '../lib/pendingSubmissionsParser';
+import { parsePendingSubmissionRows, SkippedRow } from '../lib/pendingSubmissionsParser';
 import { toNairobiInputValue, nairobiInputToIso, formatNairobiDisplay } from '../lib/nairobiTime';
 import { groupByCustomerOldestFirst } from '../lib/submissionQueue';
 import { PendingCallSessionView } from './PendingCallSessionView';
@@ -42,6 +42,23 @@ import { saveOutcome } from '../lib/safeSave';
 const SHOW_WORKFLOW_EXTENDED = true; // flipped in FIXPASS 2
 const SHOW_SMS_SETTINGS = true; // flipped in FIXPASS 3
 const SHOW_INTEGRATIONS = true; // flipped in FIXPASS 3
+
+export type PendingJobType = 'INSPECTION' | 'SUBMISSION';
+
+const JOB_TYPE_TABS: ReadonlyArray<{ type: PendingJobType; label: string; blurb: string }> = [
+  {
+    type: 'INSPECTION',
+    label: 'Pending Inspection',
+    blurb:
+      'The solver has not seen the car yet. Contact the client, agree a time and place, and schedule a solver to inspect it.',
+  },
+  {
+    type: 'SUBMISSION',
+    label: 'Pending Submission',
+    blurb:
+      'The car has been inspected but the solver has not submitted the job in the app. Contact the solver and get the submission done.',
+  },
+];
 
 /** A GREEN record that was closed because the latest upload no longer contained it (not by an agent). */
 const SUBMITTED_OUTCOMES = ['ABSENT_FROM_LATEST_EXPORT', 'SUBMITTED_BY_SOLVER'];
@@ -94,6 +111,9 @@ export interface PendingSubmissionJob {
   is_overdue: boolean;
   days_overdue: number;
   days_pending: number;
+  /** Which tab the job belongs to. */
+  job_type: PendingJobType;
+  type_changed_at: string | null;
 }
 
 export interface PendingSubmissionLog {
@@ -162,7 +182,15 @@ interface ImportSummary {
   reopened_count?: number;
   invalid_rows_count?: number;
   duplicate_in_file_count?: number;
-  invalid_rows?: Array<{ row: number; reason: string }>;
+  /** Rows the server skipped. */
+  invalid_rows?: Array<{ row: number; reason: string; external_id?: string; vehicle_reg?: string; job_status?: string }>;
+  /** Rows this page skipped before sending. */
+  client_skipped_rows?: SkippedRow[];
+  type_changed_count?: number;
+  by_type?: Record<
+    PendingJobType,
+    { rows_in_file: number; new_records: number; refreshed: number; moved_in: number; reopened: number; auto_closed_absent: number }
+  >;
 }
 
 interface TeamInfo {
@@ -184,13 +212,27 @@ interface PendingImportState {
   fileName: string;
   importedBy: string;
   rows: unknown[];
-  skippedCount: number;
+  skippedRows: SkippedRow[];
   confirmation: ImportConfirmationInfo;
 }
 
 // Exactly TEN agent-selectable outcomes
 export const AGENT_OUTCOMES = [
   { value: 'SCHEDULED', label: 'Scheduled', resultingStatus: 'GREEN', closes: true },
+  { value: 'CALL_BACK', label: 'Call back', resultingStatus: 'AMBER', closes: false },
+  { value: 'NOT_READY', label: 'Not ready', resultingStatus: 'AMBER', closes: false },
+  { value: 'NOT_PICKING', label: 'Not picking', resultingStatus: 'AMBER', closes: false },
+  { value: 'UNREACHABLE', label: 'Unreachable', resultingStatus: 'AMBER', closes: false },
+  { value: 'WRONG_NUMBER', label: 'Wrong number', resultingStatus: 'AMBER', closes: false },
+  { value: 'CHANGED_LOCATION', label: 'Changed location', resultingStatus: 'AMBER', closes: false },
+  { value: 'NO_DOCUMENTS', label: 'No documents', resultingStatus: 'AMBER', closes: false },
+  { value: 'WRONG_REGISTRATION_SCHEDULE', label: 'Wrong registration schedule', resultingStatus: 'AMBER', closes: false },
+  { value: 'WITHDRAWN', label: 'Withdrawn / Invalid', resultingStatus: 'RED', closes: true },
+] as const;
+
+// The outcomes of a Pending Submission job. The first one is the success for that tab (it replaces Scheduled).
+export const SUBMISSION_OUTCOME_FALLBACK = [
+  { value: 'SOLVER_SUBMITTED', label: 'Submitted', resultingStatus: 'GREEN', closes: true },
   { value: 'CALL_BACK', label: 'Call back', resultingStatus: 'AMBER', closes: false },
   { value: 'NOT_READY', label: 'Not ready', resultingStatus: 'AMBER', closes: false },
   { value: 'NOT_PICKING', label: 'Not picking', resultingStatus: 'AMBER', closes: false },
@@ -216,15 +258,17 @@ export const OUTCOME_DISPLAY_LABELS: Record<string, string> = {
   WITHDRAWN: 'Withdrawn / Invalid',
   // System-written outcomes
   MAX_ATTEMPTS_REACHED: 'Max Attempts Reached',
-  ABSENT_FROM_LATEST_EXPORT: 'Submitted',
+  ABSENT_FROM_LATEST_EXPORT: 'Closed by upload',
   REOPENED_BY_SYSTEM: 'Reopened by System',
   REASSIGNED_BY_SYSTEM: 'Reassigned by System',
+  TYPE_CHANGED_BY_SYSTEM: 'Moved to the other tab by System',
+  SOLVER_SUBMITTED: 'Submitted',
   // Legacy outcomes from first build
   CONTACT_ATTEMPTED: 'Contact Attempted',
   CLIENT_POSTPONED: 'Client Postponed',
   CLIENT_REFUSED: 'Client Refused',
   AGREED_SCHEDULE: 'Agreed Schedule',
-  SUBMITTED_BY_SOLVER: 'Submitted',
+  SUBMITTED_BY_SOLVER: 'Closed by upload',
 };
 
 export function formatOutcome(outcome: string | null | undefined): string {
@@ -249,7 +293,15 @@ export default function PendingSubmissionsSection({ isAdmin }: PendingSubmission
     isAdmin ??
     Boolean(localStorage.getItem('solvit_admin_token') || localStorage.getItem('nellions_admin_token'));
 
-  const [jobs, setJobs] = useState<PendingSubmissionJob[]>([]);
+  // Every job, both types. `jobs` below is the part that belongs to the tab being viewed.
+  const [allJobs, setAllJobs] = useState<PendingSubmissionJob[]>([]);
+  const [jobType, setJobType] = useState<PendingJobType>('INSPECTION');
+  const jobs = useMemo(() => allJobs.filter((j) => (j.job_type ?? 'INSPECTION') === jobType), [allJobs, jobType]);
+  const tabOpenCounts = useMemo(() => {
+    const out: Record<PendingJobType, number> = { INSPECTION: 0, SUBMISSION: 0 };
+    for (const j of allJobs) if (j.status === 'AMBER') out[(j.job_type ?? 'INSPECTION') as PendingJobType] += 1;
+    return out;
+  }, [allJobs]);
   const [loading, setLoading] = useState<boolean>(true);
   const [refreshing, setRefreshing] = useState<boolean>(false);
 
@@ -300,6 +352,8 @@ export default function PendingSubmissionsSection({ isAdmin }: PendingSubmission
   const [pendingImport, setPendingImport] = useState<PendingImportState | null>(null);
   const [confirmingImport, setConfirmingImport] = useState<boolean>(false);
   const [outcomeOptions, setOutcomeOptions] = useState<ReadonlyArray<{ value: string; label: string; closes: boolean; resultingStatus: string }>>(AGENT_OUTCOMES);
+  // The success outcome is always first in the list for the tab being viewed (Scheduled, or Submitted).
+  const successOutcome = outcomeOptions[0]?.value ?? 'SCHEDULED';
 
   // Log Outcome Modal
   const [selectedJobForLog, setSelectedJobForLog] = useState<PendingSubmissionJob | null>(null);
@@ -411,9 +465,11 @@ export default function PendingSubmissionsSection({ isAdmin }: PendingSubmission
   };
 
   // FIXPASS:2 The server is the source of truth for the agent outcomes. The local constant is the fallback.
-  const fetchOutcomes = async () => {
+  const fetchOutcomes = async (type: PendingJobType) => {
+    // Show the built-in list for this tab straight away, then replace it with the server's list.
+    setOutcomeOptions(type === 'SUBMISSION' ? SUBMISSION_OUTCOME_FALLBACK : AGENT_OUTCOMES);
     try {
-      const res = await fetch('/api/pending-submissions/outcomes');
+      const res = await fetch(`/api/pending-submissions/outcomes?job_type=${type}`);
       if (!res.ok) return;
       const data = await res.json();
       if (Array.isArray(data) && data.length > 0) {
@@ -436,7 +492,7 @@ export default function PendingSubmissionsSection({ isAdmin }: PendingSubmission
       const res = await fetch('/api/pending-submissions/jobs');
       if (res.ok) {
         const data = await res.json();
-        setJobs(data);
+        setAllJobs(data);
         setKpiRefreshToken((n) => n + 1);
       }
     } catch (e) {
@@ -450,10 +506,27 @@ export default function PendingSubmissionsSection({ isAdmin }: PendingSubmission
   useEffect(() => {
     fetchSettings();
     fetchAgents();
-    fetchOutcomes();
     fetchIntegrations();
     fetchJobs();
   }, []);
+
+  // The outcome list follows the tab: Scheduled for an inspection, Submitted for a submission job.
+  useEffect(() => {
+    fetchOutcomes(jobType);
+  }, [jobType]);
+
+  // Switching tab starts that tab with clean filters and ends any call session.
+  const switchTab = (type: PendingJobType) => {
+    if (type === jobType) return;
+    setJobType(type);
+    setStatusFilter('ALL');
+    setAgentFilter('ALL');
+    setCompanyFilter('ALL');
+    setSearchQuery('');
+    setOverdueOnly(false);
+    setMaxAttemptsOnly(false);
+    setIsCallSessionActive(false);
+  };
 
   const handleRefresh = () => {
     setRefreshing(true);
@@ -579,7 +652,11 @@ export default function PendingSubmissionsSection({ isAdmin }: PendingSubmission
 
   // One group per customer, ordered by the customer's oldest schedule date (longest overdue first, any company).
   // All of a customer's vehicles stay together, oldest first.
-  const customerGroups = useMemo(() => groupByCustomerOldestFirst(filteredJobs), [filteredJobs]);
+  // An inspection customer is the client. A submission customer is the solver: all of one solver's jobs stay together.
+  const customerGroups = useMemo(
+    () => groupByCustomerOldestFirst<PendingSubmissionJob>(filteredJobs, (j) => (jobType === 'SUBMISSION' ? j.solver_contact : j.client_phone)),
+    [filteredJobs, jobType]
+  );
 
   // The agent selected in the Agent dropdown, when it is a real agent (not All and not Unassigned)
   const sessionAgent =
@@ -596,7 +673,7 @@ export default function PendingSubmissionsSection({ isAdmin }: PendingSubmission
     fileName: string,
     importedBy: string,
     rows: unknown[],
-    skippedCount: number,
+    skippedRows: SkippedRow[],
     confirmed: boolean
   ) => {
     const res = await fetch('/api/pending-submissions/import', {
@@ -607,7 +684,13 @@ export default function PendingSubmissionsSection({ isAdmin }: PendingSubmission
 
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
-      throw new Error(err.error || 'Failed to import file');
+      const problems = Array.isArray(err.invalid_rows)
+        ? err.invalid_rows
+            .slice(0, 5)
+            .map((r: any) => `row ${r.row}${r.external_id ? ` (ID ${r.external_id}${r.vehicle_reg ? `, ${r.vehicle_reg}` : ''})` : ''}: ${r.reason}`)
+            .join('; ')
+        : '';
+      throw new Error(`${err.error || 'Failed to import file'}${problems ? ` First problems: ${problems}.` : ''}`);
     }
 
     const body = await res.json();
@@ -616,7 +699,7 @@ export default function PendingSubmissionsSection({ isAdmin }: PendingSubmission
         fileName,
         importedBy,
         rows,
-        skippedCount,
+        skippedRows,
         confirmation: {
           would_close_count: Number(body.would_close_count),
           total_open: Number(body.total_open),
@@ -629,7 +712,7 @@ export default function PendingSubmissionsSection({ isAdmin }: PendingSubmission
       return;
     }
 
-    setImportSummary({ ...body, client_skipped_count: skippedCount });
+    setImportSummary({ ...body, client_skipped_count: skippedRows.length, client_skipped_rows: skippedRows });
     setPendingImport(null);
     setIsUploadOpen(false);
     setUploadFile(null);
@@ -640,7 +723,7 @@ export default function PendingSubmissionsSection({ isAdmin }: PendingSubmission
     if (!pendingImport) return;
     setConfirmingImport(true);
     try {
-      await postImport(pendingImport.fileName, pendingImport.importedBy, pendingImport.rows, pendingImport.skippedCount, true);
+      await postImport(pendingImport.fileName, pendingImport.importedBy, pendingImport.rows, pendingImport.skippedRows, true);
     } catch (err) {
       alert((err as Error).message);
     } finally {
@@ -648,7 +731,7 @@ export default function PendingSubmissionsSection({ isAdmin }: PendingSubmission
     }
   };
 
-  // File Upload Handler (Brian's daily pending submissions sheet)
+  // File Upload Handler (the pending list spreadsheet, with both job types in one file)
   const handleFileUpload = async (e: FormEvent) => {
     e.preventDefault();
     if (!uploadFile) return;
@@ -669,7 +752,7 @@ export default function PendingSubmissionsSection({ isAdmin }: PendingSubmission
       const parsed = parsePendingSubmissionRows(rawRows);
       if (parsed.missingHeaders.length > 0) {
         throw new Error(
-          `Missing required column(s): ${parsed.missingHeaders.join(', ')}. Expected headers: ID, solver_contact, vehicle_reg, client_no.`
+          `Missing required column(s): ${parsed.missingHeaders.join(', ')}. Expected headers: ID, solver_contact, vehicle_reg, client_no, job_status.`
         );
       }
       if (parsed.rows.length === 0) {
@@ -684,7 +767,7 @@ export default function PendingSubmissionsSection({ isAdmin }: PendingSubmission
         localStorage.getItem('solvit_logged_in_user') ||
         (isUserAdmin ? 'Admin' : 'Mary');
 
-      await postImport(uploadFile.name, loggedUser, validRows, parsed.skipped.length, false);
+      await postImport(uploadFile.name, loggedUser, validRows, parsed.skipped, false);
     } catch (err) {
       setUploadError((err as Error).message);
     } finally {
@@ -919,6 +1002,7 @@ export default function PendingSubmissionsSection({ isAdmin }: PendingSubmission
   const handleExportMaxAttempts = async () => {
     try {
       const params = new URLSearchParams();
+      params.set('job_type', jobType);
       if (agentFilter === 'UNASSIGNED') params.set('agent', 'UNASSIGNED');
       else if (agentFilter !== 'ALL') {
         // The agent name is sent so that the file name is readable. The server also accepts the agent id.
@@ -934,7 +1018,7 @@ export default function PendingSubmissionsSection({ isAdmin }: PendingSubmission
       const disposition = res.headers.get('Content-Disposition') || '';
       const name =
         /filename="([^"]+)"/.exec(disposition)?.[1] ||
-        `pending_max_attempts_report_${new Date().toISOString().split('T')[0]}.xlsx`;
+        `pending_${jobType.toLowerCase()}_max_attempts_report_${new Date().toISOString().split('T')[0]}.xlsx`;
       const url = URL.createObjectURL(blob);
       const link = document.createElement('a');
       link.href = url;
@@ -956,6 +1040,7 @@ export default function PendingSubmissionsSection({ isAdmin }: PendingSubmission
     }
 
     const rows = filteredJobs.map((j) => ({
+      'Job Type': j.job_type === 'SUBMISSION' ? 'Pending Submission' : 'Pending Inspection',
       'External ID': j.external_id,
       'Vehicle Reg': j.vehicle_reg_raw || j.vehicle_reg,
       'Insurance Company': j.insurance_company || '',
@@ -973,9 +1058,9 @@ export default function PendingSubmissionsSection({ isAdmin }: PendingSubmission
 
     const ws = XLSX.utils.json_to_sheet(rows);
     const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, 'Pending Submissions');
+    XLSX.utils.book_append_sheet(wb, ws, jobType === 'SUBMISSION' ? 'Pending Submission' : 'Pending Inspection');
     const todayStr = new Date().toISOString().split('T')[0];
-    XLSX.writeFile(wb, `pending_submissions_${todayStr}.xlsx`);
+    XLSX.writeFile(wb, `pending_${jobType.toLowerCase()}_${todayStr}.xlsx`);
   };
 
   return (
@@ -993,7 +1078,7 @@ export default function PendingSubmissionsSection({ isAdmin }: PendingSubmission
             </span>
           </div>
           <p className="text-xs text-slate-500 mt-1 max-w-2xl">
-            Call and follow up pending valuation jobs with clients and record the outcome of every contact.
+            Follow up pending valuation jobs and record the outcome of every contact. Each tab is its own job type with its own agents' queues, KPI and reports.
           </p>
         </div>
 
@@ -1016,13 +1101,13 @@ export default function PendingSubmissionsSection({ isAdmin }: PendingSubmission
             className="px-4 py-2 rounded-xl text-xs font-bold bg-[#ff353e] hover:bg-[#e02831] text-white shadow-xs hover:shadow transition-all flex items-center gap-1.5 cursor-pointer"
           >
             <Upload className="w-3.5 h-3.5" />
-            <span>Upload Daily List</span>
+            <span>Upload List</span>
           </button>
 
           <button
             onClick={handleExportExcel}
             className="px-3.5 py-2 rounded-xl text-xs font-bold border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 transition-all flex items-center gap-1.5 shadow-2xs cursor-pointer"
-            title="Download visible list to Excel"
+            title={`Download the visible ${jobType === 'SUBMISSION' ? 'Pending Submission' : 'Pending Inspection'} list to Excel`}
           >
             <Download className="w-3.5 h-3.5 text-slate-500" />
             <span>Export</span>
@@ -1031,7 +1116,7 @@ export default function PendingSubmissionsSection({ isAdmin }: PendingSubmission
           <button
             onClick={handleExportMaxAttempts}
             className="px-3.5 py-2 rounded-xl text-xs font-bold border border-rose-200 bg-rose-50 hover:bg-rose-100 text-rose-700 transition-all flex items-center gap-1.5 shadow-2xs cursor-pointer"
-            title="Download the Max Attempts report, grouped by insurance company, with full history"
+            title={`Download the ${jobType === 'SUBMISSION' ? 'Pending Submission' : 'Pending Inspection'} Max Attempts report, grouped by insurance company, with full history`}
           >
             <Download className="w-3.5 h-3.5 text-rose-500" />
             <span>Max Attempts Report</span>
@@ -1045,6 +1130,41 @@ export default function PendingSubmissionsSection({ isAdmin }: PendingSubmission
           >
             <RefreshCw className={`w-4 h-4 ${refreshing ? 'animate-spin text-[#ff353e]' : ''}`} />
           </button>
+        </div>
+      </div>
+
+      {/* Job type tabs: Pending Inspection and Pending Submission are worked and reported separately */}
+      <div className="bg-white border border-slate-200/80 rounded-2xl p-2 shadow-xs" id="pending-job-type-tabs">
+        <div className="flex flex-col sm:flex-row gap-2">
+          {JOB_TYPE_TABS.map((tab) => {
+            const active = tab.type === jobType;
+            return (
+              <button
+                key={tab.type}
+                id={`pending-tab-${tab.type.toLowerCase()}`}
+                type="button"
+                onClick={() => switchTab(tab.type)}
+                className={`flex-1 px-4 py-2.5 rounded-xl text-left transition-all cursor-pointer border ${
+                  active
+                    ? 'bg-slate-900 border-slate-900 text-white shadow-sm'
+                    : 'bg-slate-50 hover:bg-slate-100 border-slate-200 text-slate-700'
+                }`}
+                aria-pressed={active}
+              >
+                <span className="flex items-center justify-between gap-2">
+                  <span className="text-sm font-black">{tab.label}</span>
+                  <span
+                    className={`px-2 py-0.5 rounded-full text-[10px] font-mono font-bold ${
+                      active ? 'bg-slate-700 text-slate-100' : 'bg-amber-100 text-amber-800'
+                    }`}
+                  >
+                    {tabOpenCounts[tab.type]} open
+                  </span>
+                </span>
+                <span className={`block text-[11px] mt-0.5 ${active ? 'text-slate-300' : 'text-slate-500'}`}>{tab.blurb}</span>
+              </button>
+            );
+          })}
         </div>
       </div>
 
@@ -1214,7 +1334,9 @@ export default function PendingSubmissionsSection({ isAdmin }: PendingSubmission
           }`}
         >
           <div className="flex items-center justify-between">
-            <span className="text-[11px] font-bold uppercase tracking-wider block opacity-80">Closed Scheduled</span>
+            <span className="text-[11px] font-bold uppercase tracking-wider block opacity-80">
+              {jobType === 'SUBMISSION' ? 'Closed Submitted' : 'Closed Scheduled'}
+            </span>
             <CheckCircle2 className="w-4 h-4 opacity-70" />
           </div>
           <span className="text-2xl font-black mt-1 block">{counts.green}</span>
@@ -1234,7 +1356,7 @@ export default function PendingSubmissionsSection({ isAdmin }: PendingSubmission
           title="Closed because the latest upload no longer contained the record"
         >
           <div className="flex items-center justify-between">
-            <span className="text-[11px] font-bold uppercase tracking-wider block opacity-80">Submitted</span>
+            <span className="text-[11px] font-bold uppercase tracking-wider block opacity-80">Closed by upload</span>
             <Send className="w-4 h-4 opacity-70" />
           </div>
           <span className="text-2xl font-black mt-1 block">{counts.submitted}</span>
@@ -1311,6 +1433,7 @@ export default function PendingSubmissionsSection({ isAdmin }: PendingSubmission
       {/* Agent completion KPI and pace advice (read only) */}
       <AgentKpiPanel
         section="pending_submissions"
+        jobType={jobType}
         focusAgentId={sessionAgent ? sessionAgent.id : null}
         refreshToken={kpiRefreshToken}
       />
@@ -1321,6 +1444,7 @@ export default function PendingSubmissionsSection({ isAdmin }: PendingSubmission
           key={sessionAgent.id}
           selectedAgentId={sessionAgent.id}
           selectedAgentName={sessionAgent.name}
+          jobType={jobType}
           maxCalls={workflowSettings.max_attempts}
           maxSms={workflowSettings.max_sms_attempts}
           outcomeOptions={outcomeOptions}
@@ -1331,7 +1455,7 @@ export default function PendingSubmissionsSection({ isAdmin }: PendingSubmission
             fetchJobs();
           }}
           onJobUpdated={(updated) => {
-            setJobs((prev) => prev.map((j) => (j.id === updated.id ? updated : j)));
+            setAllJobs((prev) => prev.map((j) => (j.id === updated.id ? updated : j)));
           }}
         />
       ) : (
@@ -1386,8 +1510,8 @@ export default function PendingSubmissionsSection({ isAdmin }: PendingSubmission
           >
             <option value="ALL">All Statuses</option>
             <option value="AMBER">Open / Pending (AMBER)</option>
-            <option value="GREEN">Scheduled (GREEN)</option>
-            <option value="SUBMITTED">Submitted (closed by upload)</option>
+            <option value="GREEN">{jobType === 'SUBMISSION' ? 'Submitted (GREEN)' : 'Scheduled (GREEN)'}</option>
+            <option value="SUBMITTED">Closed by upload (GREEN)</option>
             <option value="RED">Withdrawn / Closed (RED)</option>
           </select>
 
@@ -1432,8 +1556,10 @@ export default function PendingSubmissionsSection({ isAdmin }: PendingSubmission
         ) : filteredJobs.length === 0 ? (
           <div className="p-12 text-center text-slate-400 space-y-2">
             <FileText className="w-8 h-8 mx-auto text-slate-300" />
-            <p className="text-sm font-semibold text-slate-600">No pending submission jobs match your filter</p>
-            <p className="text-xs text-slate-400">Upload a fresh export list or adjust your search filters above.</p>
+            <p className="text-sm font-semibold text-slate-600">
+              No {jobType === 'SUBMISSION' ? 'pending submission' : 'pending inspection'} jobs match your filter
+            </p>
+            <p className="text-xs text-slate-400">Upload a fresh list or adjust your search filters above.</p>
           </div>
         ) : (
           <div className="overflow-x-auto">
@@ -1442,8 +1568,8 @@ export default function PendingSubmissionsSection({ isAdmin }: PendingSubmission
                 <tr className="bg-slate-50 border-b border-slate-200/80 text-[11px] font-bold uppercase tracking-wider text-slate-500">
                   <th className="py-3.5 px-4">Vehicle &amp; ID</th>
                   <th className="py-3.5 px-4">Insurance Company</th>
-                  <th className="py-3.5 px-4">Client Contact</th>
-                  <th className="py-3.5 px-4">Solver Contact</th>
+                  <th className="py-3.5 px-4">{jobType === 'SUBMISSION' ? 'Client Contact (optional)' : 'Client Contact'}</th>
+                  <th className="py-3.5 px-4">{jobType === 'SUBMISSION' ? 'Solver Contact (call this one)' : 'Solver Contact'}</th>
                   <th className="py-3.5 px-4">Pending Reason</th>
                   <th className="py-3.5 px-4">Assigned Agent</th>
                   <th className="py-3.5 px-4">Status &amp; Outcome</th>
@@ -1456,7 +1582,14 @@ export default function PendingSubmissionsSection({ isAdmin }: PendingSubmission
                   <React.Fragment key={group.client_phone}>
                     <tr className="bg-slate-100/80">
                       <td colSpan={9} className="py-2 px-4 text-[11px] font-black uppercase tracking-wider text-slate-600">
-                        <span className="font-mono">{group.records[0].client_phone_raw || group.client_phone}</span>{' '}
+                        {jobType === 'SUBMISSION' && (
+                          <span className="normal-case tracking-normal mr-1.5">{group.records[0].solver_name || 'Solver'}:</span>
+                        )}
+                        <span className="font-mono">
+                          {jobType === 'SUBMISSION'
+                            ? group.records[0].solver_contact_raw || group.client_phone
+                            : group.records[0].client_phone_raw || group.client_phone}
+                        </span>{' '}
                         <span className="font-semibold text-slate-400">
                           ({group.records.length} {group.records.length === 1 ? 'vehicle' : 'vehicles'})
                         </span>
@@ -1545,9 +1678,11 @@ export default function PendingSubmissionsSection({ isAdmin }: PendingSubmission
                           }`}
                         >
                           {isSubmittedByUpload(job)
-                            ? 'SUBMITTED'
+                            ? 'CLOSED BY UPLOAD'
                             : job.status === 'GREEN'
-                            ? 'SCHEDULED'
+                            ? job.job_type === 'SUBMISSION'
+                              ? 'SUBMITTED'
+                              : 'SCHEDULED'
                             : job.status === 'RED'
                             ? 'WITHDRAWN'
                             : 'AMBER (OPEN)'}
@@ -1569,13 +1704,13 @@ export default function PendingSubmissionsSection({ isAdmin }: PendingSubmission
                             <Clock className="w-3 h-3 text-emerald-600 shrink-0" />
                             <span>
                               {formatNairobiDisplay(job.scheduled_at)}{' '}
-                              {job.scheduled_place ? `â€¢ ${job.scheduled_place}` : ''}
+                              {job.scheduled_place ? `• ${job.scheduled_place}` : ''}
                             </span>
                           </div>
                         )}
 
                         {/* Solver Notification Status Badge */}
-                        {solverSmsEnabled && job.status === 'GREEN' && !isSubmittedByUpload(job) && (
+                        {solverSmsEnabled && job.job_type !== 'SUBMISSION' && job.status === 'GREEN' && !isSubmittedByUpload(job) && (
                           <div className="mt-1">
                             {job.solver_notification_status === 'SENT' ? (
                               <span
@@ -1630,7 +1765,9 @@ export default function PendingSubmissionsSection({ isAdmin }: PendingSubmission
                           >
                             SMS {job.client_sms_count}/{workflowSettings.max_sms_attempts}
                           </span>
-                          <span className="text-[10px] text-slate-500 whitespace-nowrap">Solver {job.solver_attempt_count}</span>
+                          {job.job_type !== 'SUBMISSION' && (
+                            <span className="text-[10px] text-slate-500 whitespace-nowrap">Solver {job.solver_attempt_count}</span>
+                          )}
                         </div>
 
                         {job.is_overdue && (
@@ -1646,7 +1783,7 @@ export default function PendingSubmissionsSection({ isAdmin }: PendingSubmission
                     <td className="py-3.5 px-4 text-right">
                       <div className="flex items-center justify-end gap-1.5">
                         {/* Solver SMS: send, retry or resend for a scheduled job */}
-                        {solverSmsEnabled && job.status === 'GREEN' && !isSubmittedByUpload(job) && (() => {
+                        {solverSmsEnabled && job.job_type !== 'SUBMISSION' && job.status === 'GREEN' && !isSubmittedByUpload(job) && (() => {
                           const maxSends = 1 + workflowSettings.solver_sms_max_resends;
                           const atLimit = Number(job.solver_notification_attempts) >= maxSends;
                           const sending = notifyingJobId === job.id || job.solver_notification_status === 'SENDING';
@@ -1677,7 +1814,7 @@ export default function PendingSubmissionsSection({ isAdmin }: PendingSubmission
                         <button
                           onClick={() => {
                             setSelectedJobForLog(job);
-                            setOutcomeType('SCHEDULED');
+                            setOutcomeType(successOutcome);
                             setOutcomeComment('');
                           }}
                           className="px-3 py-1.5 rounded-lg text-xs font-bold bg-slate-900 hover:bg-black text-white transition-colors cursor-pointer whitespace-nowrap"
@@ -1728,8 +1865,17 @@ export default function PendingSubmissionsSection({ isAdmin }: PendingSubmission
                   Log Outcome: {selectedJobForLog.vehicle_reg_raw || selectedJobForLog.vehicle_reg}
                 </h3>
                 <p className="text-xs text-slate-500">
-                  Client: {selectedJobForLog.client_phone_raw || selectedJobForLog.client_phone} â€¢ Solver:{' '}
-                  {selectedJobForLog.solver_name || 'Valuer'}
+                  {selectedJobForLog.job_type === 'SUBMISSION' ? (
+                    <>
+                      Solver: {selectedJobForLog.solver_name || 'Valuer'} {selectedJobForLog.solver_contact_raw || selectedJobForLog.solver_contact} • Client:{' '}
+                      {selectedJobForLog.client_phone_raw || selectedJobForLog.client_phone}
+                    </>
+                  ) : (
+                    <>
+                      Client: {selectedJobForLog.client_phone_raw || selectedJobForLog.client_phone} • Solver:{' '}
+                      {selectedJobForLog.solver_name || 'Valuer'}
+                    </>
+                  )}
                 </p>
               </div>
               <button
@@ -1759,6 +1905,8 @@ export default function PendingSubmissionsSection({ isAdmin }: PendingSubmission
                 <span className="text-[10px] text-slate-400 mt-1 block">
                   {outcomeType === 'SCHEDULED'
                     ? 'The record will be closed as GREEN (inspection scheduled).'
+                    : outcomeType === 'SOLVER_SUBMITTED'
+                    ? 'The record will be closed as GREEN (the solver has submitted the job).'
                     : outcomeType === 'WITHDRAWN'
                     ? 'Job will be closed as RED (withdrawn or invalid).'
                     : 'Job remains open in AMBER state for subsequent follow-up attempts.'}
@@ -1813,14 +1961,14 @@ export default function PendingSubmissionsSection({ isAdmin }: PendingSubmission
         </div>
       )}
 
-      {/* Upload Daily List Modal */}
+      {/* Upload List Modal */}
       {isUploadOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-xs animate-in fade-in duration-200">
           <div className="bg-white rounded-3xl max-w-md w-full p-6 shadow-2xl border border-slate-100 space-y-4">
             <div className="flex items-center justify-between border-b border-slate-100 pb-3">
               <div>
                 <h3 className="text-base font-black text-slate-900">Upload Pending Submissions</h3>
-                <p className="text-xs text-slate-500">Upload Brian's daily list (.xlsx, .xls, .csv)</p>
+                <p className="text-xs text-slate-500">Upload the pending list (.xlsx, .xls, .csv). Both job types can be in one file.</p>
               </div>
               <button
                 onClick={() => {
@@ -1853,7 +2001,7 @@ export default function PendingSubmissionsSection({ isAdmin }: PendingSubmission
                   {uploadFile ? uploadFile.name : 'Choose Excel or CSV spreadsheet'}
                 </label>
                 <span className="text-[10px] text-slate-400 mt-1 block">
-                  Expected columns: External ID, Solver Name, Solver Phone, Vehicle Reg, Company, Client Phone, Reason
+                  Required columns: ID, solver_contact, vehicle_reg, client_no, job_status (Pending Inspection or Pending Submission)
                 </span>
               </div>
 
@@ -1908,8 +2056,8 @@ export default function PendingSubmissionsSection({ isAdmin }: PendingSubmission
             <p className="text-xs text-slate-700 leading-relaxed">
               This file is missing {pendingImport.confirmation.would_close_count} of{' '}
               {pendingImport.confirmation.total_open} open jobs (
-              {pendingImport.confirmation.would_close_percentage}%). Confirming will close them as submitted by the
-              solver. The configured limits are {pendingImport.confirmation.fixed_limit} jobs or{' '}
+              {pendingImport.confirmation.would_close_percentage}%). Confirming will close them as closed by upload.
+              Only jobs of the job types present in this file are counted. The configured limits are {pendingImport.confirmation.fixed_limit} jobs or{' '}
               {pendingImport.confirmation.percentage_limit}%. If this is the wrong or a partial file, cancel now.
               Nothing has been saved yet.
             </p>
@@ -1992,9 +2140,34 @@ export default function PendingSubmissionsSection({ isAdmin }: PendingSubmission
                 <span className="font-mono font-bold text-slate-800">{importSummary.skipped_closed_count}</span>
               </div>
               <div className="flex items-center justify-between p-2.5 rounded-xl bg-amber-50 text-xs">
-                <span className="font-semibold text-amber-800">Auto-Closed Absent (Submitted by Solver)</span>
+                <span className="font-semibold text-amber-800">Closed by upload (no longer in the file)</span>
                 <span className="font-mono font-bold text-amber-900">{importSummary.auto_closed_absent_count}</span>
               </div>
+              {importSummary.by_type && (
+                <div className="p-2.5 rounded-xl bg-slate-50 text-xs space-y-1">
+                  {JOB_TYPE_TABS.map((tab) => {
+                    const t = importSummary.by_type![tab.type];
+                    if (!t || t.rows_in_file === 0) return null;
+                    return (
+                      <div key={tab.type} className="flex items-start justify-between gap-3">
+                        <span className="font-semibold text-slate-700">{tab.label}</span>
+                        <span className="font-mono text-slate-800 text-right">
+                          {t.rows_in_file} in file • +{t.new_records} new • {t.refreshed} updated
+                          {t.moved_in > 0 ? ` • ${t.moved_in} moved in` : ''}
+                          {t.reopened > 0 ? ` • ${t.reopened} reopened` : ''}
+                          {t.auto_closed_absent > 0 ? ` • ${t.auto_closed_absent} closed by upload` : ''}
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+              {(importSummary.type_changed_count ?? 0) > 0 && (
+                <div className="flex items-center justify-between p-2.5 rounded-xl bg-sky-50 text-xs">
+                  <span className="font-semibold text-sky-800">Moved to the other tab (attempt counts restart)</span>
+                  <span className="font-mono font-bold text-sky-900">{importSummary.type_changed_count}</span>
+                </div>
+              )}
               {(importSummary.reopened_count ?? 0) > 0 && (
                 <div className="flex items-center justify-between p-2.5 rounded-xl bg-sky-50 text-xs">
                   <span className="font-semibold text-sky-800">Reopened (reappeared in export)</span>
@@ -2007,26 +2180,41 @@ export default function PendingSubmissionsSection({ isAdmin }: PendingSubmission
                   <span className="font-mono font-bold text-slate-800">{importSummary.duplicate_in_file_count}</span>
                 </div>
               )}
-              {(importSummary.invalid_rows?.length ?? 0) > 0 && (
-                <details className="p-2.5 rounded-xl bg-rose-50 text-xs">
-                  <summary className="font-semibold text-rose-800 cursor-pointer">
-                    {importSummary.invalid_rows!.length} row(s) rejected by the server
-                  </summary>
-                  <ul className="mt-2 space-y-1 text-rose-900 max-h-40 overflow-y-auto">
-                    {importSummary.invalid_rows!.map((r, i) => (
-                      <li key={i}>
-                        Row {r.row}: {r.reason}
-                      </li>
-                    ))}
-                  </ul>
-                </details>
-              )}
-              {(importSummary.client_skipped_count ?? 0) > 0 && (
-                <div className="flex items-center justify-between p-2.5 rounded-xl bg-rose-50 text-xs">
-                  <span className="font-semibold text-rose-800">Rows Skipped (invalid, not uploaded)</span>
-                  <span className="font-mono font-bold text-rose-900">{importSummary.client_skipped_count}</span>
-                </div>
-              )}
+              {(() => {
+                // Every skipped row in one list: the ones this page set aside and the ones the server rejected.
+                const skipped = [
+                  ...(importSummary.client_skipped_rows ?? []).map((r) => ({
+                    row: r.rowNumber,
+                    reason: r.reason,
+                    id: r.external_id,
+                    reg: r.vehicle_reg,
+                  })),
+                  ...(importSummary.invalid_rows ?? []).map((r) => ({
+                    row: r.row,
+                    reason: r.reason,
+                    id: r.external_id ?? '',
+                    reg: r.vehicle_reg ?? '',
+                  })),
+                ].sort((a, b) => a.row - b.row);
+                if (skipped.length === 0) return null;
+                return (
+                  <div className="p-2.5 rounded-xl bg-rose-50 text-xs">
+                    <div className="flex items-center justify-between">
+                      <span className="font-semibold text-rose-800">Rows skipped (not uploaded)</span>
+                      <span className="font-mono font-bold text-rose-900">{skipped.length}</span>
+                    </div>
+                    <ul id="pending-skipped-rows" className="mt-2 space-y-1 text-rose-900 max-h-48 overflow-y-auto">
+                      {skipped.map((r, i) => (
+                        <li key={i}>
+                          <span className="font-mono font-bold">Row {r.row}</span>
+                          {r.id ? <> • ID {r.id}</> : null}
+                          {r.reg ? <> • {r.reg}</> : null}: {r.reason}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                );
+              })()}
             </div>
 
             <div className="flex justify-end pt-2">
@@ -2824,4 +3012,3 @@ export default function PendingSubmissionsSection({ isAdmin }: PendingSubmission
   );
 }
 // FIXPASS END src/components/PendingSubmissionsSection.tsx
-
