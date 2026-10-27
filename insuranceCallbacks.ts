@@ -952,6 +952,37 @@ export async function computeCallbackJobsActivity(
     }
   }
 
+  // Outcome logging is also a supported callback workflow. A saved agent outcome
+  // represents a completed call attempt even when the Android phone event has not
+  // synced (or cannot be matched because the handset/agent assignment changed).
+  // Use the greater count rather than adding the two sources so the same call is
+  // not counted twice after its device event eventually arrives.
+  const manualAttempts = await db.queryAll<{
+    callback_job_id: number;
+    attempt_count: number;
+    last_attempt_at: string | null;
+  }>(
+    `SELECT callback_job_id,
+            COUNT(*) AS attempt_count,
+            MAX(created_at) AS last_attempt_at
+     FROM callback_job_logs
+     WHERE outcome IN ('SCHEDULED', 'DECLINED', 'VALUED_ELSEWHERE',
+                       'NOT_PICKING', 'WRONG_NUMBER', 'NOT_READY', 'UNREACHABLE')
+     GROUP BY callback_job_id`
+  );
+
+  for (const manual of manualAttempts) {
+    const act = result.get(Number(manual.callback_job_id));
+    if (!act) continue;
+    act.attempt_count = Math.max(act.attempt_count, Number(manual.attempt_count || 0));
+    if (
+      manual.last_attempt_at &&
+      (!act.last_attempt_at || new Date(manual.last_attempt_at) > new Date(act.last_attempt_at))
+    ) {
+      act.last_attempt_at = manual.last_attempt_at;
+    }
+  }
+
   return result;
 }
 
