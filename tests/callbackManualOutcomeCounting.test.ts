@@ -33,13 +33,13 @@ test("manual outcomes update call attempts without double-counting synced phone 
         }];
       }
       if (sql.includes("FROM callback_job_phones")) {
-        return [{ callback_job_id: 1, phone_normalised: "714820803" }];
+        return [{ callback_job_id: "1", phone_normalised: "714820803" }];
       }
       if (sql.includes("FROM callback_job_logs")) {
-        assert.match(sql, /WHERE outcome IN/);
+        assert.match(sql, /logged_by/);
         return [{
-          callback_job_id: 1,
-          attempt_count: 2,
+          callback_job_id: "1",
+          attempt_count: 9,
           last_attempt_at: "2026-10-27T09:00:00.000Z",
         }];
       }
@@ -54,13 +54,13 @@ test("manual outcomes update call attempts without double-counting synced phone 
   } as any;
 
   const result = await computeCallbackJobsActivity(db, [{
-    id: 1,
+    id: "1" as any,
     assigned_agent_id: 7,
     vehicle_reg: "KCU380Y",
     client_phone: "0714820803",
   }]);
 
-  assert.equal(result.get(1)?.attempt_count, 2);
-  assert.equal(result.get(1)?.last_attempt_at, "2026-10-27T09:00:00.000Z");
+  assert.equal(result.get("1" as any)?.attempt_count, 9);
+  assert.equal(result.get("1" as any)?.last_attempt_at, "2026-10-27T09:00:00.000Z");
 });
 

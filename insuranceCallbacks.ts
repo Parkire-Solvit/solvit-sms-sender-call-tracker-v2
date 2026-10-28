@@ -966,13 +966,15 @@ export async function computeCallbackJobsActivity(
             COUNT(*) AS attempt_count,
             MAX(created_at) AS last_attempt_at
      FROM callback_job_logs
-     WHERE outcome IN ('SCHEDULED', 'DECLINED', 'VALUED_ELSEWHERE',
-                       'NOT_PICKING', 'WRONG_NUMBER', 'NOT_READY', 'UNREACHABLE')
+     WHERE LOWER(COALESCE(logged_by, '')) <> 'system'
      GROUP BY callback_job_id`
   );
 
   for (const manual of manualAttempts) {
-    const act = result.get(Number(manual.callback_job_id));
+    // PostgreSQL BIGINT values are returned as strings by pg. getCallbackJobs
+    // therefore keys this map with string job IDs, while test/local adapters
+    // may use numbers. Support both representations.
+    const act = result.get(manual.callback_job_id as any) ?? result.get(Number(manual.callback_job_id));
     if (!act) continue;
     act.attempt_count = Math.max(act.attempt_count, Number(manual.attempt_count || 0));
     if (
