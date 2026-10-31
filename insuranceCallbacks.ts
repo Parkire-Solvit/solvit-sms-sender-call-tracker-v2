@@ -843,13 +843,20 @@ export async function computeCallbackJobsActivity(
   jobs: Array<{ id: number; assigned_agent_id: number | null; vehicle_reg: string; client_phone?: string }>
 ): Promise<Map<number, JobActivityMetrics>> {
   const result = new Map<number, JobActivityMetrics>();
-  const countedCallEvents = new Map<number, Set<number>>();
-  const countedSmsEvents = new Map<number, Set<number>>();
+  // PostgreSQL BIGINT/FK values can be strings while related SERIAL values are
+  // numbers. Canonical string keys keep the same database ID comparable across
+  // jobs, phone rows, events and aggregate history queries.
+  const keyOf = (value: string | number | null | undefined) => String(value ?? "");
+  const activityByJobKey = new Map<string, JobActivityMetrics>();
+  const countedCallEvents = new Map<string, Set<number>>();
+  const countedSmsEvents = new Map<string, Set<number>>();
 
   for (const j of jobs) {
-    result.set(j.id, { attempt_count: 0, sms_count: 0, last_attempt_at: null });
-    countedCallEvents.set(j.id, new Set<number>());
-    countedSmsEvents.set(j.id, new Set<number>());
+    const activity = { attempt_count: 0, sms_count: 0, last_attempt_at: null };
+    result.set(j.id, activity);
+    activityByJobKey.set(keyOf(j.id), activity);
+    countedCallEvents.set(keyOf(j.id), new Set<number>());
+    countedSmsEvents.set(keyOf(j.id), new Set<number>());
   }
 
   if (jobs.length === 0) return result;
@@ -879,12 +886,13 @@ export async function computeCallbackJobsActivity(
   const allPhones = await db.queryAll<{ callback_job_id: number; phone_normalised: string }>(
     `SELECT callback_job_id, phone_normalised FROM callback_job_phones`
   );
-  const jobPhonesMap = new Map<number, Set<string>>();
+  const jobPhonesMap = new Map<string, Set<string>>();
   for (const p of allPhones) {
-    let set = jobPhonesMap.get(p.callback_job_id);
+    const jobKey = keyOf(p.callback_job_id);
+    let set = jobPhonesMap.get(jobKey);
     if (!set) {
       set = new Set<string>();
-      jobPhonesMap.set(p.callback_job_id, set);
+      jobPhonesMap.set(jobKey, set);
     }
     set.add(p.phone_normalised);
   }
@@ -892,10 +900,11 @@ export async function computeCallbackJobsActivity(
   // Also ensure client_phone on the job is included in the lookup set
   for (const j of jobs) {
     if (j.client_phone) {
-      let set = jobPhonesMap.get(j.id);
+      const jobKey = keyOf(j.id);
+      let set = jobPhonesMap.get(jobKey);
       if (!set) {
         set = new Set<string>();
-        jobPhonesMap.set(j.id, set);
+        jobPhonesMap.set(jobKey, set);
       }
       const norm = normalizePhone(j.client_phone);
       if (norm) set.add(norm);
@@ -903,18 +912,19 @@ export async function computeCallbackJobsActivity(
   }
 
   // Group candidate jobs by assigned_agent_id
-  const jobsByAgent = new Map<number, typeof jobs>();
+  const jobsByAgent = new Map<string, typeof jobs>();
   for (const j of jobs) {
     if (j.assigned_agent_id !== null) {
-      const list = jobsByAgent.get(j.assigned_agent_id) || [];
+      const agentKey = keyOf(j.assigned_agent_id);
+      const list = jobsByAgent.get(agentKey) || [];
       list.push(j);
-      jobsByAgent.set(j.assigned_agent_id, list);
+      jobsByAgent.set(agentKey, list);
     }
   }
 
   for (const ev of events) {
     if (!ev.agent_id) continue;
-    const candidateJobs = jobsByAgent.get(ev.agent_id);
+    const candidateJobs = jobsByAgent.get(keyOf(ev.agent_id));
     if (!candidateJobs || candidateJobs.length === 0) continue;
 
     const normEvPhone = normalizePhone(ev.target_phone);
@@ -925,11 +935,12 @@ export async function computeCallbackJobsActivity(
     if (!isCall && !isSms) continue;
 
     for (const job of candidateJobs) {
-      const phones = jobPhonesMap.get(job.id);
+      const jobKey = keyOf(job.id);
+      const phones = jobPhonesMap.get(jobKey);
       const phoneMatches = Boolean(normEvPhone && phones && phones.has(normEvPhone));
 
       if (isCall && phoneMatches) {
-        const set = countedCallEvents.get(job.id)!;
+        const set = countedCallEvents.get(jobKey)!;
         if (!set.has(ev.id)) {
           set.add(ev.id);
           const act = result.get(job.id)!;
@@ -941,7 +952,7 @@ export async function computeCallbackJobsActivity(
       } else if (isSms) {
         const regMatches = Boolean(normEvReg && normEvReg === normalizeRegAlphaNumeric(job.vehicle_reg));
         if (phoneMatches || regMatches) {
-          const set = countedSmsEvents.get(job.id)!;
+          const set = countedSmsEvents.get(jobKey)!;
           if (!set.has(ev.id)) {
             set.add(ev.id);
             const act = result.get(job.id)!;
@@ -971,10 +982,7 @@ export async function computeCallbackJobsActivity(
   );
 
   for (const manual of manualAttempts) {
-    // PostgreSQL BIGINT values are returned as strings by pg. getCallbackJobs
-    // therefore keys this map with string job IDs, while test/local adapters
-    // may use numbers. Support both representations.
-    const act = result.get(manual.callback_job_id as any) ?? result.get(Number(manual.callback_job_id));
+    const act = activityByJobKey.get(keyOf(manual.callback_job_id));
     if (!act) continue;
     act.attempt_count = Math.max(act.attempt_count, Number(manual.attempt_count || 0));
     if (
