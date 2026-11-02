@@ -13,6 +13,8 @@ export interface ParsedPendingRow {
   customer_email: string;
   schedule_date: string;
   latest_pending_reason: string;
+  job_status: string;
+  row_number: number;
 }
 
 export interface SkippedRow {
@@ -26,7 +28,7 @@ export interface ParseResult {
   missingHeaders: string[]; // canonical field names that have no matching header
 }
 
-type FieldName = keyof ParsedPendingRow;
+type FieldName = Exclude<keyof ParsedPendingRow, "row_number">;
 
 export const HEADER_ALIASES: Record<FieldName, string[]> = {
   external_id: ["id", "external_id", "job_id"],
@@ -39,9 +41,10 @@ export const HEADER_ALIASES: Record<FieldName, string[]> = {
   customer_email: ["customer_email"],
   schedule_date: ["schedule_date"],
   latest_pending_reason: ["latest_pending_reason"],
+  job_status: ["job_status"],
 };
 
-export const REQUIRED_FIELDS: FieldName[] = ["external_id", "solver_contact", "vehicle_reg", "client_phone"];
+export const REQUIRED_FIELDS: FieldName[] = ["external_id", "solver_contact", "vehicle_reg", "client_phone", "job_status"];
 
 export function normalizeHeader(header: string): string {
   return String(header ?? "")
@@ -94,7 +97,7 @@ export function parsePendingSubmissionRows(rawRows: Array<Record<string, unknown
 
   rawRows.forEach((raw, index) => {
     const rowNumber = index + 2;
-    const out = {} as ParsedPendingRow;
+    const out = { row_number: rowNumber } as ParsedPendingRow;
     for (const field of Object.keys(HEADER_ALIASES) as FieldName[]) {
       const header = fieldToHeader.get(field);
       out[field] = header ? cellToText(raw[header]) : "";
