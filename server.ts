@@ -81,7 +81,10 @@ async function startServer() {
     }
     next();
   });
-  app.use(express.json());
+  // Pending-submission workbooks are converted to JSON in the browser before
+  // upload. A few hundred rows legitimately exceed Express's 100 KB default,
+  // so allow a bounded payload large enough for the operational exports.
+  app.use(express.json({ limit: process.env.JSON_BODY_LIMIT || "2mb" }));
 
   const PORT = Number(process.env.PORT || 3000);
 
@@ -1893,6 +1896,18 @@ function computeActivitySummary(events: any[], totalAgents: number = 0) {
     } catch (err) {
       sendError(res, err, "Error undoing the last upload");
     }
+  });
+
+  // Body-parser errors happen before a route handler, so return JSON here.
+  // This keeps the UI from hiding the actual cause behind a generic message.
+  app.use((err: any, _req: express.Request, res: express.Response, next: express.NextFunction) => {
+    if (err?.type === "entity.too.large") {
+      console.warn(`[HTTP] Rejected JSON payload larger than ${process.env.JSON_BODY_LIMIT || "2mb"}.`);
+      return res.status(413).json({
+        error: "The upload is too large to process. Split the workbook into smaller files or contact an administrator.",
+      });
+    }
+    next(err);
   });
 
   // Vite middleware for development

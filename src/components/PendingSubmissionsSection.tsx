@@ -683,14 +683,23 @@ export default function PendingSubmissionsSection({ isAdmin }: PendingSubmission
     });
 
     if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
+      const responseText = await res.text();
+      let err: any = {};
+      try {
+        err = responseText ? JSON.parse(responseText) : {};
+      } catch {
+        err = {};
+      }
       const problems = Array.isArray(err.invalid_rows)
         ? err.invalid_rows
             .slice(0, 5)
             .map((r: any) => `row ${r.row}${r.external_id ? ` (ID ${r.external_id}${r.vehicle_reg ? `, ${r.vehicle_reg}` : ''})` : ''}: ${r.reason}`)
             .join('; ')
         : '';
-      throw new Error(`${err.error || 'Failed to import file'}${problems ? ` First problems: ${problems}.` : ''}`);
+      const fallback = responseText && !responseText.trim().startsWith('<')
+        ? responseText.trim().slice(0, 300)
+        : `Failed to import file (server returned ${res.status})`;
+      throw new Error(`${err.error || fallback}${problems ? ` First problems: ${problems}.` : ''}`);
     }
 
     const body = await res.json();
