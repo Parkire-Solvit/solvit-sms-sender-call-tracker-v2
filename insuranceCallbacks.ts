@@ -24,6 +24,14 @@ const VALID_AGENT_OUTCOMES = new Set<string>([
   "UNREACHABLE",
 ]);
 
+/** Final callback dispositions count as completed work in the agent KPI. */
+export function callbackOutcomeStatus(outcome: string): CallbackJobStatus {
+  const clean = String(outcome || "").trim().toUpperCase();
+  if (clean === "SCHEDULED") return "GREEN";
+  if (clean === "DECLINED" || clean === "VALUED_ELSEWHERE" || clean === "WRONG_NUMBER") return "RED";
+  return "AMBER";
+}
+
 const MONTHS: Record<string, number> = {
   JANUARY: 0, FEBRUARY: 1, MARCH: 2, APRIL: 3, MAY: 4, JUNE: 5,
   JULY: 6, AUGUST: 7, SEPTEMBER: 8, OCTOBER: 9, NOVEMBER: 10, DECEMBER: 11,
@@ -1059,15 +1067,7 @@ export async function logCallbackOutcome(
     throw new Error(`Invalid outcome '${outcome}'. Allowed values: ${Array.from(VALID_AGENT_OUTCOMES).join(", ")}`);
   }
 
-  let resultingStatus: CallbackJobStatus = "AMBER";
-  if (cleanOutcome === "SCHEDULED") {
-    resultingStatus = "GREEN";
-  } else if (cleanOutcome === "DECLINED" || cleanOutcome === "VALUED_ELSEWHERE") {
-    resultingStatus = "RED";
-  } else {
-    // NOT_PICKING, WRONG_NUMBER, NOT_READY, UNREACHABLE
-    resultingStatus = "AMBER";
-  }
+  const resultingStatus = callbackOutcomeStatus(cleanOutcome);
 
   // Insert callback_job_logs (comment is optional, empty string if not provided)
   await db.execute(

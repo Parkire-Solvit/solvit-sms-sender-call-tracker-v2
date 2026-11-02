@@ -69,8 +69,8 @@ const SESSION_OUTCOME_OPTIONS: OutcomeOption[] = [
   {
     value: 'WRONG_NUMBER',
     label: 'Wrong Number',
-    description: 'Stays Amber · Number incorrect',
-    resultingStatus: 'AMBER',
+    description: 'Goes Red · Final disposition',
+    resultingStatus: 'RED',
   },
   {
     value: 'DECLINED',

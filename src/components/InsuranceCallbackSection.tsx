@@ -100,9 +100,9 @@ const OUTCOME_OPTIONS: OutcomeOption[] = [
   {
     value: 'WRONG_NUMBER',
     label: 'Wrong Number',
-    description: 'Stays Amber · Number incorrect',
-    category: 'NO_AMBER',
-    resultingStatus: 'AMBER',
+    description: 'Goes Red · Final disposition',
+    category: 'NO_RED',
+    resultingStatus: 'RED',
   },
   {
     value: 'DECLINED',
