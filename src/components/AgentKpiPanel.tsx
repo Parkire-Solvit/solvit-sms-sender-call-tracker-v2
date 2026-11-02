@@ -1,5 +1,5 @@
 // V15 src/components/AgentKpiPanel.tsx
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Target, RefreshCw, ChevronDown, Phone, MessageSquare, AlertTriangle, CheckCircle2, Gauge } from 'lucide-react';
 
 export interface AgentKpiPace {
@@ -75,8 +75,13 @@ export default function AgentKpiPanel({ section, focusAgentId = null, focusAgent
         : 'Pending Inspection'
       : SECTION_TITLE[section];
 
-  const load = useCallback(async () => {
-    setLoading(true);
+  // A background refresh keeps the numbers on screen and does not flash the spinner.
+  // Only the first load and the manual refresh button show the spinner.
+  const inFlight = useRef<boolean>(false);
+  const load = useCallback(async (silent: boolean = false) => {
+    if (inFlight.current) return;
+    inFlight.current = true;
+    if (!silent) setLoading(true);
     try {
       const res = await fetch(path);
       if (!res.ok) {
@@ -88,18 +93,32 @@ export default function AgentKpiPanel({ section, focusAgentId = null, focusAgent
     } catch (e) {
       setError((e as Error).message || 'Failed to load the KPI.');
     } finally {
-      setLoading(false);
+      inFlight.current = false;
+      if (!silent) setLoading(false);
     }
   }, [path]);
 
+  // Load on first show, and again whenever the parent signals a change (refreshToken).
+  const hasLoadedOnce = useRef<boolean>(false);
   useEffect(() => {
-    load();
+    load(hasLoadedOnce.current);
+    hasLoadedOnce.current = true;
   }, [load, refreshToken]);
 
-  // Refresh every 5 minutes while the panel is on screen
+  // Near real time: refresh every 15 seconds while the tab is visible, so changes made by
+  // other people show up too. Refresh straight away when the tab comes back into view.
   useEffect(() => {
-    const timer = setInterval(load, 5 * 60 * 1000);
-    return () => clearInterval(timer);
+    const timer = setInterval(() => {
+      if (!document.hidden) void load(true);
+    }, 15 * 1000);
+    const onVisible = () => {
+      if (!document.hidden) void load(true);
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      clearInterval(timer);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
   }, [load]);
 
   const rows = useMemo(() => {
@@ -136,7 +155,7 @@ export default function AgentKpiPanel({ section, focusAgentId = null, focusAgent
         </button>
         <button
           type="button"
-          onClick={load}
+          onClick={() => load()}
           disabled={loading}
           className="p-2 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-600 transition-all shadow-2xs cursor-pointer disabled:opacity-50"
           title="Refresh the KPI"
