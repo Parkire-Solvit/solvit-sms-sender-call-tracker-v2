@@ -36,7 +36,8 @@ export type KpiSection = "callbacks" | "pending_submissions";
 export interface AgentKpiReport {
   section: KpiSection;
   generated_at: string;
-  window_days: number;
+  /** Null means all historical completed records are included. */
+  window_days: number | null;
   pace_lookback_working_days: number;
   requirements: { calls: number; sms: number };
   /** Label for records closed because an upload no longer contained them. */
@@ -74,17 +75,18 @@ async function buildReport(
   agents: Array<{ id: number; name: string }>,
   records: KpiRecord[],
   req: { calls: number; sms: number },
-  uploadClosedLabel: string
+  uploadClosedLabel: string,
+  windowDays: number | null
 ): Promise<AgentKpiReport> {
   const sys = await getSystemSettings(db);
-  const kpi = computeAgentKpis(records, agents, req, nowMs);
+  const kpi = computeAgentKpis(records, agents, req, nowMs, windowDays);
   const lookStart = lookbackStartMs(nowMs, sys.working_hours_schedule, sys.clock_mode) ?? nowMs - 30 * DAY_MS;
   const callTimes = await loadCallTimes(db, agents.map((a) => a.id), lookStart);
 
   return {
     section,
     generated_at: new Date(nowMs).toISOString(),
-    window_days: KPI_WINDOW_DAYS,
+    window_days: windowDays,
     pace_lookback_working_days: PACE_LOOKBACK_WORKING_DAYS,
     requirements: req,
     upload_closed_label: uploadClosedLabel,
@@ -144,7 +146,7 @@ export async function getPendingSubmissionAgentKpis(
     };
   });
 
-  return buildReport(db, "pending_submissions", nowMs, agents, records, { calls: settings.max_attempts, sms: settings.max_sms_attempts }, "Closed by upload");
+  return buildReport(db, "pending_submissions", nowMs, agents, records, { calls: settings.max_attempts, sms: settings.max_sms_attempts }, "Closed by upload", KPI_WINDOW_DAYS);
 }
 
 // ---------------------------------------------------------------------------
@@ -172,13 +174,10 @@ export async function getCallbackAgentKpis(db: DbAdapter, nowMs: number = Date.n
   await closeMaturedCallbackJobs(db);
   const settings = await getCallbackSettings(db);
   const agents = (await getValidCallbackAgents(db, settings.callback_team_tag)).map((a) => ({ id: num(a.id), name: a.name }));
-  const lowerBound = dateOnly(nowMs - (KPI_WINDOW_DAYS + 1) * DAY_MS);
-
   const rows = await db.queryAll<any>(
     `SELECT id, assigned_agent_id, client_phone, vehicle_reg, status, latest_outcome, closed_at, initiated_date, created_at
      FROM callback_jobs
-     WHERE status = 'AMBER' OR (closed_at IS NOT NULL AND closed_at >= ?)`,
-    [lowerBound]
+     WHERE status IN ('AMBER', 'GREEN', 'RED')`
   );
   const jobs = rows.map((r) => ({ ...r, id: num(r.id), assigned_agent_id: r.assigned_agent_id === null || r.assigned_agent_id === undefined ? null : num(r.assigned_agent_id) }));
   const open = jobs.filter((j) => j.status === "AMBER");
@@ -198,6 +197,6 @@ export async function getCallbackAgentKpis(db: DbAdapter, nowMs: number = Date.n
     };
   });
 
-  return buildReport(db, "callbacks", nowMs, agents, records, { calls: settings.max_attempts, sms: settings.max_sms_attempts }, "Closed by upload");
+  return buildReport(db, "callbacks", nowMs, agents, records, { calls: settings.max_attempts, sms: settings.max_sms_attempts }, "Closed by upload", null);
 }
 // V15 END agentKpiService.ts

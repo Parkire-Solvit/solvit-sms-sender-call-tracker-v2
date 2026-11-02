@@ -36,7 +36,7 @@ export interface AgentKpiRow {
 export interface AgentKpiReportData {
   section: 'callbacks' | 'pending_submissions';
   generated_at: string;
-  window_days: number;
+  window_days: number | null;
   pace_lookback_working_days: number;
   requirements: { calls: number; sms: number };
   upload_closed_label: string;
@@ -247,7 +247,7 @@ export default function AgentKpiPanel({ section, focusAgentId = null, focusAgent
 
           {report && (
             <p className="text-[10px] text-slate-400">
-              Counts records that are open now or were closed in the last {report.window_days} days. Records closed because an upload no longer contained them are shown separately as {report.upload_closed_label.toLowerCase()} and do not count as completed. Rates use outgoing calls over the last {report.pace_lookback_working_days} working days.
+              Counts records that are open now or {report.window_days === null ? 'were completed at any time' : `were closed in the last ${report.window_days} days`}. Records closed because an upload no longer contained them are shown separately as {report.upload_closed_label.toLowerCase()} and do not count as completed. Rates use outgoing calls over the last {report.pace_lookback_working_days} working days.
             </p>
           )}
         </div>

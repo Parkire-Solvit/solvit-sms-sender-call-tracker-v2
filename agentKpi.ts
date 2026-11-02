@@ -87,7 +87,7 @@ export function computeAgentKpis(
   agents: AgentIdentity[],
   req: KpiRequirements,
   nowMs: number,
-  windowDays: number = KPI_WINDOW_DAYS
+  windowDays: number | null = KPI_WINDOW_DAYS
 ): KpiResult {
   const byAgent = new Map<number, AgentKpi>();
   const customers = new Map<number, Map<string, { calls: number; sms: number }>>();
@@ -113,7 +113,7 @@ export function computeAgentKpis(
     customers.set(a.id, new Map());
   }
 
-  const windowStart = nowMs - windowDays * DAY_MS;
+  const windowStart = windowDays === null ? null : nowMs - windowDays * DAY_MS;
   let unassignedOpen = 0;
 
   for (const r of records) {
@@ -144,7 +144,7 @@ export function computeAgentKpis(
 
     // Closed record: only those closed inside the window count. A missing or unreadable closed_at is treated as inside.
     const closedMs = parseDbTimestamp(r.closed_at);
-    if (!isNaN(closedMs) && closedMs < windowStart) continue;
+    if (windowStart !== null && !isNaN(closedMs) && closedMs < windowStart) continue;
     if (r.closed_by_upload) kpi.closed_by_upload += 1;
     else kpi.completed += 1;
   }
