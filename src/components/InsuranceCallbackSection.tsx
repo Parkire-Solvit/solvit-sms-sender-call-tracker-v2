@@ -695,6 +695,7 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
       );
       fetchJobs();
       fetchReviewAndUnmatchedCounts();
+      setKpiRefreshToken((value) => value + 1);
     } catch (err: any) {
       console.error('Error assigning callback job:', err);
       alert('Error updating assignment: ' + err.message);
@@ -940,6 +941,7 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
       });
       setSelectedUnassignedJobIds(new Set());
       await fetchJobs();
+      setKpiRefreshToken((value) => value + 1);
     } catch (err: any) {
       setBulkMessage({ type: 'error', text: err.message || 'Error bulk assigning jobs' });
     } finally {
@@ -1471,6 +1473,7 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
       setUploadFile(null);
       if (fileInputRef.current) fileInputRef.current.value = '';
       fetchJobs();
+      setKpiRefreshToken((value) => value + 1);
     } catch (err) {
       console.error('Confirm import error:', err);
       setUploadError((err as Error).message);
