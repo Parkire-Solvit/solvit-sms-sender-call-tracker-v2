@@ -13,7 +13,8 @@ import {
   Filter,
   Trash2,
   FileSpreadsheet,
-  Layers
+  Layers,
+  UserPlus
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { AgentComplianceSummary, TagGroupCompliance, Obligation, TurnaroundTimeReport } from '../types/compliance';
@@ -25,6 +26,7 @@ interface ComplianceAgentTableProps {
   selectedTag: string;
   onSelectTag: (tag: string) => void;
   onEditAgentTag: (agent: { id: number; name: string; tag: string }) => void;
+  onAddAgent: () => void;
   onInspectAgent: (agentId: number) => void;
   onDeleteAgent?: (agent: { id: number; name: string }) => void;
   onRemoveAgent?: (agent: { id: number; name: string }) => void;
@@ -42,6 +44,7 @@ export const ComplianceAgentTable: React.FC<ComplianceAgentTableProps> = ({
   selectedTag,
   onSelectTag,
   onEditAgentTag,
+  onAddAgent,
   onInspectAgent,
   onDeleteAgent,
   onRemoveAgent,
@@ -171,6 +174,15 @@ export const ComplianceAgentTable: React.FC<ComplianceAgentTableProps> = ({
 
           {/* Export Button */}
           <div className="flex flex-wrap items-center gap-2.5">
+            <button
+              id="btn-add-agent"
+              type="button"
+              onClick={onAddAgent}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-bold bg-[#ff353e] hover:bg-[#e02831] text-white shadow-xs transition-all cursor-pointer"
+            >
+              <UserPlus className="w-3.5 h-3.5" />
+              <span>Add Agent</span>
+            </button>
             <button
               id="btn-export-agent-compliance-excel"
               type="button"

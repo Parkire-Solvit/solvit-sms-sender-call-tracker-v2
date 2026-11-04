@@ -59,6 +59,7 @@ import { getDataResetPreview, buildDataBackup, deleteAllRecords, undoLastUpload,
 import { claimOutcomeReceipt, releaseOutcomeReceipt } from "./outcomeReceipts";
 import { isSolverSmsEnabled } from "./solverSmsSwitch";
 import { getPendingMaxAttemptsTimeline, filterMaxAttemptsGroups, buildPendingMaxAttemptsWorkbook } from "./pendingMaxAttemptsReport";
+import { createAgent } from "./agentManagement";
 
 // SSE Clients for real-time agent name push
 const agentClients = new Map<number, any>();
@@ -605,6 +606,16 @@ async function startServer() {
     } catch (err) {
       console.error("[API] Unable to reactivate agent:", err);
       res.status(500).json({ error: "Database error" });
+    }
+  });
+
+  app.post("/api/agents", requireAdmin, async (req, res) => {
+    try {
+      const agent = await createAgent(db, req.body || {});
+      await syncPendingAssignments("agent created");
+      res.status(201).json({ success: true, agent });
+    } catch (err) {
+      sendError(res, err, "Unable to create agent");
     }
   });
 

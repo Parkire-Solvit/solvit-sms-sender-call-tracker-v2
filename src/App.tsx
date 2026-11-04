@@ -633,6 +633,10 @@ function ComplianceAdminDashboard({
   const [customNewTag, setCustomNewTag] = useState<string>('');
   const [selectedTagValue, setSelectedTagValue] = useState<string>('Uncategorised');
   const [isUpdatingTag, setIsUpdatingTag] = useState<boolean>(false);
+  const [showAddAgent, setShowAddAgent] = useState(false);
+  const [newAgent, setNewAgent] = useState({ name: '', phone_number: '', tag: 'Callback Team' });
+  const [addAgentError, setAddAgentError] = useState('');
+  const [isAddingAgent, setIsAddingAgent] = useState(false);
 
   // Agent deletion state with type-to-confirm protection
   const [agentToDelete, setAgentToDelete] = useState<{ id: number, name: string } | null>(null);
@@ -730,6 +734,28 @@ function ComplianceAdminDashboard({
       alert('Failed to update tag. Please check server connection.');
     } finally {
       setIsUpdatingTag(false);
+    }
+  };
+
+  const addAgent = async (e: FormEvent) => {
+    e.preventDefault();
+    setIsAddingAgent(true);
+    setAddAgentError('');
+    try {
+      const res = await fetch('/api/agents', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(newAgent),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.error || 'Failed to add agent');
+      setShowAddAgent(false);
+      setNewAgent({ name: '', phone_number: '', tag: 'Callback Team' });
+      onRefresh();
+    } catch (err) {
+      setAddAgentError((err as Error).message);
+    } finally {
+      setIsAddingAgent(false);
     }
   };
 
@@ -977,6 +1003,11 @@ function ComplianceAdminDashboard({
         selectedTag={selectedTag}
         onSelectTag={(tag) => setSelectedTag(tag)}
         onEditAgentTag={(agent) => openEditTagModal(agent)}
+        onAddAgent={() => {
+          setAddAgentError('');
+          setNewAgent({ name: '', phone_number: '', tag: 'Callback Team' });
+          setShowAddAgent(true);
+        }}
         onInspectAgent={(agentId) => setSelectedAgentId(agentId.toString())}
         onDeleteAgent={(agent) => openDeleteAgentModal(agent)}
         onRemoveAgent={(agent) => openDeleteAgentModal(agent)}
@@ -987,6 +1018,67 @@ function ComplianceAdminDashboard({
         endDate={endDate}
         onInspectContact={(phone) => onInspectContact(phone)}
       />
+
+      {showAddAgent && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-sm p-4">
+          <form onSubmit={addAgent} className="bg-white rounded-2xl p-6 shadow-2xl border border-slate-200 w-full max-w-md">
+            <div className="flex items-center gap-3 mb-5">
+              <div className="w-10 h-10 rounded-xl bg-red-50 text-[#ff353e] flex items-center justify-center">
+                <Users className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-base font-bold text-slate-900">Add agent</h3>
+                <p className="text-xs text-slate-500">Create an operational agent for job assignment and tracking.</p>
+              </div>
+            </div>
+
+            <div className="space-y-4">
+              <div>
+                <label htmlFor="new-agent-name" className="text-xs font-bold text-slate-700 block mb-1.5">Agent name</label>
+                <input
+                  id="new-agent-name"
+                  autoFocus
+                  required
+                  maxLength={191}
+                  value={newAgent.name}
+                  onChange={(e) => setNewAgent({ ...newAgent, name: e.target.value })}
+                  placeholder="e.g. Martin"
+                  className="w-full px-3.5 py-2.5 border border-slate-300 rounded-xl text-sm outline-none focus:ring-2 focus:ring-[#ff353e]/30 focus:border-[#ff353e]"
+                />
+              </div>
+              <div>
+                <label htmlFor="new-agent-phone" className="text-xs font-bold text-slate-700 block mb-1.5">Phone number <span className="font-normal text-slate-400">(optional)</span></label>
+                <input
+                  id="new-agent-phone"
+                  value={newAgent.phone_number}
+                  onChange={(e) => setNewAgent({ ...newAgent, phone_number: e.target.value })}
+                  placeholder="e.g. 0712345678"
+                  className="w-full px-3.5 py-2.5 border border-slate-300 rounded-xl text-sm outline-none focus:ring-2 focus:ring-[#ff353e]/30 focus:border-[#ff353e]"
+                />
+              </div>
+              <div>
+                <label htmlFor="new-agent-tag" className="text-xs font-bold text-slate-700 block mb-1.5">Team</label>
+                <select
+                  id="new-agent-tag"
+                  value={newAgent.tag}
+                  onChange={(e) => setNewAgent({ ...newAgent, tag: e.target.value })}
+                  className="w-full px-3.5 py-2.5 border border-slate-300 rounded-xl text-sm bg-white outline-none focus:ring-2 focus:ring-[#ff353e]/30 focus:border-[#ff353e]"
+                >
+                  {existingTagsList.map((tag) => <option key={tag} value={tag}>{tag}</option>)}
+                </select>
+              </div>
+              {addAgentError && <p className="text-xs font-semibold text-red-700 bg-red-50 border border-red-200 rounded-xl p-3">{addAgentError}</p>}
+            </div>
+
+            <div className="flex justify-end gap-2.5 mt-6 pt-4 border-t border-slate-100">
+              <button type="button" disabled={isAddingAgent} onClick={() => setShowAddAgent(false)} className="px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-xl">Cancel</button>
+              <button type="submit" disabled={isAddingAgent || newAgent.name.trim().length < 2} className="px-4 py-2 text-xs font-bold text-white bg-[#ff353e] hover:bg-[#e02831] rounded-xl disabled:opacity-50">
+                {isAddingAgent ? 'Adding...' : 'Add agent'}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
 
       {/* 4. CUSTOMER SERVICE PERFORMANCE SUMMARY */}
       <AgentPerformanceNarrative
