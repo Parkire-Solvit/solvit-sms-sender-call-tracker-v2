@@ -375,7 +375,13 @@ export async function recordOptionalFolderAbsent(mailbox: string): Promise<void>
   );
 }
 
-export async function listEmailThreads(filter: string, ownerEmail?: string, receivedFrom?: string, receivedTo?: string): Promise<SqlRow[]> {
+export function emailThreadSearchPattern(value?: string): string | null {
+  const term = value?.trim();
+  if (!term) return null;
+  return `%${term.replace(/[\\%_]/g, '\\$&')}%`;
+}
+
+export async function listEmailThreads(filter: string, ownerEmail?: string, receivedFrom?: string, receivedTo?: string, search?: string): Promise<SqlRow[]> {
   const conditions: string[] = ['t.sla_exclusion_reason IS NULL'];
   const params: unknown[] = [];
   if (filter === 'unassigned') conditions.push("t.status='UNASSIGNED'");
@@ -394,6 +400,22 @@ export async function listEmailThreads(filter: string, ownerEmail?: string, rece
   if (receivedTo) {
     params.push(receivedTo);
     conditions.push(`(t.received_at AT TIME ZONE 'Africa/Nairobi')::date <= $${params.length}::date`);
+  }
+  const searchPattern = emailThreadSearchPattern(search);
+  if (searchPattern) {
+    params.push(searchPattern);
+    const parameter = `$${params.length}`;
+    conditions.push(`(
+      t.id::text ILIKE ${parameter} ESCAPE E'\\\\' OR
+      t.subject ILIKE ${parameter} ESCAPE E'\\\\' OR
+      t.customer_email ILIKE ${parameter} ESCAPE E'\\\\' OR
+      COALESCE(m.display_name, '') ILIKE ${parameter} ESCAPE E'\\\\' OR
+      COALESCE(m.email, '') ILIKE ${parameter} ESCAPE E'\\\\' OR
+      COALESCE(t.assignment_reason, '') ILIKE ${parameter} ESCAPE E'\\\\' OR
+      COALESCE(t.responded_by, '') ILIKE ${parameter} ESCAPE E'\\\\' OR
+      COALESCE(t.resolved_by, '') ILIKE ${parameter} ESCAPE E'\\\\' OR
+      COALESCE(t.resolution_note, '') ILIKE ${parameter} ESCAPE E'\\\\'
+    )`);
   }
   return (await getPostgresPool().query<SqlRow>(
     `SELECT t.id,t.subject,t.customer_email,t.received_at,t.first_response_at,t.resolved_at,

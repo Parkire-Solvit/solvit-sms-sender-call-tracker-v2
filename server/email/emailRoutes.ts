@@ -91,7 +91,9 @@ export function createEmailRouter(config: EmailRuntimeConfig | null): Router {
     if (receivedFrom && receivedTo && receivedFrom > receivedTo) {
       return response.status(400).json({ error: 'Received date range starts after it ends' });
     }
-    response.json(await listEmailThreads(filter, owner || undefined, receivedFrom || undefined, receivedTo || undefined));
+    const search = typeof request.query.search === 'string' ? request.query.search.trim() : '';
+    if (search.length > 200) return response.status(400).json({ error: 'Search must be 200 characters or less' });
+    response.json(await listEmailThreads(filter, owner || undefined, receivedFrom || undefined, receivedTo || undefined, search || undefined));
   }));
   router.get('/alerts', safe(async (_request, response) => response.json(await listEmailAlerts(response.locals.emailOwner || undefined))));
   router.get('/threads/:id/outlook', safe(async (request,response) => {
