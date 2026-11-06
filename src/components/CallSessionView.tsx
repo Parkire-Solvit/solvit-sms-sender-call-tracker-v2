@@ -23,6 +23,7 @@ import {
 } from 'lucide-react';
 import { CallbackJob, CallbackSettings, CallbackJobLog } from '../types/callbacks';
 import { saveOutcome } from '../lib/safeSave';
+import { callbackReferenceMs, compareCallbacksOldestFirst } from '../lib/callbackOrder';
 import { callbackCommentProblem, isCommentRequiredForOutcome, MIN_REQUIRED_COMMENT_LENGTH } from '../lib/callbackComment';
 
 export interface CallSessionClientGroup {
@@ -104,30 +105,10 @@ function getOutcomeLabel(outcome?: string | null): string {
   return OUTCOME_LABEL_MAP[outcome] || outcome.replace(/_/g, ' ');
 }
 
-function parseInitiatedDate(dateStr?: string | null): number {
-  if (!dateStr || !String(dateStr).trim()) return Infinity;
-  const s = String(dateStr).trim();
-  const parsed = Date.parse(s);
-  if (!isNaN(parsed)) return parsed;
-
-  const parts = s.split(/[\/\-\.]/);
-  if (parts.length === 3 && parts[2].length === 4) {
-    const d = parseInt(parts[0], 10);
-    const m = parseInt(parts[1], 10) - 1;
-    const y = parseInt(parts[2], 10);
-    const testDate = new Date(y, m, d).getTime();
-    if (!isNaN(testDate)) return testDate;
-  }
-  return Infinity;
-}
-
 function getGroupEarliestDate(vehicles: CallbackJob[]): number {
   let min = Infinity;
   for (const v of vehicles) {
-    let t = parseInitiatedDate(v.initiated_date);
-    if (t === Infinity && v.created_at) {
-      t = parseInitiatedDate(v.created_at);
-    }
+    const t = callbackReferenceMs(v);
     if (t < min) min = t;
   }
   return min;
@@ -267,8 +248,9 @@ export const CallSessionView: React.FC<CallSessionViewProps> = ({
       return g;
     });
 
-    // Sort by earliest initiated_date, oldest first
-    groups.sort((a, b) => a.earliestDate - b.earliestDate);
+    // Customers by their earliest initiated date, oldest first (undated last). A customer's vehicles are oldest first too.
+    groups.forEach((g) => g.vehicles.sort(compareCallbacksOldestFirst));
+    groups.sort((a, b) => (a.earliestDate === b.earliestDate ? 0 : a.earliestDate < b.earliestDate ? -1 : 1));
     return groups;
   };
 

@@ -14,6 +14,7 @@ import {
   CallbackJobLog
 } from "./src/types/callbacks";
 import { callbackCommentProblem } from "./src/lib/callbackComment";
+import { sortCallbacksOldestFirst } from "./src/lib/callbackOrder";
 
 const VALID_AGENT_OUTCOMES = new Set<string>([
   "SCHEDULED",
@@ -1210,6 +1211,7 @@ export async function getCallbackJobs(
     params.push(term, phoneSearch, term, normSearch, term);
   }
 
+  // The final order (oldest first) is applied in code below, because initiated_date is free text in mixed formats.
   query += ` ORDER BY j.channel_partner ASC, j.client_phone ASC, j.created_at DESC`;
 
   const jobs = await db.queryAll<any>(query, params);
@@ -1231,7 +1233,7 @@ export async function getCallbackJobs(
     list.push({ id: pr.id, phone_normalised: pr.phone_normalised, source: pr.source });
   }
 
-  return jobs.map((job) => {
+  const mapped = jobs.map((job) => {
     const act = metricsMap.get(job.id) || {
       attempt_count: 0,
       sms_count: 0,
@@ -1271,6 +1273,9 @@ export async function getCallbackJobs(
       max_sms_attempts: settings.max_sms_attempts,
     };
   });
+
+  // Oldest outstanding work first: partners by their oldest job, then customers, then vehicles (see callbackOrder.ts).
+  return sortCallbacksOldestFirst(mapped);
 }
 
 /**

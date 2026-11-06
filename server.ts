@@ -1406,10 +1406,8 @@ function computeActivitySummary(events: any[], totalAgents: number = 0) {
       if (!outcome) {
         return res.status(400).json({ error: "Outcome is required." });
       }
-      if (!comment || !String(comment).trim()) {
-        return res.status(400).json({ error: "Comment is required." });
-      }
-      // Customer Rejected and Done Elsewhere need a real explanation. Checked before any receipt is claimed.
+      // Only Customer Rejected and Done Elsewhere need a comment (at least 10 characters). Every other outcome may
+      // have none. Checked before any receipt is claimed.
       const commentProblem = callbackCommentProblem(outcome, comment);
       if (commentProblem) return res.status(400).json({ error: commentProblem });
 

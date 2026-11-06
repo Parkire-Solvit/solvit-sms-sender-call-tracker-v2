@@ -174,8 +174,29 @@ async function main() {
   }
   assert((await count("SELECT COUNT(*) AS n FROM callback_job_logs WHERE callback_job_id = ?", [jid])) === 0, "refused outcomes wrote nothing");
   assert((await db.queryOne("SELECT status FROM callback_jobs WHERE id = ?", [jid])).status === "AMBER", "the record stays open after a refusal");
+  // Other outcomes may have no comment at all.
+  const optional = await cb.logCallbackOutcome(db, jid, "NOT_PICKING", "", "Mary Muriuki");
+  assert(optional.status === "AMBER" && optional.latest_outcome === "NOT_PICKING", "Not Picking is accepted with no comment");
   const ok = await cb.logCallbackOutcome(db, jid, "DECLINED", "Customer refused the inspection.", "Mary Muriuki");
   assert(ok.status === "RED", "a real comment is accepted and closes the record");
+
+  // ---- 7. Callbacks list: oldest first (partners by oldest job, then customers, then vehicles) ----
+  await db.execute("DELETE FROM callback_job_logs");
+  await db.execute("DELETE FROM callback_job_phones");
+  await db.execute("DELETE FROM callback_jobs");
+  const cbRow2 = (i: number, partner: string, phone: string, initiated: string) => ({
+    vehicle_reg: `KCC ${String(100 + i)}A`, client_name: `Client ${i}`, client_phone: phone,
+    customer_email: "", channel_partner: partner, initiated_date: initiated, reason: "x",
+  });
+  await cb.importCallbackJobs(db, { file_name: "order.xlsx", imported_by: "Caroline", rows: [
+    cbRow2(1, "Alpha", "0733100001", "2026-10-05"),
+    cbRow2(2, "Alpha", "0733100001", "2026-10-02"),
+    cbRow2(3, "Alpha", "0733100002", "2026-09-30"),
+    cbRow2(4, "Zulu", "0733100009", "2026-08-01"),
+    cbRow2(5, "Mike", "0733100005", "2026-09-15"),
+  ] });
+  const ordered = await cb.getCallbackJobs(db, {});
+  assert(ordered.map((j: any) => String(j.vehicle_reg_raw)).join("|") === ["KCC 104A", "KCC 105A", "KCC 103A", "KCC 102A", "KCC 101A"].join("|"), `callbacks are oldest first (got ${ordered.map((j: any) => j.vehicle_reg_raw).join("|")})`);
 
   console.log("All pending ownership DB tests passed!");
 }

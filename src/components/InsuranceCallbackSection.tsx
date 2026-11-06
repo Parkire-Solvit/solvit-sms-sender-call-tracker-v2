@@ -51,6 +51,7 @@ import {
 import { CallSessionView } from './CallSessionView';
 import DataResetPanel from './DataResetPanel';
 import { saveOutcome } from '../lib/safeSave';
+import { sortCallbacksOldestFirst } from '../lib/callbackOrder';
 import { callbackCommentProblem, isCommentRequiredForOutcome, MIN_REQUIRED_COMMENT_LENGTH } from '../lib/callbackComment';
 import { OnboardingTour } from './OnboardingTour';
 import { AgentReviewModal } from './AgentReviewModal';
@@ -1609,7 +1610,8 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
       Map<string, { client_name: string | null; client_phone_raw: string; vehicles: CallbackJob[] }>
     >();
 
-    filteredJobs.forEach((job) => {
+    // Oldest outstanding work first: partners by their oldest visible job, then customers, then vehicles.
+    sortCallbacksOldestFirst<CallbackJob>(filteredJobs).forEach((job) => {
       const partner = job.channel_partner || 'Unassigned Partner';
       if (!partnerMap.has(partner)) {
         partnerMap.set(partner, new Map());
