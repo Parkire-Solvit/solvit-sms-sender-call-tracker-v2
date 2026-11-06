@@ -5,7 +5,9 @@ import { initDatabase, getDb, getPostgresPool } from "./db";
 import { getSystemSettings, updateSystemSettings, getSettingsChangeLogs, updateDailySummaryLastSentDate } from "./settingsManager";
 import { generateAndSendDailySummary, getNairobiDate } from './dailySummaryEmail';
 import { evaluateCompliance, RawEvent, RawAgent } from "./complianceEngine";
-import { clearAdminSession, credentialsMatch, isAdminRequest, requireAdmin, setAdminSession } from './server/auth/adminSession';
+import { attachAuth, authContext, clearAdminSession, requireAdmin, requireAuth, requireSection, setUserSession } from './server/auth/adminSession';
+import { loadAuthContext } from './server/auth/accountLoader';
+import { createUserAccount, listAgentOptions, listUserAccounts, updateUserAccount } from './server/auth/userAccounts';
 import { clearEmailMemberSession, emailMember } from './server/auth/emailMemberSession';
 import { beginMicrosoftEmailLogin, completeMicrosoftEmailLogin, microsoftEmailLoginAvailable } from './server/auth/microsoftEmailLogin';
 import { createEmailRouter } from './server/email/emailRoutes';
@@ -98,6 +100,18 @@ async function startServer() {
   // Ensure default system settings exist
   await getSystemSettings(db);
 
+  // Who is behind each API request, and which sections they may open, is read from the database every time, so a
+  // demoted, deactivated, archived or re-tagged account is affected at once. Must come before every guarded route.
+  app.use('/api', attachAuth((userId) => loadAuthContext(db, userId)));
+
+  // An agent login always logs work under its own agent name, so nobody can record an outcome as a colleague.
+  // Administrators may still name the person they are logging for.
+  const loggedByFor = (req: express.Request, requested: unknown): unknown => {
+    const account = authContext(req);
+    if (account && account.role === 'agent') return account.agentName || account.displayName;
+    return requested;
+  };
+
   // Seed channel-partner → agent allocations for the callbacks feature
   await seedChannelPartnerAllocations(db);
   await backfillAdditionalImportPhones(db);
@@ -164,12 +178,14 @@ async function startServer() {
         return res.status(400).json({ error: "Username and password are required" });
       }
 
-      const user = await db.queryOne<{ id: number; username: string; password_hash: string; display_name: string; active: any }>(
-        `SELECT id, username, password_hash, display_name, active FROM users WHERE LOWER(username) = LOWER(?)`,
+      const user = await db.queryOne<{ id: number; username: string; password_hash: string; display_name: string; active: any; role: string }>(
+        `SELECT id, username, password_hash, display_name, active, role FROM users WHERE LOWER(username) = LOWER(?)`,
         [submittedUser]
       );
       const isActive = user && (user.active === true || user.active === 1);
-      const isValid = isActive ? await verifyPassword(submittedPass, user!.password_hash) : false;
+      // An account whose agent record is archived, or that has no section to open, cannot sign in.
+      const context = isActive ? await loadAuthContext(db, Number(user!.id)) : null;
+      const isValid = context ? await verifyPassword(submittedPass, user!.password_hash) : false;
 
       if (!isValid) {
         attempt.count++;
@@ -178,8 +194,8 @@ async function startServer() {
       }
 
       loginAttempts.delete(key);
-      setAdminSession(req, res);
-      res.json({ success: true, role: 'admin', display_name: user!.display_name });
+      setUserSession(req, res, Number(user!.id));
+      res.json({ success: true, role: context!.role, sections: context!.sections, display_name: user!.display_name, agent_name: context!.agentName });
     } catch (err) {
       console.error("[AUTH] Login error:", err);
       res.status(500).json({ error: "Authentication failed" });
@@ -187,8 +203,17 @@ async function startServer() {
   });
 
   app.get('/api/session', async (req, res) => {
-    const admin = isAdminRequest(req);
-    if (admin) return res.json({ authenticated: true, role: 'admin', emailLoginAvailable: Boolean(emailRuntime) && microsoftEmailLoginAvailable() });
+    const account = authContext(req);
+    if (account) {
+      return res.json({
+        authenticated: true,
+        role: account.role,
+        sections: account.sections,
+        display_name: account.displayName,
+        agent_name: account.agentName,
+        emailLoginAvailable: Boolean(emailRuntime) && microsoftEmailLoginAvailable(),
+      });
+    }
     const email = emailMember(req);
     if (emailRuntime && email && emailRuntime.mailboxes.includes(email)) {
       try {
@@ -203,103 +228,39 @@ async function startServer() {
   });
   app.post('/api/logout', (req, res) => { clearAdminSession(req, res); clearEmailMemberSession(req, res); res.json({ success: true }); });
 
-  // GET /api/users - returns all accounts omitting password_hash
-  app.get("/api/users", requireAdmin, async (req, res) => {
+  // GET /api/users - returns all accounts omitting password_hash, with the agent each one is linked to
+  app.get("/api/users", requireAdmin, async (_req, res) => {
     try {
-      const users = await db.queryAll<{ id: number; username: string; display_name: string; active: any; created_at: string }>(
-        `SELECT id, username, display_name, active, created_at FROM users ORDER BY id ASC`
-      );
-      const normalized = users.map((u) => ({
-        id: u.id,
-        username: u.username,
-        display_name: u.display_name,
-        active: Boolean(u.active),
-        created_at: u.created_at,
-      }));
-      res.json(normalized);
+      res.json(await listUserAccounts(db));
     } catch (err) {
-      console.error("[API] Error fetching users:", err);
-      res.status(500).json({ error: "Failed to fetch users" });
+      sendError(res, err, "Failed to fetch users");
     }
   });
 
-  // POST /api/users - creates an account
+  // GET /api/users/agent-options - active agents a login can be linked to (and which already have a login)
+  app.get("/api/users/agent-options", requireAdmin, async (_req, res) => {
+    try {
+      res.json(await listAgentOptions(db));
+    } catch (err) {
+      sendError(res, err, "Failed to fetch agents");
+    }
+  });
+
+  // POST /api/users - creates an account (role admin or agent, optionally linked to an agent)
   app.post("/api/users", requireAdmin, async (req, res) => {
     try {
-      const { username, display_name, password } = req.body || {};
-      const cleanUser = (username || "").trim();
-      const cleanName = (display_name || "").trim() || cleanUser;
-      const cleanPass = (password || "").trim();
-
-      if (!cleanUser || !cleanPass) {
-        return res.status(400).json({ error: "Username and password are required" });
-      }
-
-      const existing = await db.queryOne<{ id: number }>(
-        `SELECT id FROM users WHERE LOWER(username) = LOWER(?)`,
-        [cleanUser]
-      );
-      if (existing) {
-        return res.status(409).json({ error: `Username "${cleanUser}" already exists` });
-      }
-
-      const passwordHash = await hashPassword(cleanPass);
-      const result = await db.execute(
-        `INSERT INTO users (username, password_hash, display_name, active, created_at, updated_at)
-         VALUES (?, ?, ?, TRUE, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
-        [cleanUser, passwordHash, cleanName]
-      );
-
-      res.status(201).json({
-        id: result.lastInsertId,
-        username: cleanUser,
-        display_name: cleanName,
-        active: true,
-      });
+      res.status(201).json(await createUserAccount(db, req.body || {}));
     } catch (err) {
-      console.error("[API] Error creating user:", err);
-      res.status(500).json({ error: "Failed to create user" });
+      sendError(res, err, "Failed to create user");
     }
   });
 
-  // PATCH /api/users/:id - updates display_name and/or active flag
+  // PATCH /api/users/:id - updates display name, active flag, role and/or the linked agent
   app.patch("/api/users/:id", requireAdmin, async (req, res) => {
     try {
-      const id = parseInt(req.params.id, 10);
-      const { display_name, active } = req.body || {};
-
-      const user = await db.queryOne<{ id: number }>(`SELECT id FROM users WHERE id = ?`, [id]);
-      if (!user) return res.status(404).json({ error: "User not found" });
-
-      const updates: string[] = [];
-      const params: any[] = [];
-
-      if (display_name !== undefined) {
-        updates.push("display_name = ?");
-        params.push(String(display_name).trim());
-      }
-      if (active !== undefined) {
-        updates.push("active = ?");
-        params.push(active ? true : false);
-      }
-
-      if (updates.length > 0) {
-        updates.push("updated_at = CURRENT_TIMESTAMP");
-        params.push(id);
-        await db.execute(`UPDATE users SET ${updates.join(", ")} WHERE id = ?`, params);
-      }
-
-      const updated = await db.queryOne<{ id: number; username: string; display_name: string; active: any; created_at: string }>(
-        `SELECT id, username, display_name, active, created_at FROM users WHERE id = ?`,
-        [id]
-      );
-      res.json({
-        ...updated,
-        active: Boolean(updated?.active),
-      });
+      res.json(await updateUserAccount(db, parseInt(req.params.id, 10), req.body || {}));
     } catch (err) {
-      console.error("[API] Error updating user:", err);
-      res.status(500).json({ error: "Failed to update user" });
+      sendError(res, err, "Failed to update user");
     }
   });
 
@@ -611,11 +572,35 @@ async function startServer() {
     }
   });
 
+  // Creates an agent and, when `login` is supplied, a linked login for them in the same step.
   app.post("/api/agents", requireAdmin, async (req, res) => {
     try {
+      const login = req.body?.login;
+      if (login !== undefined && login !== null) {
+        const username = String(login.username ?? "").trim();
+        if (!username || !String(login.password ?? "").trim()) throw new HttpError(400, "A username and a temporary password are required to create the login.");
+        const clash = await db.queryOne<{ id: number }>("SELECT id FROM users WHERE LOWER(username) = LOWER(?)", [username]);
+        if (clash) throw new HttpError(409, `Username "${username}" already exists`);
+      }
       const agent = await createAgent(db, req.body || {});
+      let account = null;
+      if (login !== undefined && login !== null) {
+        try {
+          account = await createUserAccount(db, {
+            username: login.username,
+            password: login.password,
+            display_name: login.display_name || agent.name,
+            role: "agent",
+            agent_id: agent.id,
+          });
+        } catch (loginError) {
+          // Do not leave an agent behind that the administrator believes was not created.
+          await db.execute("DELETE FROM agents WHERE id = ?", [agent.id]).catch(() => undefined);
+          throw loginError;
+        }
+      }
       await syncPendingAssignments("agent created");
-      res.status(201).json({ success: true, agent });
+      res.status(201).json({ success: true, agent, account });
     } catch (err) {
       sendError(res, err, "Unable to create agent");
     }
@@ -811,7 +796,7 @@ function computeActivitySummary(events: any[], totalAgents: number = 0) {
 }
 
   // Global Activity Summary Stats & Legacy Endpoint
-  app.get("/api/stats", requireAdmin, async (req, res) => {
+  app.get("/api/stats", requireSection('call_activity'), async (req, res) => {
     const { startDate, endDate, agentId, tag } = req.query;
     const now = new Date();
     const nairobiOffset = 3 * 60 * 60 * 1000;
@@ -871,7 +856,7 @@ function computeActivitySummary(events: any[], totalAgents: number = 0) {
   });
 
   // Comprehensive Compliance Stats Endpoint
-  app.get("/api/compliance-stats", requireAdmin, async (req, res) => {
+  app.get("/api/compliance-stats", requireSection('call_activity'), async (req, res) => {
     const { startDate, endDate, agentId, tag } = req.query;
 
     const now = new Date();
@@ -1000,7 +985,7 @@ function computeActivitySummary(events: any[], totalAgents: number = 0) {
   });
 
   // Search Contacts (Flexibly matching phone numbers)
-  app.get("/api/search-contacts", requireAdmin, async (req, res) => {
+  app.get("/api/search-contacts", requireSection('call_activity'), async (req, res) => {
     const { query } = req.query;
     if (!query || typeof query !== "string") {
       return res.json([]);
@@ -1032,7 +1017,7 @@ function computeActivitySummary(events: any[], totalAgents: number = 0) {
   });
 
   // Get Contact History & Thread Compliance Verdicts
-  app.get("/api/contact-history", requireAdmin, async (req, res) => {
+  app.get("/api/contact-history", requireSection('call_activity'), async (req, res) => {
     const { phone } = req.query;
     if (!phone || typeof phone !== "string") {
       return res.status(400).json({ error: "Phone number is required" });
@@ -1249,7 +1234,7 @@ function computeActivitySummary(events: any[], totalAgents: number = 0) {
   // ==========================================
 
   // GET /api/channel-partner-allocations
-  app.get("/api/channel-partner-allocations", async (req, res) => {
+  app.get("/api/channel-partner-allocations", requireSection('callbacks'), async (req, res) => {
     try {
       const data = await getChannelPartnerAllocations(db);
       const unallocatedList = (data.unallocated_partners || []).map((p) => ({
@@ -1269,7 +1254,7 @@ function computeActivitySummary(events: any[], totalAgents: number = 0) {
   });
 
   // POST /api/channel-partner-allocations
-  app.post("/api/channel-partner-allocations", async (req, res) => {
+  app.post("/api/channel-partner-allocations", requireAdmin, async (req, res) => {
     try {
       const { channel_partner, assigned_agent_id } = req.body || {};
       if (!channel_partner || !String(channel_partner).trim()) {
@@ -1287,7 +1272,7 @@ function computeActivitySummary(events: any[], totalAgents: number = 0) {
   });
 
   // GET /api/callback-settings
-  app.get("/api/callback-settings", requireAdmin, async (req, res) => {
+  app.get("/api/callback-settings", requireSection('callbacks'), async (req, res) => {
     try {
       const settings = await getCallbackSettings(db);
       res.json(settings);
@@ -1326,7 +1311,7 @@ function computeActivitySummary(events: any[], totalAgents: number = 0) {
   });
 
   // GET /api/callback-jobs
-  app.get("/api/callback-jobs", requireAdmin, async (req, res) => {
+  app.get("/api/callback-jobs", requireSection('callbacks'), async (req, res) => {
     try {
       const { status, channel_partner, assigned_agent_id, search } = req.query;
       const jobs = await getCallbackJobs(db, {
@@ -1401,7 +1386,8 @@ function computeActivitySummary(events: any[], totalAgents: number = 0) {
   const handleCallbackOutcomeLog = async (req: express.Request, res: express.Response) => {
     try {
       const id = parseInt(req.params.id, 10);
-      const { outcome, comment, logged_by } = req.body;
+      const { outcome, comment } = req.body;
+      const logged_by = loggedByFor(req, req.body?.logged_by);
 
       if (!outcome) {
         return res.status(400).json({ error: "Outcome is required." });
@@ -1415,7 +1401,7 @@ function computeActivitySummary(events: any[], totalAgents: number = 0) {
       if (claim === "duplicate") return res.json({ id, success: true, duplicate: true });
       let updatedJob: Awaited<ReturnType<typeof logCallbackOutcome>>;
       try {
-        updatedJob = await logCallbackOutcome(db, id, outcome, comment, logged_by || "Agent");
+        updatedJob = await logCallbackOutcome(db, id, outcome, comment, (logged_by as string) || "Agent");
       } catch (saveError) {
         if (claim === "new") await releaseOutcomeReceipt(db, req.body?.client_request_id);
         throw saveError;
@@ -1433,11 +1419,11 @@ function computeActivitySummary(events: any[], totalAgents: number = 0) {
     }
   };
 
-  app.post("/api/callback-jobs/:id/outcome", requireAdmin, handleCallbackOutcomeLog);
-  app.post("/api/callback-jobs/:id/log", requireAdmin, handleCallbackOutcomeLog);
+  app.post("/api/callback-jobs/:id/outcome", requireSection('callbacks'), handleCallbackOutcomeLog);
+  app.post("/api/callback-jobs/:id/log", requireSection('callbacks'), handleCallbackOutcomeLog);
 
   // GET /api/callback-jobs/:id/logs
-  app.get("/api/callback-jobs/:id/logs", requireAdmin, async (req, res) => {
+  app.get("/api/callback-jobs/:id/logs", requireSection('callbacks'), async (req, res) => {
     try {
       const id = Number(req.params.id);
       const logs = await getCallbackJobLogs(db, id);
@@ -1646,7 +1632,7 @@ function computeActivitySummary(events: any[], totalAgents: number = 0) {
   // --- Pending Submissions Endpoints ---
   const pendingSettingsPaths = ["/api/pending-submissions/settings", "/api/pending-submission-settings"];
 
-  app.get(pendingSettingsPaths, requireAdmin, async (_req, res) => {
+  app.get(pendingSettingsPaths, requireSection('pending'), async (_req, res) => {
     try {
       const workflow = await getPendingSubmissionSettings(db);
       res.json({ ...workflow, workflow, solver_sms_enabled: isSolverSmsEnabled() });
@@ -1668,7 +1654,7 @@ function computeActivitySummary(events: any[], totalAgents: number = 0) {
   app.put(pendingSettingsPaths, requireAdmin, savePendingSettings);
   app.post(pendingSettingsPaths, requireAdmin, savePendingSettings);
 
-  app.get("/api/pending-submissions/outcomes", requireAdmin, (req, res) => {
+  app.get("/api/pending-submissions/outcomes", requireSection('pending'), (req, res) => {
     const jobType = parseJobTypeParam(req.query.job_type) ?? "INSPECTION";
     res.json(outcomesFor(jobType).map((outcome) => ({
       value: outcome.value,
@@ -1678,7 +1664,7 @@ function computeActivitySummary(events: any[], totalAgents: number = 0) {
     })));
   });
 
-  app.get("/api/pending-submissions/agents", requireAdmin, async (_req, res) => {
+  app.get("/api/pending-submissions/agents", requireSection('pending'), async (_req, res) => {
     try {
       const settings = await getPendingSubmissionSettings(db);
       res.json(await getValidSubmissionAgents(db, settings.callback_team_tag));
@@ -1703,7 +1689,7 @@ function computeActivitySummary(events: any[], totalAgents: number = 0) {
     }
   });
 
-  app.get("/api/pending-submissions/jobs", requireAdmin, async (req, res) => {
+  app.get("/api/pending-submissions/jobs", requireSection('pending'), async (req, res) => {
     try {
       const { status, agent_id, search, company } = req.query as Record<string, string | undefined>;
       await closeMaturedPendingSubmissions(db);
@@ -1728,7 +1714,7 @@ function computeActivitySummary(events: any[], totalAgents: number = 0) {
     }
   });
 
-  app.post("/api/pending-submissions/jobs/:id/log", requireAdmin, async (req, res) => {
+  app.post("/api/pending-submissions/jobs/:id/log", requireSection('pending'), async (req, res) => {
     try {
       const jobId = Number(req.params.id);
       const claim = await claimOutcomeReceipt(db, "pending-submissions", req.body?.client_request_id, jobId);
@@ -1737,7 +1723,7 @@ function computeActivitySummary(events: any[], totalAgents: number = 0) {
       }
       let result: Awaited<ReturnType<typeof logPendingSubmissionOutcome>>;
       try {
-        result = await logPendingSubmissionOutcome(db, jobId, req.body || {});
+        result = await logPendingSubmissionOutcome(db, jobId, { ...(req.body || {}), logged_by: loggedByFor(req, req.body?.logged_by) });
       } catch (saveError) {
         if (claim === "new") await releaseOutcomeReceipt(db, req.body?.client_request_id);
         throw saveError;
@@ -1764,7 +1750,7 @@ function computeActivitySummary(events: any[], totalAgents: number = 0) {
     }
   });
 
-  app.get("/api/pending-submissions/jobs/:id/logs", requireAdmin, async (req, res) => {
+  app.get("/api/pending-submissions/jobs/:id/logs", requireSection('pending'), async (req, res) => {
     try {
       res.json(await getPendingSubmissionLogs(db, Number(req.params.id)));
     } catch (err) {
@@ -1800,7 +1786,7 @@ function computeActivitySummary(events: any[], totalAgents: number = 0) {
     }
   });
 
-  app.get("/api/agent-kpi/pending-submissions", requireAdmin, async (req, res) => {
+  app.get("/api/agent-kpi/pending-submissions", requireSection('pending'), async (req, res) => {
     try {
       res.json(await getPendingSubmissionAgentKpis(db, Date.now(), parseJobTypeParam(req.query.job_type)));
     } catch (err) {
@@ -1808,7 +1794,7 @@ function computeActivitySummary(events: any[], totalAgents: number = 0) {
     }
   });
 
-  app.get("/api/agent-kpi/callbacks", requireAdmin, async (_req, res) => {
+  app.get("/api/agent-kpi/callbacks", requireSection('callbacks'), async (_req, res) => {
     try {
       res.json(await getCallbackAgentKpis(db));
     } catch (err) {
@@ -1868,7 +1854,7 @@ function computeActivitySummary(events: any[], totalAgents: number = 0) {
     }
   });
 
-  app.get("/api/session-ping", requireAdmin, (_req, res) => {
+  app.get("/api/session-ping", requireAuth, (_req, res) => {
     res.setHeader("Cache-Control", "no-store");
     res.json({ ok: true, server_time: new Date().toISOString() });
   });

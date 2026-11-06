@@ -287,9 +287,11 @@ export function getOutcomeBadgeColor(outcome: string | null | undefined, status:
 
 interface PendingSubmissionsSectionProps {
   isAdmin?: boolean;
+  /** Set for an agent login: outcomes are always logged under this name, and the agent filter starts on this agent. */
+  signedInAgentName?: string | null;
 }
 
-export default function PendingSubmissionsSection({ isAdmin }: PendingSubmissionsSectionProps) {
+export default function PendingSubmissionsSection({ isAdmin, signedInAgentName = null }: PendingSubmissionsSectionProps) {
   // Determine admin access (prop or local storage session)
   const isUserAdmin =
     isAdmin ??
@@ -363,7 +365,7 @@ export default function PendingSubmissionsSection({ isAdmin }: PendingSubmission
   const [outcomeScheduledAt, setOutcomeScheduledAt] = useState<string>('');
   const [outcomeScheduledPlace, setOutcomeScheduledPlace] = useState<string>('');
   const [outcomeComment, setOutcomeComment] = useState<string>('');
-  const [outcomeLoggedBy, setOutcomeLoggedBy] = useState<string>('Mary');
+  const [outcomeLoggedBy, setOutcomeLoggedBy] = useState<string>(signedInAgentName || 'Mary');
   const [isSubmittingLog, setIsSubmittingLog] = useState<boolean>(false);
 
   // History Modal
@@ -522,9 +524,19 @@ export default function PendingSubmissionsSection({ isAdmin }: PendingSubmission
   useEffect(() => {
     fetchSettings();
     fetchAgents();
-    fetchIntegrations();
+    // Integrations are an administrator setting (the route is admin only); agents never see the SMS set-up.
+    if (isUserAdmin) fetchIntegrations();
     fetchJobs();
   }, []);
+
+  // An agent login starts on its own queue. It can still look at the others (view access to the section is shared).
+  const defaultedToOwnAgent = useRef<boolean>(false);
+  useEffect(() => {
+    if (!signedInAgentName || defaultedToOwnAgent.current || agents.length === 0) return;
+    const own = agents.find((a) => a.name.trim().toLowerCase() === signedInAgentName.trim().toLowerCase());
+    defaultedToOwnAgent.current = true;
+    if (own) setAgentFilter(String(own.id));
+  }, [agents, signedInAgentName]);
 
   // Near real time (same approach as the agent KPI panel): refresh the list every 15 seconds while the tab is
   // visible, and straight away when the tab comes back into view, so calls and SMS logged by the Android app and
@@ -832,7 +844,7 @@ export default function PendingSubmissionsSection({ isAdmin }: PendingSubmission
     try {
       const saved = await saveOutcome(
         `/api/pending-submissions/jobs/${selectedJobForLog.id}/log`,
-        { outcome: outcomeType, comment: outcomeComment.trim(), logged_by: outcomeLoggedBy },
+        { outcome: outcomeType, comment: outcomeComment.trim(), logged_by: signedInAgentName || outcomeLoggedBy },
         selectedJobForLog.vehicle_reg_raw || selectedJobForLog.vehicle_reg
       );
       // Only a confirmation from the server counts as saved. Otherwise the form stays open and the outcome is kept on this device.
@@ -1148,13 +1160,15 @@ export default function PendingSubmissionsSection({ isAdmin }: PendingSubmission
             </button>
           )}
 
-          <button
-            onClick={() => setIsUploadOpen(true)}
-            className="px-4 py-2 rounded-xl text-xs font-bold bg-[#ff353e] hover:bg-[#e02831] text-white shadow-xs hover:shadow transition-all flex items-center gap-1.5 cursor-pointer"
-          >
-            <Upload className="w-3.5 h-3.5" />
-            <span>Upload List</span>
-          </button>
+          {isUserAdmin && (
+            <button
+              onClick={() => setIsUploadOpen(true)}
+              className="px-4 py-2 rounded-xl text-xs font-bold bg-[#ff353e] hover:bg-[#e02831] text-white shadow-xs hover:shadow transition-all flex items-center gap-1.5 cursor-pointer"
+            >
+              <Upload className="w-3.5 h-3.5" />
+              <span>Upload List</span>
+            </button>
+          )}
 
           <button
             onClick={handleExportExcel}
@@ -1165,6 +1179,7 @@ export default function PendingSubmissionsSection({ isAdmin }: PendingSubmission
             <span>Export</span>
           </button>
 
+          {isUserAdmin && (
           <button
             onClick={handleExportMaxAttempts}
             className="px-3.5 py-2 rounded-xl text-xs font-bold border border-rose-200 bg-rose-50 hover:bg-rose-100 text-rose-700 transition-all flex items-center gap-1.5 shadow-2xs cursor-pointer"
@@ -1173,6 +1188,7 @@ export default function PendingSubmissionsSection({ isAdmin }: PendingSubmission
             <Download className="w-3.5 h-3.5 text-rose-500" />
             <span>Max Attempts Report</span>
           </button>
+          )}
 
           <button
             onClick={handleRefresh}
@@ -1988,9 +2004,11 @@ export default function PendingSubmissionsSection({ isAdmin }: PendingSubmission
                 </label>
                 <input
                   type="text"
-                  value={outcomeLoggedBy}
+                  value={signedInAgentName || outcomeLoggedBy}
                   onChange={(e) => setOutcomeLoggedBy(e.target.value)}
-                  className="w-full px-3.5 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold text-slate-800"
+                  readOnly={Boolean(signedInAgentName)}
+                  title={signedInAgentName ? 'Outcomes are logged under your own name' : undefined}
+                  className={`w-full px-3.5 py-2 border border-slate-200 rounded-xl text-xs font-semibold text-slate-800 ${signedInAgentName ? 'bg-slate-100 cursor-not-allowed' : 'bg-slate-50'}`}
                   required
                 />
               </div>

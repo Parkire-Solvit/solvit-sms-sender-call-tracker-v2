@@ -115,6 +115,12 @@ export interface UserAccount {
   username: string;
   display_name: string;
   active: boolean;
+  /** 'admin' has full access. 'agent' sees the sections the linked agent's tag opens (or Call Activity). */
+  role: 'admin' | 'agent';
+  agent_id: number | null;
+  agent_name: string | null;
+  agent_tag: string | null;
+  agent_archived: boolean;
   created_at: string;
 }
 
@@ -201,4 +207,13 @@ export function hasReachedMaxAttempts(
   const targetCalls = settings?.max_attempts ?? job.max_attempts ?? 4;
   const targetSms = settings?.max_sms_attempts ?? job.max_sms_attempts ?? 4;
   return (job.attempt_count || 0) >= targetCalls && (job.sms_count || 0) >= targetSms;
+}
+
+/** An active agent a login can be linked to. */
+export interface AgentLinkOption {
+  id: number;
+  name: string;
+  tag: string | null;
+  /** The username of the login already linked to this agent, if any. */
+  linked_username: string | null;
 }

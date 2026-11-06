@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useState, useEffect, useCallback, useMemo, FormEvent } from 'react';
+import { useState, useEffect, useCallback, useMemo, FormEvent, type ElementType } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
   MessageSquare, 
@@ -57,7 +57,8 @@ import { AgentPerformanceNarrative } from './components/AgentPerformanceNarrativ
 import { EmailSlaSection } from './components/EmailSlaSection';
 import PendingSubmissionsSection from './components/PendingSubmissionsSection';
 import SaveStatusBanner from './components/SaveStatusBanner';
-import { startSessionGuard } from './lib/safeSave';
+import { startSessionGuard, pingSession } from './lib/safeSave';
+import { allowedViews, landingView, resolveView, VIEW_LABELS, type AccountRole, type AppView, type Section as AccessSection } from './lib/appViews';
 import { SystemSettings, TurnaroundTimeReport, Obligation, AgentComplianceSummary, TagGroupCompliance } from './types/compliance';
 
 function cn(...inputs: ClassValue[]) {
@@ -91,7 +92,7 @@ const getNairobiYesterday = () => {
 };
 
 export default function App() {
-  const [view, setView] = useState<'admin' | 'insurance-callbacks' | 'pending-submissions' | 'email'>('admin');
+  const [view, setView] = useState<AppView>('admin');
   const [agentName, setAgentName] = useState<string>('Kelvin Kimathi');
   const [customTemplate, setCustomTemplate] = useState<string>(
     'Hi, this is {agent_name} from Solvit. I tried calling you regarding your inquiry. Please call me back when convenient so we can assist you.'
@@ -117,7 +118,19 @@ export default function App() {
   const [selectedAgentId, setSelectedAgentId] = useState<string>('');
   const [selectedTag, setSelectedTag] = useState<string>('');
   const [isAdminAuthenticated, setIsAdminAuthenticated] = useState(false);
+  // Agent logins: the sections their agent tag opens, and the agent they are signed in as.
+  const [isAgentAccount, setIsAgentAccount] = useState(false);
+  const [accessSections, setAccessSections] = useState<AccessSection[]>([]);
+  const [accountAgentName, setAccountAgentName] = useState<string | null>(null);
+  const [accountDisplayName, setAccountDisplayName] = useState<string | null>(null);
   const [memberEmail, setMemberEmail] = useState<string | null>(null);
+
+  // Which screens this sign-in may open. The server enforces the same rules on every request.
+  const accountRole: AccountRole | null = isAdminAuthenticated ? 'admin' : isAgentAccount ? 'agent' : memberEmail ? 'cs_member' : null;
+  const isSignedIn = accountRole !== null;
+  const offeredViews = allowedViews(accountRole, accessSections);
+  const activeView: AppView = resolveView(view, offeredViews);
+  const canSeeCallActivity = offeredViews.includes('admin');
   const [emailLoginAvailable, setEmailLoginAvailable] = useState(false);
   const [loginForm, setLoginForm] = useState({ username: '', password: '' });
   const [loginError, setLoginError] = useState('');
@@ -168,9 +181,14 @@ export default function App() {
   useEffect(() => {
     fetch('/api/session').then((res) => res.json()).then((session) => {
       setIsAdminAuthenticated(session.role === 'admin');
+      setIsAgentAccount(session.role === 'agent');
+      setAccessSections(Array.isArray(session.sections) ? session.sections : []);
+      setAccountAgentName(session.agent_name ?? null);
+      setAccountDisplayName(session.display_name ?? null);
       setMemberEmail(session.role === 'cs_member' ? session.email : null);
       setEmailLoginAvailable(Boolean(session.emailLoginAvailable));
       if (session.role === 'cs_member') setView('email');
+      if (session.role === 'agent') setView(landingView('agent', session.sections ?? []));
       if (new URLSearchParams(window.location.search).has('emailAuthError')) {
         setLoginError('Microsoft sign-in failed or this account is not approved for the CS pilot.');
         window.history.replaceState({}, '', window.location.pathname);
@@ -211,8 +229,19 @@ export default function App() {
         body: JSON.stringify(loginForm)
       });
       if (res.ok) {
-        setIsAdminAuthenticated(true);
+        const data = await res.json().catch(() => ({} as any));
         setLoginForm({ username: '', password: '' });
+        // The page checked the session once while signed out. Check again now, so the "signed out" warning clears.
+        void pingSession();
+        setAccessSections(Array.isArray(data.sections) ? data.sections : []);
+        setAccountAgentName(data.agent_name ?? null);
+        setAccountDisplayName(data.display_name ?? null);
+        if (data.role === 'agent') {
+          setIsAgentAccount(true);
+          setView(landingView('agent', data.sections ?? []));
+        } else {
+          setIsAdminAuthenticated(true);
+        }
       } else {
         setLoginError('Invalid username or password');
       }
@@ -224,6 +253,10 @@ export default function App() {
   const handleLogout = () => {
     void fetch('/api/logout', { method: 'POST' });
     setIsAdminAuthenticated(false);
+    setIsAgentAccount(false);
+    setAccessSections([]);
+    setAccountAgentName(null);
+    setAccountDisplayName(null);
     setMemberEmail(null);
     setView('admin');
     localStorage.removeItem('solvit_admin_token');
@@ -232,7 +265,7 @@ export default function App() {
 
   // Fetch stats & compliance metrics
   const fetchAllStats = useCallback(async (start: string, end: string, agentId: string, tag: string) => {
-    if (!isAdminAuthenticated) return;
+    if (!canSeeCallActivity) return;
     setLoading(true);
     try {
       const params = new URLSearchParams({
@@ -286,13 +319,13 @@ export default function App() {
     } finally {
       setLoading(false);
     }
-  }, [isAdminAuthenticated]);
+  }, [canSeeCallActivity]);
 
   useEffect(() => {
-    if (isAdminAuthenticated) {
+    if (canSeeCallActivity) {
       fetchAllStats(startDate, endDate, selectedAgentId, selectedTag);
     }
-  }, [startDate, endDate, selectedAgentId, selectedTag, fetchAllStats, isAdminAuthenticated]);
+  }, [startDate, endDate, selectedAgentId, selectedTag, fetchAllStats, canSeeCallActivity]);
 
   return (
     <div className="min-h-screen bg-[#F8FAFC] font-sans text-slate-900 pb-24">
@@ -317,7 +350,7 @@ export default function App() {
           
           <div className="flex flex-wrap items-center gap-2.5">
             {/* Quick Contact Search Bar */}
-            {isAdminAuthenticated && view === 'admin' && (
+            {canSeeCallActivity && activeView === 'admin' && (
               <SearchContactBar onSelectPhone={(phone) => setInspectedPhone(phone)} />
             )}
 
@@ -334,67 +367,53 @@ export default function App() {
               </button>
             )}
 
-            {/* View switcher (admins only) */}
-            {isAdminAuthenticated && (
+            {/* View switcher: administrators see every screen, agents only the ones their tag opens */}
+            {accountRole !== 'cs_member' && offeredViews.length > 1 && (
             <div className="flex bg-slate-100 p-1 rounded-xl">
-              <button
-                id="nav-tab-admin-dashboard"
-                onClick={() => {
-                  setView('admin');
-                  if (isAdminAuthenticated) {
-                    fetchAllStats(startDate, endDate, selectedAgentId, selectedTag);
-                  }
-                }}
-                className={cn(
-                  "px-3.5 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer",
-                  view === 'admin' ? "bg-white text-[#ff353e] shadow-xs" : "text-slate-600 hover:text-[#ff353e]"
-                )}
-              >
-                <LayoutDashboard className="w-3.5 h-3.5" />
-                <span>Admin Dashboard</span>
-              </button>
-              <button
-                id="nav-tab-insurance-callbacks"
-                onClick={() => setView('insurance-callbacks')}
-                className={cn(
-                  "px-3.5 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer",
-                  view === 'insurance-callbacks' ? "bg-white text-[#ff353e] shadow-xs" : "text-slate-600 hover:text-[#ff353e]"
-                )}
-              >
-                <Car className="w-3.5 h-3.5" />
-                <span>Callbacks</span>
-              </button>
-              <button
-                id="nav-tab-email-sla"
-                onClick={() => setView('email')}
-                className={cn(
-                  "px-3.5 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer",
-                  view === 'email' ? "bg-white text-[#ff353e] shadow-xs" : "text-slate-600 hover:text-[#ff353e]"
-                )}
-              >
-                <Mail className="w-3.5 h-3.5" />
-                <span>Email SLA</span>
-              </button>
-              <button
-                id="nav-tab-pending-submissions"
-                onClick={() => setView('pending-submissions')}
-                className={cn(
-                  "px-3.5 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer",
-                  view === 'pending-submissions' ? "bg-white text-[#ff353e] shadow-xs" : "text-slate-600 hover:text-[#ff353e]"
-                )}
-              >
-                <ClipboardList className="w-3.5 h-3.5" />
-                <span>Pending Submissions</span>
-              </button>
+              {offeredViews.map((v) => {
+                const meta: Record<AppView, { id: string; Icon: ElementType }> = {
+                  'admin': { id: 'nav-tab-admin-dashboard', Icon: LayoutDashboard },
+                  'insurance-callbacks': { id: 'nav-tab-insurance-callbacks', Icon: Car },
+                  'email': { id: 'nav-tab-email-sla', Icon: Mail },
+                  'pending-submissions': { id: 'nav-tab-pending-submissions', Icon: ClipboardList },
+                };
+                const { id, Icon } = meta[v];
+                return (
+                  <button
+                    key={v}
+                    id={id}
+                    onClick={() => {
+                      setView(v);
+                      if (v === 'admin' && canSeeCallActivity) {
+                        fetchAllStats(startDate, endDate, selectedAgentId, selectedTag);
+                      }
+                    }}
+                    className={cn(
+                      "px-3.5 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer",
+                      activeView === v ? "bg-white text-[#ff353e] shadow-xs" : "text-slate-600 hover:text-[#ff353e]"
+                    )}
+                  >
+                    <Icon className="w-3.5 h-3.5" />
+                    <span>{VIEW_LABELS[v]}</span>
+                  </button>
+                );
+              })}
             </div>
             )}
 
-            {(isAdminAuthenticated || memberEmail) && (
+            {/* Who is signed in (agent logins) */}
+            {isAgentAccount && (accountAgentName || accountDisplayName) && (
+              <span className="px-2.5 py-1 rounded-lg text-[11px] font-bold bg-sky-50 text-sky-800 border border-sky-200" title="You are signed in as this agent">
+                {accountAgentName || accountDisplayName}
+              </span>
+            )}
+
+            {isSignedIn && (
               <button
                 id="btn-admin-logout"
                 onClick={handleLogout}
                 className="px-3 py-1.5 rounded-xl text-xs font-bold bg-slate-50 hover:bg-red-50 text-slate-600 hover:text-red-600 border border-slate-200 hover:border-red-200 transition-all flex items-center gap-1.5 cursor-pointer"
-                title="Sign out of Admin Dashboard"
+                title="Sign out"
               >
                 <LogOut className="w-3.5 h-3.5" />
                 <span>Logout</span>
@@ -405,7 +424,7 @@ export default function App() {
       </nav>
 
       {/* Main View Area */}
-      {!isAdminAuthenticated && !memberEmail ? (
+      {!isSignedIn ? (
         <div className="max-w-md mx-auto mt-20 px-6">
           <motion.div 
             initial={{ opacity: 0, y: 20 }}
@@ -431,7 +450,7 @@ export default function App() {
                   value={loginForm.username}
                   onChange={(e) => setLoginForm({ ...loginForm, username: e.target.value })}
                   className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-[#ff353e]/20 focus:border-[#ff353e] transition-all text-slate-900 text-sm"
-                  placeholder="admin"
+                  placeholder="Username"
                   required
                 />
               </div>
@@ -473,19 +492,24 @@ export default function App() {
             )}
           </motion.div>
         </div>
-      ) : view === 'email' ? (
+      ) : activeView === 'email' ? (
         <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-6">
           <EmailSlaSection employeeEmail={memberEmail || undefined} />
         </main>
-      ) : view === 'pending-submissions' ? (
+      ) : activeView === 'pending-submissions' ? (
         <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-6">
-          <PendingSubmissionsSection isAdmin />
+          <PendingSubmissionsSection
+            isAdmin={isAdminAuthenticated}
+            signedInAgentName={isAgentAccount ? (accountAgentName || accountDisplayName) : null}
+          />
         </main>
-      ) : view === 'insurance-callbacks' ? (
+      ) : activeView === 'insurance-callbacks' ? (
         <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-6">
-          <InsuranceCallbackSection 
-            onOpenSettings={() => setShowMasterSettings(true)} 
-            allAgents={stats?.allAgents || []}
+          <InsuranceCallbackSection
+            onOpenSettings={isAdminAuthenticated ? () => setShowMasterSettings(true) : undefined}
+            allAgents={isAdminAuthenticated ? (stats?.allAgents || []) : []}
+            canManage={isAdminAuthenticated}
+            signedInAgentName={isAgentAccount ? (accountAgentName || accountDisplayName) : null}
           />
         </main>
       ) : (
@@ -506,6 +530,7 @@ export default function App() {
           onInspectContact={(phone) => setInspectedPhone(phone)}
           onOpenMasterSettings={() => setShowMasterSettings(true)}
           onOpenDbModal={() => setShowDbModal(true)}
+          readOnly={!isAdminAuthenticated}
         />
       )}
 
@@ -627,6 +652,7 @@ function ComplianceAdminDashboard({
   onInspectContact,
   onOpenMasterSettings,
   onOpenDbModal,
+  readOnly = false,
 }: any) {
   const [editingTag, setEditingTag] = useState<{ id: number, name: string, tag: string } | null>(null);
   const [tagEditMode, setTagEditMode] = useState<'select' | 'create'>('select');
@@ -635,6 +661,9 @@ function ComplianceAdminDashboard({
   const [isUpdatingTag, setIsUpdatingTag] = useState<boolean>(false);
   const [showAddAgent, setShowAddAgent] = useState(false);
   const [newAgent, setNewAgent] = useState({ name: '', phone_number: '', tag: 'Callback Team' });
+  // Optionally create the agent's own login in the same step (it is linked to the new agent).
+  const [createLogin, setCreateLogin] = useState(false);
+  const [newLogin, setNewLogin] = useState({ username: '', password: '' });
   const [addAgentError, setAddAgentError] = useState('');
   const [isAddingAgent, setIsAddingAgent] = useState(false);
 
@@ -707,7 +736,7 @@ function ComplianceAdminDashboard({
   };
 
   useEffect(() => {
-    fetchInternalContacts();
+    if (!readOnly) fetchInternalContacts();
   }, []);
 
   const updateAgentTag = async (id: number, tag: string) => {
@@ -745,12 +774,14 @@ function ComplianceAdminDashboard({
       const res = await fetch('/api/agents', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(newAgent),
+        body: JSON.stringify(createLogin ? { ...newAgent, login: { username: newLogin.username.trim(), password: newLogin.password, display_name: newAgent.name.trim() } } : newAgent),
       });
       const body = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(body.error || 'Failed to add agent');
       setShowAddAgent(false);
       setNewAgent({ name: '', phone_number: '', tag: 'Callback Team' });
+      setCreateLogin(false);
+      setNewLogin({ username: '', password: '' });
       onRefresh();
     } catch (err) {
       setAddAgentError((err as Error).message);
@@ -891,25 +922,25 @@ function ComplianceAdminDashboard({
         </div>
 
         <div className="flex flex-wrap items-end gap-2.5">
-          {/* Exclusions Modal Button */}
-          <button 
+          {/* Exclusions Modal Button (administrators only) */}
+          {!readOnly && (<button 
             id="btn-open-exclusions"
             onClick={() => setShowInternalContactsModal(true)}
             className="px-3.5 py-2 bg-slate-800 text-white rounded-xl text-xs font-bold hover:bg-slate-700 transition-all h-[36px] flex items-center justify-center gap-1.5 shadow-xs"
           >
             <UserMinus className="w-3.5 h-3.5" />
             Exclusions ({internalContacts.length})
-          </button>
+          </button>)}
 
-          {/* Export Excel Button */}
-          <button 
+          {/* Export Excel Button (administrators only) */}
+          {!readOnly && (<button 
             id="btn-export-excel"
             onClick={handleExportExcel}
             className="px-3.5 py-2 bg-[#ff353e] text-white rounded-xl text-xs font-bold hover:bg-[#e02831] transition-all h-[36px] flex items-center justify-center gap-1.5 shadow-xs"
           >
             <Download className="w-3.5 h-3.5" />
             Export SLA Report
-          </button>
+          </button>)}
 
           {/* Agent Filter */}
           <div className="flex flex-col min-w-[130px]">
@@ -1002,10 +1033,13 @@ function ComplianceAdminDashboard({
         tagGroups={complianceStats?.tag_groups}
         selectedTag={selectedTag}
         onSelectTag={(tag) => setSelectedTag(tag)}
+        readOnly={readOnly}
         onEditAgentTag={(agent) => openEditTagModal(agent)}
         onAddAgent={() => {
           setAddAgentError('');
           setNewAgent({ name: '', phone_number: '', tag: 'Callback Team' });
+          setCreateLogin(false);
+          setNewLogin({ username: '', password: '' });
           setShowAddAgent(true);
         }}
         onInspectAgent={(agentId) => setSelectedAgentId(agentId.toString())}
@@ -1067,12 +1101,49 @@ function ComplianceAdminDashboard({
                   {existingTagsList.map((tag) => <option key={tag} value={tag}>{tag}</option>)}
                 </select>
               </div>
+              <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 space-y-2.5">
+                <label className="flex items-start gap-2 text-xs font-bold text-slate-700 cursor-pointer">
+                  <input
+                    id="new-agent-create-login"
+                    type="checkbox"
+                    checked={createLogin}
+                    onChange={(e) => setCreateLogin(e.target.checked)}
+                    className="mt-0.5"
+                  />
+                  <span>
+                    Also create this agent's login
+                    <span className="block font-normal text-slate-500">The login is linked to the agent. Which sections it opens follows the team above.</span>
+                  </span>
+                </label>
+                {createLogin && (
+                  <div className="grid grid-cols-2 gap-2.5">
+                    <input
+                      id="new-agent-login-username"
+                      type="text"
+                      autoComplete="off"
+                      placeholder="Username"
+                      value={newLogin.username}
+                      onChange={(e) => setNewLogin({ ...newLogin, username: e.target.value })}
+                      className="w-full px-3 py-2 border border-slate-300 rounded-xl text-sm bg-white outline-none focus:ring-2 focus:ring-[#ff353e]/30"
+                    />
+                    <input
+                      id="new-agent-login-password"
+                      type="password"
+                      autoComplete="new-password"
+                      placeholder="Temporary password"
+                      value={newLogin.password}
+                      onChange={(e) => setNewLogin({ ...newLogin, password: e.target.value })}
+                      className="w-full px-3 py-2 border border-slate-300 rounded-xl text-sm bg-white outline-none focus:ring-2 focus:ring-[#ff353e]/30"
+                    />
+                  </div>
+                )}
+              </div>
               {addAgentError && <p className="text-xs font-semibold text-red-700 bg-red-50 border border-red-200 rounded-xl p-3">{addAgentError}</p>}
             </div>
 
             <div className="flex justify-end gap-2.5 mt-6 pt-4 border-t border-slate-100">
               <button type="button" disabled={isAddingAgent} onClick={() => setShowAddAgent(false)} className="px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-xl">Cancel</button>
-              <button type="submit" disabled={isAddingAgent || newAgent.name.trim().length < 2} className="px-4 py-2 text-xs font-bold text-white bg-[#ff353e] hover:bg-[#e02831] rounded-xl disabled:opacity-50">
+              <button type="submit" disabled={isAddingAgent || newAgent.name.trim().length < 2 || (createLogin && (!newLogin.username.trim() || !newLogin.password.trim()))} className="px-4 py-2 text-xs font-bold text-white bg-[#ff353e] hover:bg-[#e02831] rounded-xl disabled:opacity-50">
                 {isAddingAgent ? 'Adding...' : 'Add agent'}
               </button>
             </div>
