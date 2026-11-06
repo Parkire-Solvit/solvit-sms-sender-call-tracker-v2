@@ -14,6 +14,12 @@ export interface AgentKpiPace {
   advice: string[];
 }
 
+export interface ConversionStat {
+  green: number;
+  total: number;
+  rate: number | null;
+}
+
 export interface AgentKpiRow {
   agent_id: number;
   agent_name: string;
@@ -31,6 +37,8 @@ export interface AgentKpiRow {
   sms_remaining: number;
   oldest_open_days: number | null;
   pace: AgentKpiPace;
+  /** Pending Submissions only: all GREEN records over all records held by the agent. */
+  conversion?: ConversionStat;
 }
 
 export interface AgentKpiReportData {
@@ -41,6 +49,8 @@ export interface AgentKpiReportData {
   requirements: { calls: number; sms: number };
   upload_closed_label: string;
   unassigned_open: number;
+  /** Pending Submissions only: all GREEN records over all records of the type. */
+  conversion?: ConversionStat;
   agents: AgentKpiRow[];
 }
 
@@ -185,6 +195,20 @@ export default function AgentKpiPanel({ section, focusAgentId = null, focusAgent
             </div>
           )}
 
+          {report && report.conversion && (
+            <div className="flex items-center justify-between gap-3 rounded-2xl bg-emerald-50 border border-emerald-200 px-4 py-2.5">
+              <div>
+                <div className="text-xs font-black text-emerald-900">Team conversion rate</div>
+                <div className="text-[11px] text-emerald-800">
+                  {report.conversion.green} of {report.conversion.total} records closed green (all records, no date limit)
+                </div>
+              </div>
+              <div className="text-2xl font-black text-emerald-900 leading-none">
+                {report.conversion.rate === null ? 'n/a' : `${report.conversion.rate}%`}
+              </div>
+            </div>
+          )}
+
           {report && (
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
               {rows.map((r) => (
@@ -214,6 +238,17 @@ export default function AgentKpiPanel({ section, focusAgentId = null, focusAgent
                       <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400 mt-1">Completion</div>
                     </div>
                   </div>
+
+                  {r.conversion && (
+                    <div className="flex items-center justify-between gap-2 rounded-xl bg-emerald-50 border border-emerald-200 px-3 py-1.5">
+                      <span className="text-[11px] font-bold text-emerald-900">
+                        Conversion: {r.conversion.green} of {r.conversion.total} records closed green
+                      </span>
+                      <span className="text-sm font-black text-emerald-900">
+                        {r.conversion.rate === null ? 'n/a' : `${r.conversion.rate}%`}
+                      </span>
+                    </div>
+                  )}
 
                   <div className="w-full h-2 bg-slate-100 rounded-full overflow-hidden">
                     <div

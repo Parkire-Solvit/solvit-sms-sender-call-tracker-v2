@@ -22,6 +22,12 @@ interface SectionConfig {
   imports: string;
   settingKey: string;
   absentOutcome: string;
+  /**
+   * Whether "Remove last upload" (and the read-only backup that precedes it) needs the server reset key.
+   * Callbacks do not: an administrator session, the typed phrase and the mandatory backup are enough.
+   * "Delete all records" always needs the key, in every section.
+   */
+  undoNeedsKey: boolean;
 }
 
 export const UNDO_PHRASE = "REMOVE LAST UPLOAD";
@@ -38,6 +44,7 @@ const CONFIGS: Record<ResetSectionId, SectionConfig> = {
     imports: "callback_imports",
     settingKey: "data_reset.callbacks",
     absentOutcome: "ABSENT_FROM_LATEST_EXPORT",
+    undoNeedsKey: false,
   },
   "pending-submissions": {
     id: "pending-submissions",
@@ -50,6 +57,7 @@ const CONFIGS: Record<ResetSectionId, SectionConfig> = {
     imports: "pending_submission_imports",
     settingKey: "data_reset.pending_submissions",
     absentOutcome: "ABSENT_FROM_LATEST_EXPORT",
+    undoNeedsKey: true,
   },
 };
 
@@ -120,6 +128,17 @@ export function verifyResetKey(provided: unknown, nowMs: number = Date.now()): v
     failureTimes = [];
   }
   throw new HttpError(403, "The reset key is incorrect.");
+}
+
+/**
+ * Gate for the backup download. Sections whose undo needs no key (callbacks) also allow the backup without one,
+ * because the backup is a read-only export and the destructive step that follows is still protected.
+ * Every other case still requires the reset key.
+ */
+export function verifyBackupAccess(sectionRaw: unknown, provided: unknown, nowMs: number = Date.now()): void {
+  const cfg = parseResetSection(sectionRaw);
+  if (!cfg.undoNeedsKey && (typeof provided !== "string" || provided.length === 0)) return;
+  verifyResetKey(provided, nowMs);
 }
 
 // ---------------------------------------------------------------------------
@@ -259,6 +278,7 @@ export async function getDataResetPreview(db: DbAdapter, sectionRaw: unknown) {
     section: cfg.id,
     label: cfg.label,
     reset_key_configured: isResetKeyConfigured(),
+    undo_requires_key: cfg.undoNeedsKey,
     delete_all_phrase: cfg.deleteAllPhrase,
     undo_phrase: UNDO_PHRASE,
     totals: { jobs: totals.jobs, open: totals.open, closed: totals.closed, logs: totals.logs, phones: totals.phones },
@@ -384,7 +404,7 @@ export interface UndoBody {
 export function undoLastUpload(db: DbAdapter, sectionRaw: unknown, body: UndoBody, nowMs: number = Date.now()) {
   const cfg = parseResetSection(sectionRaw);
   return exclusive(async () => {
-    verifyResetKey(body?.reset_key, nowMs);
+    if (cfg.undoNeedsKey) verifyResetKey(body?.reset_key, nowMs);
     if (str(body?.confirm_phrase) !== UNDO_PHRASE) throw new HttpError(400, `Type exactly: ${UNDO_PHRASE}`);
 
     const last = await getLastUpload(db, cfg);
@@ -457,7 +477,7 @@ export function undoLastUpload(db: DbAdapter, sectionRaw: unknown, body: UndoBod
           `${cfg.settingKey}.undo_last_upload`,
           `upload ${last.id} (${last.file_name ?? "unknown file"})`,
           `removed ${result.removed_records}, restored ${result.restored_records}`,
-          "Admin (reset key)",
+          cfg.undoNeedsKey ? "Admin (reset key)" : "Admin (typed confirmation and backup)",
         ]
       );
     });

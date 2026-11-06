@@ -1,5 +1,5 @@
 // V15 src/components/PendingCallSessionView.tsx
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
   Phone,
   PhoneCall,
@@ -225,6 +225,63 @@ export const PendingCallSessionView: React.FC<PendingCallSessionViewProps> = ({
 
   useEffect(() => {
     fetchCallingQueue(false);
+  }, [selectedAgentId, jobType]);
+
+  // Near real time call and SMS counts for the vehicles on screen. Only the live counts are merged in: the queue
+  // order, the customer on screen and anything the agent has typed or selected are never touched.
+  const countsInFlight = useRef<boolean>(false);
+  const refreshLiveCounts = async () => {
+    if (countsInFlight.current) return;
+    countsInFlight.current = true;
+    try {
+      const res = await fetch(
+        `/api/pending-submissions/jobs?agent_id=${encodeURIComponent(String(selectedAgentId))}&status=AMBER&job_type=${jobType}`
+      );
+      if (!res.ok) return;
+      const fresh: PendingSubmissionJob[] = await res.json();
+      const byId = new Map<number, PendingSubmissionJob>(fresh.map((j) => [j.id, j]));
+      const merge = (j: PendingSubmissionJob): PendingSubmissionJob => {
+        const f = byId.get(j.id);
+        if (!f) return j;
+        if (
+          f.client_attempt_count === j.client_attempt_count &&
+          f.client_sms_count === j.client_sms_count &&
+          f.solver_attempt_count === j.solver_attempt_count &&
+          f.last_client_attempt_at === j.last_client_attempt_at
+        ) {
+          return j;
+        }
+        return {
+          ...j,
+          client_attempt_count: f.client_attempt_count,
+          solver_attempt_count: f.solver_attempt_count,
+          last_client_attempt_at: f.last_client_attempt_at,
+          client_sms_count: f.client_sms_count,
+        };
+      };
+      setQueue((prev) => prev.map((g) => ({ ...g, records: g.records.map(merge) })));
+      setAllOpenJobs((prev) => prev.map(merge));
+    } catch {
+      // A failed background refresh is ignored: the next one will try again.
+    } finally {
+      countsInFlight.current = false;
+    }
+  };
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      if (!document.hidden) void refreshLiveCounts();
+    }, 15 * 1000);
+    const onVisible = () => {
+      if (!document.hidden) void refreshLiveCounts();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    window.addEventListener('focus', onVisible);
+    return () => {
+      clearInterval(timer);
+      document.removeEventListener('visibilitychange', onVisible);
+      window.removeEventListener('focus', onVisible);
+    };
   }, [selectedAgentId, jobType]);
 
   const handleCompanyChange = (company: string) => {

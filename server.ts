@@ -47,6 +47,7 @@ import {
   getPendingSubmissionTeam,
   reassignOpenSubmissions,
   syncPendingSubmissionAssignments,
+  ensureSubmissionsAssigned,
 } from "./pendingSubmissions";
 import { sendError, HttpError } from "./httpError";
 import { getPendingSubmissionAgentKpis, getCallbackAgentKpis } from "./agentKpiService";
@@ -55,7 +56,8 @@ import { INTEGRATIONS, getIntegrationPublicView, updateIntegrationSettings, getH
 import { sendSms, toInternationalMobile } from "./hostPinnacle";
 import { createRateLimiter } from "./rateLimit";
 import { outcomesFor, parseJobTypeParam } from "./pendingSubmissionOutcomes";
-import { getDataResetPreview, buildDataBackup, deleteAllRecords, undoLastUpload, verifyResetKey, parseResetSection } from "./dataReset";
+import { callbackCommentProblem } from "./src/lib/callbackComment";
+import { getDataResetPreview, buildDataBackup, deleteAllRecords, undoLastUpload, verifyBackupAccess } from "./dataReset";
 import { claimOutcomeReceipt, releaseOutcomeReceipt } from "./outcomeReceipts";
 import { isSolverSmsEnabled } from "./solverSmsSwitch";
 import { getPendingMaxAttemptsTimeline, filterMaxAttemptsGroups, buildPendingMaxAttemptsWorkbook } from "./pendingMaxAttemptsReport";
@@ -1404,9 +1406,10 @@ function computeActivitySummary(events: any[], totalAgents: number = 0) {
       if (!outcome) {
         return res.status(400).json({ error: "Outcome is required." });
       }
-      if (!comment || !String(comment).trim()) {
-        return res.status(400).json({ error: "Comment is required." });
-      }
+      // Only Customer Rejected and Done Elsewhere need a comment (at least 10 characters). Every other outcome may
+      // have none. Checked before any receipt is claimed.
+      const commentProblem = callbackCommentProblem(outcome, comment);
+      if (commentProblem) return res.status(400).json({ error: commentProblem });
 
       const claim = await claimOutcomeReceipt(db, "callbacks", req.body?.client_request_id, id);
       if (claim === "duplicate") return res.json({ id, success: true, duplicate: true });
@@ -1704,6 +1707,7 @@ function computeActivitySummary(events: any[], totalAgents: number = 0) {
     try {
       const { status, agent_id, search, company } = req.query as Record<string, string | undefined>;
       await closeMaturedPendingSubmissions(db);
+      await ensureSubmissionsAssigned(db);
       res.json(await getPendingSubmissionJobs(db, {
         status,
         agent_id,
@@ -1879,8 +1883,7 @@ function computeActivitySummary(events: any[], totalAgents: number = 0) {
 
   app.post("/api/data-reset/:section/backup", requireAdmin, async (req, res) => {
     try {
-      parseResetSection(req.params.section);
-      verifyResetKey(req.body?.reset_key);
+      verifyBackupAccess(req.params.section, req.body?.reset_key);
       const backup = await buildDataBackup(db, req.params.section);
       res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
       res.setHeader("Content-Disposition", `attachment; filename="${backup.filename}"`);
