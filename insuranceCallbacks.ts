@@ -13,6 +13,7 @@ import {
   ChannelPartnerAllocation,
   CallbackJobLog
 } from "./src/types/callbacks";
+import { callbackCommentProblem } from "./src/lib/callbackComment";
 
 const VALID_AGENT_OUTCOMES = new Set<string>([
   "SCHEDULED",
@@ -1066,6 +1067,10 @@ export async function logCallbackOutcome(
   if (!VALID_AGENT_OUTCOMES.has(cleanOutcome)) {
     throw new Error(`Invalid outcome '${outcome}'. Allowed values: ${Array.from(VALID_AGENT_OUTCOMES).join(", ")}`);
   }
+
+  // Customer Rejected and Done Elsewhere must carry a real explanation (also enforced in the forms and the route).
+  const commentProblem = callbackCommentProblem(cleanOutcome, cleanComment);
+  if (commentProblem) throw new Error(commentProblem);
 
   const resultingStatus = callbackOutcomeStatus(cleanOutcome);
 

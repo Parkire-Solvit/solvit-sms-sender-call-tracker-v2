@@ -167,6 +167,56 @@ export function computeAgentKpis(
 }
 
 // ---------------------------------------------------------------------------
+// Conversion rate (Pending Inspection and Pending Submission)
+// ---------------------------------------------------------------------------
+
+export interface ConversionStat {
+  /** Every GREEN record: scheduled (inspection) or submitted (submission), including ones closed by an upload. */
+  green: number;
+  /** Every record of the type, open or closed, whenever it closed. */
+  total: number;
+  /** green / total as a percentage with one decimal, or null when there are no records. */
+  rate: number | null;
+}
+
+export function conversionStat(green: number, total: number): ConversionStat {
+  return { green, total, rate: total <= 0 ? null : Math.round((green / total) * 1000) / 10 };
+}
+
+export interface ConversionRow {
+  assigned_agent_id: number | null;
+  status: string;
+  /** Number of records with this agent and status. */
+  n: number;
+}
+
+/**
+ * Conversion over ALL records (no date window): all GREEN records divided by all records, overall and per agent.
+ * Agents with no records get an empty stat (rate null) rather than being left out.
+ */
+export function computeConversion(
+  rows: ConversionRow[],
+  agentIds: number[]
+): { overall: ConversionStat; byAgent: Map<number, ConversionStat> } {
+  const green = new Map<number, number>();
+  const total = new Map<number, number>();
+  let overallGreen = 0;
+  let overallTotal = 0;
+  for (const r of rows) {
+    const n = Number(r.n) || 0;
+    overallTotal += n;
+    if (r.status === "GREEN") overallGreen += n;
+    if (r.assigned_agent_id === null || r.assigned_agent_id === undefined) continue;
+    const id = Number(r.assigned_agent_id);
+    total.set(id, (total.get(id) ?? 0) + n);
+    if (r.status === "GREEN") green.set(id, (green.get(id) ?? 0) + n);
+  }
+  const byAgent = new Map<number, ConversionStat>();
+  for (const id of agentIds) byAgent.set(id, conversionStat(green.get(id) ?? 0, total.get(id) ?? 0));
+  return { overall: conversionStat(overallGreen, overallTotal), byAgent };
+}
+
+// ---------------------------------------------------------------------------
 // Pace advisor
 // ---------------------------------------------------------------------------
 

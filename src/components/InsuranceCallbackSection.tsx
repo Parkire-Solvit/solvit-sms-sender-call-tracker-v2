@@ -51,6 +51,7 @@ import {
 import { CallSessionView } from './CallSessionView';
 import DataResetPanel from './DataResetPanel';
 import { saveOutcome } from '../lib/safeSave';
+import { callbackCommentProblem, isCommentRequiredForOutcome, MIN_REQUIRED_COMMENT_LENGTH } from '../lib/callbackComment';
 import { OnboardingTour } from './OnboardingTour';
 import { AgentReviewModal } from './AgentReviewModal';
 import { UnmatchedActivityModal } from './UnmatchedActivityModal';
@@ -742,7 +743,12 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
       setOutcomeError('Please select a specific outcome.');
       return;
     }
-    // Comment is now optional
+    // Customer Rejected and Done Elsewhere must be explained (the server enforces the same rule).
+    const commentProblem = callbackCommentProblem(selectedOutcome, outcomeComment);
+    if (commentProblem) {
+      setOutcomeError(commentProblem);
+      return;
+    }
 
     setIsSubmittingOutcome(true);
     setOutcomeError(null);
@@ -2984,14 +2990,28 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 pt-0.5">
                   <div className="sm:col-span-2">
                     <label className="text-[11px] font-bold text-slate-700 block mb-1">
-                      Callback Notes & Summary <span className="text-slate-400 font-normal">(Optional)</span>
+                      Callback Notes & Summary{' '}
+                      {isCommentRequiredForOutcome(selectedOutcome) ? (
+                        <span className="text-red-500 font-bold">* Required (min {MIN_REQUIRED_COMMENT_LENGTH} characters)</span>
+                      ) : (
+                        <span className="text-slate-400 font-normal">(Optional)</span>
+                      )}
                     </label>
                     <textarea
                       rows={2}
                       value={outcomeComment}
                       onChange={(e) => setOutcomeComment(e.target.value)}
-                      placeholder="Notes (e.g. callback requested tomorrow 2pm, optional)..."
-                      className="w-full px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-800 font-medium placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-[#ff353e]/20 focus:border-[#ff353e] resize-none"
+                      required={isCommentRequiredForOutcome(selectedOutcome)}
+                      placeholder={
+                        isCommentRequiredForOutcome(selectedOutcome)
+                          ? 'Explain why (e.g. customer refused inspection because...)'
+                          : 'Notes (e.g. callback requested tomorrow 2pm, optional)...'
+                      }
+                      className={`w-full px-3 py-1.5 bg-slate-50 border rounded-xl text-xs text-slate-800 font-medium placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-[#ff353e]/20 focus:border-[#ff353e] resize-none ${
+                        isCommentRequiredForOutcome(selectedOutcome) && outcomeComment.trim().length < MIN_REQUIRED_COMMENT_LENGTH
+                          ? 'border-red-300'
+                          : 'border-slate-200'
+                      }`}
                     />
                   </div>
                   <div>

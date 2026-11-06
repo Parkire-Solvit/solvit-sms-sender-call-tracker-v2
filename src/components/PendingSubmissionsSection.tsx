@@ -1,5 +1,5 @@
 // FIXPASS src/components/PendingSubmissionsSection.tsx
-import React, { useState, useEffect, useMemo, FormEvent } from 'react';
+import React, { useState, useEffect, useMemo, useRef, FormEvent } from 'react';
 import {
   FileText,
   Upload,
@@ -28,6 +28,7 @@ import {
   PhoneCall,
   Users,
   UserCheck,
+  Target,
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { parsePendingSubmissionRows, SkippedRow } from '../lib/pendingSubmissionsParser';
@@ -198,6 +199,7 @@ interface TeamInfo {
   agents: Array<{ id: number; name: string; open_count: number }>;
   unassigned_open_count: number;
   orphaned_open_count: number;
+  unassigned_closed_count?: number;
 }
 
 interface ImportConfirmationInfo {
@@ -387,7 +389,7 @@ export default function PendingSubmissionsSection({ isAdmin }: PendingSubmission
 
   // Team tab
   const [team, setTeam] = useState<TeamInfo | null>(null);
-  const [reassignPreview, setReassignPreview] = useState<{ records: number; clients: number; agents_used: number } | null>(null);
+  const [reassignPreview, setReassignPreview] = useState<{ records: number; closed_records: number; clients: number; agents_used: number } | null>(null);
   const [reassigning, setReassigning] = useState<boolean>(false);
   const [teamMessage, setTeamMessage] = useState<{ text: string; error?: boolean } | null>(null);
 
@@ -487,19 +489,33 @@ export default function PendingSubmissionsSection({ isAdmin }: PendingSubmission
     }
   };
 
-  const fetchJobs = async () => {
+  // Signature of the last list received, so a background refresh that finds nothing new changes nothing on screen.
+  const lastJobsSignature = useRef<string>('');
+  const jobsInFlight = useRef<boolean>(false);
+
+  const fetchJobs = async (silent: boolean = false) => {
+    // Background refreshes never overlap: a slow request is simply not stacked up behind another.
+    if (silent && jobsInFlight.current) return;
+    jobsInFlight.current = true;
     try {
       const res = await fetch('/api/pending-submissions/jobs');
       if (res.ok) {
         const data = await res.json();
-        setAllJobs(data);
-        setKpiRefreshToken((n) => n + 1);
+        const signature = JSON.stringify(data);
+        if (!silent || signature !== lastJobsSignature.current) {
+          lastJobsSignature.current = signature;
+          setAllJobs(data);
+          setKpiRefreshToken((n) => n + 1);
+        }
       }
     } catch (e) {
-      console.error('Failed to fetch pending submission jobs:', e);
+      if (!silent) console.error('Failed to fetch pending submission jobs:', e);
     } finally {
-      setLoading(false);
-      setRefreshing(false);
+      jobsInFlight.current = false;
+      if (!silent) {
+        setLoading(false);
+        setRefreshing(false);
+      }
     }
   };
 
@@ -508,6 +524,25 @@ export default function PendingSubmissionsSection({ isAdmin }: PendingSubmission
     fetchAgents();
     fetchIntegrations();
     fetchJobs();
+  }, []);
+
+  // Near real time (same approach as the agent KPI panel): refresh the list every 15 seconds while the tab is
+  // visible, and straight away when the tab comes back into view, so calls and SMS logged by the Android app and
+  // changes made by other people show up without pressing Refresh. Background refreshes are silent.
+  useEffect(() => {
+    const timer = setInterval(() => {
+      if (!document.hidden) void fetchJobs(true);
+    }, 15 * 1000);
+    const onVisible = () => {
+      if (!document.hidden) void fetchJobs(true);
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    window.addEventListener('focus', onVisible);
+    return () => {
+      clearInterval(timer);
+      document.removeEventListener('visibilitychange', onVisible);
+      window.removeEventListener('focus', onVisible);
+    };
   }, []);
 
   // The outcome list follows the tab: Scheduled for an inspection, Submitted for a submission job.
@@ -647,7 +682,11 @@ export default function PendingSubmissionsSection({ isAdmin }: PendingSubmission
       if (j.latest_outcome === 'MAX_ATTEMPTS_REACHED') maxAttempts++;
     }
 
-    return { total: scoped.length, amber, green, submitted, red, overdue, maxAttempts };
+    // Conversion: every GREEN record (agent-closed and closed by upload) out of every record in scope, open or closed.
+    const closedGreen = green + submitted;
+    const conversionRate = scoped.length === 0 ? null : Math.round((closedGreen / scoped.length) * 1000) / 10;
+
+    return { total: scoped.length, amber, green, submitted, red, overdue, maxAttempts, closedGreen, conversionRate };
   }, [jobs, agentFilter]);
 
   // One group per customer, ordered by the customer's oldest schedule date (longest overdue first, any company).
@@ -948,11 +987,13 @@ export default function PendingSubmissionsSection({ isAdmin }: PendingSubmission
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || 'Failed to preview the reassignment');
-      if (data.records === 0) {
+      const openCount = Number(data.records) || 0;
+      const closedCount = Number(data.closed_records) || 0;
+      if (openCount + closedCount === 0) {
         setReassignPreview(null);
-        setTeamMessage({ text: 'Nothing to reassign. Every open record already belongs to an active team member.' });
+        setTeamMessage({ text: 'Nothing to reassign. Every record, open or closed, already belongs to an agent.' });
       } else {
-        setReassignPreview({ records: data.records, clients: data.clients, agents_used: data.agents_used });
+        setReassignPreview({ records: openCount, closed_records: closedCount, clients: data.clients, agents_used: data.agents_used });
       }
     } catch (err) {
       setTeamMessage({ text: (err as Error).message, error: true });
@@ -972,7 +1013,9 @@ export default function PendingSubmissionsSection({ isAdmin }: PendingSubmission
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || 'Failed to reassign');
       setReassignPreview(null);
-      setTeamMessage({ text: `${data.records} record(s) reassigned across ${data.agents_used} agent(s).` });
+      setTeamMessage({
+        text: `${data.records} open and ${data.closed_records ?? 0} closed record(s) assigned across ${data.agents_used} agent(s).`,
+      });
       await fetchTeam();
       fetchJobs();
     } catch (err) {
@@ -1273,7 +1316,7 @@ export default function PendingSubmissionsSection({ isAdmin }: PendingSubmission
       </div>
 
       {/* Metric Cards */}
-      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-7 gap-3.5">
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-8 gap-3.5">
         <div
           onClick={() => {
             setStatusFilter('ALL');
@@ -1407,6 +1450,23 @@ export default function PendingSubmissionsSection({ isAdmin }: PendingSubmission
             <AlertCircle className="w-4 h-4 opacity-70" />
           </div>
           <span className="text-2xl font-black mt-1 block">{counts.maxAttempts}</span>
+        </div>
+
+        <div
+          id="pending-conversion-rate-card"
+          className="p-4 rounded-2xl border bg-emerald-50 border-emerald-200 text-emerald-800"
+          title={`All closed green records (${counts.closedGreen}) out of all records in scope (${counts.total}), open and closed`}
+        >
+          <div className="flex items-center justify-between">
+            <span className="text-[11px] font-bold uppercase tracking-wider block opacity-80">Conversion Rate</span>
+            <Target className="w-4 h-4 opacity-70" />
+          </div>
+          <span className="text-2xl font-black mt-1 block">
+            {counts.conversionRate === null ? 'n/a' : `${counts.conversionRate}%`}
+          </span>
+          <span className="text-[10px] font-semibold opacity-70 block mt-0.5">
+            {counts.closedGreen} of {counts.total} {jobType === 'SUBMISSION' ? 'submitted' : 'scheduled'}
+          </span>
         </div>
       </div>
 
@@ -2679,10 +2739,14 @@ export default function PendingSubmissionsSection({ isAdmin }: PendingSubmission
                     )}
                   </div>
 
-                  <div className="grid grid-cols-2 gap-3">
+                  <div className="grid grid-cols-3 gap-3">
                     <div className="p-3 rounded-2xl bg-amber-50 border border-amber-200">
                       <span className="text-[11px] font-bold text-amber-800 block">Unassigned open records</span>
                       <span className="text-xl font-black text-amber-900">{team?.unassigned_open_count ?? 0}</span>
+                    </div>
+                    <div className="p-3 rounded-2xl bg-amber-50 border border-amber-200">
+                      <span className="text-[11px] font-bold text-amber-800 block">Unassigned closed records</span>
+                      <span className="text-xl font-black text-amber-900">{team?.unassigned_closed_count ?? 0}</span>
                     </div>
                     <div className="p-3 rounded-2xl bg-amber-50 border border-amber-200">
                       <span className="text-[11px] font-bold text-amber-800 block">With an inactive agent</span>
@@ -2692,13 +2756,14 @@ export default function PendingSubmissionsSection({ isAdmin }: PendingSubmission
 
                   <div className="p-4 bg-slate-50 border border-slate-200 rounded-2xl space-y-3">
                     <p className="text-[11px] text-slate-600 leading-relaxed">
-                      Redistributes only open records that are unassigned or held by an agent who is archived or no longer on
-                      the team. Records held by active team members are never moved, and one client always stays with one agent.
+                      Gives every unassigned record (open or closed) to the team, and redistributes open records held by an agent
+                      who is archived or no longer on the team. Records held by active team members are never moved, and one
+                      client always stays with one agent. This also runs automatically, so no manual step should be needed.
                     </p>
                     {reassignPreview ? (
                       <div className="space-y-2">
                         <p className="text-xs font-semibold text-slate-800">
-                          {reassignPreview.records} record(s) for {reassignPreview.clients} client(s) will be redistributed across{' '}
+                          {reassignPreview.records} open and {reassignPreview.closed_records} closed record(s) for {reassignPreview.clients} client(s) will be assigned across{' '}
                           {reassignPreview.agents_used} agent(s).
                         </p>
                         <div className="flex gap-2">

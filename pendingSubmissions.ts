@@ -1151,7 +1151,8 @@ export async function getPendingSubmissionJobs(
     )`;
     params.push(term, term, term, term, term, term, term, term);
   }
-  sql += ` ORDER BY j.first_imported_at DESC, j.id DESC`;
+  // Oldest schedule date first (the job that needs attention first). Undated records last. Ties by external id.
+  sql += ` ORDER BY CASE WHEN j.schedule_date IS NULL THEN 1 ELSE 0 END ASC, j.schedule_date ASC, j.external_id ASC, j.id ASC`;
 
   const rows = (await db.queryAll<any>(sql, params)).map((r) => ({
     ...r,
@@ -1351,6 +1352,8 @@ export interface PendingSubmissionTeam {
   agents: Array<{ id: number; name: string; open_count: number }>;
   unassigned_open_count: number;
   orphaned_open_count: number;
+  /** Closed (GREEN or RED) records that no agent owns. They still show as Unassigned and carry no KPI credit. */
+  unassigned_closed_count: number;
 }
 
 /** Active agents with their open load, plus open (AMBER) records nobody active is working on. */
@@ -1371,11 +1374,15 @@ export async function getPendingSubmissionTeam(db: Q): Promise<PendingSubmission
     else if (activeIds.has(agentId)) load.set(agentId, n);
     else orphaned += n;
   }
+  const closedRow = await db.queryOne<{ n: unknown }>(
+    `SELECT COUNT(*) AS n FROM pending_submission_jobs WHERE status <> 'AMBER' AND assigned_agent_id IS NULL`
+  );
   return {
     callback_team_tag: settings.callback_team_tag,
     agents: agents.map((a) => ({ id: a.id, name: a.name, open_count: load.get(a.id) ?? 0 })),
     unassigned_open_count: unassigned,
     orphaned_open_count: orphaned,
+    unassigned_closed_count: num(closedRow?.n),
   };
 }
 
@@ -1383,6 +1390,8 @@ export interface ReassignResult {
   dry_run: boolean;
   /** Open records that are (dry run) or were (real run) moved. */
   records: number;
+  /** Closed records with no owner that are (dry run) or were (real run) given to the team. */
+  closed_records: number;
   /** Distinct clients involved. All of a client's records go to one agent. */
   clients: number;
   /** Distinct agents that receive records. */
@@ -1424,16 +1433,37 @@ export async function reassignOpenSubmissions(db: DbAdapter, opts: { dryRun: boo
     agents,
     held
   );
+
+  // Closed records that nobody owns (closed while unassigned, or closed before an agent was available) are given to the
+  // team too, so every record has an owner. They are planned after the open work, keeping a customer with the agent who
+  // already holds that customer. Closed records held by an archived agent keep that agent: that history is not rewritten.
+  const closedRows = await db.queryAll<{ id: unknown; client_phone: string; solver_contact: string; job_type: unknown }>(
+    `SELECT id, client_phone, solver_contact, job_type FROM pending_submission_jobs WHERE status <> 'AMBER' AND assigned_agent_id IS NULL`
+  );
+  const closedPool = closedRows.map((j) => ({ id: num(j.id), job_type: normalizeJobType(j.job_type), key: groupKeyFor(j) }));
+  const heldAfterOpen = [...held];
+  for (const r of pool) {
+    const agentId = plan.get(`${r.job_type}|${r.key}`);
+    if (agentId !== null && agentId !== undefined) heldAfterOpen.push({ job_type: r.job_type, key: r.key, agent_id: agentId });
+  }
+  const closedPlan = planAssignmentsByType(
+    closedPool.map((r) => ({ job_type: r.job_type, key: r.key })),
+    agents,
+    heldAfterOpen
+  );
+
   const agentsUsed = new Set<number>();
   for (const v of plan.values()) if (v !== null) agentsUsed.add(v);
+  for (const v of closedPlan.values()) if (v !== null) agentsUsed.add(v);
 
   const summary: ReassignResult = {
     dry_run: opts.dryRun,
     records: pool.length,
-    clients: new Set(pool.map((r) => `${r.job_type}|${r.key}`)).size,
+    closed_records: closedPool.length,
+    clients: new Set([...pool, ...closedPool].map((r) => `${r.job_type}|${r.key}`)).size,
     agents_used: agentsUsed.size,
   };
-  if (opts.dryRun || pool.length === 0) return summary;
+  if (opts.dryRun || (pool.length === 0 && closedPool.length === 0)) return summary;
 
   await db.transaction(async (tx) => {
     for (const r of pool) {
@@ -1449,6 +1479,15 @@ export async function reassignOpenSubmissions(db: DbAdapter, opts: { dryRun: boo
         );
       }
     }
+    // Ownership only: no history row and no change to closed_at, status or outcome, so the record's history is untouched.
+    for (const r of closedPool) {
+      const agentId = closedPlan.get(`${r.job_type}|${r.key}`) ?? null;
+      if (agentId === null) continue;
+      await tx.execute(
+        `UPDATE pending_submission_jobs SET assigned_agent_id = ? WHERE id = ? AND status <> 'AMBER' AND assigned_agent_id IS NULL`,
+        [agentId, r.id]
+      );
+    }
   });
   return summary;
 }
@@ -1458,7 +1497,7 @@ export async function reassignOpenSubmissions(db: DbAdapter, opts: { dryRun: boo
 // ---------------------------------------------------------------------------
 
 export interface AssignmentSyncResult {
-  /** Open records that had no active agent and were given one. */
+  /** Records (open, and closed ones nobody owned) that had no active agent and were given one. */
   assigned: number;
   /** Untouched open records moved to even out the workload after a team change. */
   rebalanced: number;
@@ -1494,13 +1533,31 @@ export function syncPendingSubmissionAssignments(db: DbAdapter): Promise<Assignm
   return run;
 }
 
+/**
+ * Self-healing guard for the job list: if any record has no owner while an active agent exists, run the normal
+ * assignment sync (serialised, same rules). A cheap one-row check when everything is owned, so it is safe to call on
+ * every list load. It never throws, because a failed assignment must not break the list.
+ */
+export async function ensureSubmissionsAssigned(db: DbAdapter): Promise<void> {
+  try {
+    const orphan = await db.queryOne<{ id: unknown }>(
+      `SELECT id FROM pending_submission_jobs WHERE assigned_agent_id IS NULL LIMIT 1`
+    );
+    if (!orphan) return;
+    const result = await syncPendingSubmissionAssignments(db);
+    if (result.assigned > 0) console.log(`[PENDING] Assignment guard: gave ${result.assigned} unowned record(s) to the team.`);
+  } catch (err) {
+    console.error("[PENDING] Assignment guard failed:", err);
+  }
+}
+
 async function runAssignmentSync(db: DbAdapter): Promise<AssignmentSyncResult> {
   const settings = await getPendingSubmissionSettings(db);
   const agents = await getValidSubmissionAgents(db, settings.callback_team_tag);
   if (agents.length === 0) return { ...NO_SYNC };
 
   const assignedResult = await reassignOpenSubmissions(db, { dryRun: false });
-  const result: AssignmentSyncResult = { ...NO_SYNC, assigned: assignedResult.records };
+  const result: AssignmentSyncResult = { ...NO_SYNC, assigned: assignedResult.records + assignedResult.closed_records };
 
   const signature = teamSignature(agents);
   const row = await db.queryOne<{ team_signature: string | null }>(

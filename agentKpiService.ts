@@ -5,11 +5,13 @@ import { getSystemSettings } from "./settingsManager";
 import {
   AgentKpi,
   AgentPace,
+  ConversionStat,
   KPI_WINDOW_DAYS,
   KpiRecord,
   PACE_LOOKBACK_WORKING_DAYS,
   computeAgentKpis,
   computeAgentPace,
+  computeConversion,
   lookbackStartMs,
 } from "./agentKpi";
 import {
@@ -43,7 +45,9 @@ export interface AgentKpiReport {
   /** Label for records closed because an upload no longer contained them. */
   upload_closed_label: string;
   unassigned_open: number;
-  agents: Array<AgentKpi & { pace: AgentPace }>;
+  /** Pending Submissions only: conversion of all records of the type (all GREEN / all records), whoever holds them. */
+  conversion?: ConversionStat;
+  agents: Array<AgentKpi & { pace: AgentPace; conversion?: ConversionStat }>;
 }
 
 const num = (v: unknown): number => Number(v);
@@ -146,7 +150,25 @@ export async function getPendingSubmissionAgentKpis(
     };
   });
 
-  return buildReport(db, "pending_submissions", nowMs, agents, records, { calls: settings.max_attempts, sms: settings.max_sms_attempts }, "Closed by upload", KPI_WINDOW_DAYS);
+  const report = await buildReport(db, "pending_submissions", nowMs, agents, records, { calls: settings.max_attempts, sms: settings.max_sms_attempts }, "Closed by upload", KPI_WINDOW_DAYS);
+
+  // Conversion rate: all GREEN records over all records of the type, with no date window.
+  const conversionRows = await db.queryAll<{ assigned_agent_id: unknown; status: string; job_type: unknown; n: unknown }>(
+    `SELECT assigned_agent_id, status, job_type, COUNT(*) AS n FROM pending_submission_jobs GROUP BY assigned_agent_id, status, job_type`
+  );
+  const { overall, byAgent } = computeConversion(
+    conversionRows
+      .filter((r) => jobType === undefined || normalizeJobType(r.job_type) === jobType)
+      .map((r) => ({
+        assigned_agent_id: r.assigned_agent_id === null || r.assigned_agent_id === undefined ? null : num(r.assigned_agent_id),
+        status: String(r.status),
+        n: num(r.n),
+      })),
+    agents.map((a) => a.id)
+  );
+  report.conversion = overall;
+  report.agents = report.agents.map((a) => ({ ...a, conversion: byAgent.get(a.agent_id) }));
+  return report;
 }
 
 // ---------------------------------------------------------------------------
