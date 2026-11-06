@@ -45,7 +45,7 @@ export interface AgentKpiReport {
   /** Label for records closed because an upload no longer contained them. */
   upload_closed_label: string;
   unassigned_open: number;
-  /** Pending Submissions only: conversion of all records of the type (all GREEN / all records), whoever holds them. */
+  /** Conversion of all records (all GREEN / all records), whoever holds them. Pending Submissions: per job type. */
   conversion?: ConversionStat;
   agents: Array<AgentKpi & { pace: AgentPace; conversion?: ConversionStat }>;
 }
@@ -219,6 +219,22 @@ export async function getCallbackAgentKpis(db: DbAdapter, nowMs: number = Date.n
     };
   });
 
-  return buildReport(db, "callbacks", nowMs, agents, records, { calls: settings.max_attempts, sms: settings.max_sms_attempts }, "Closed by upload", null);
+  const report = await buildReport(db, "callbacks", nowMs, agents, records, { calls: settings.max_attempts, sms: settings.max_sms_attempts }, "Closed by upload", null);
+
+  // Conversion rate: all GREEN (scheduled) callbacks over all callbacks, with no date window, overall and per agent.
+  const conversionRows = await db.queryAll<{ assigned_agent_id: unknown; status: string; n: unknown }>(
+    `SELECT assigned_agent_id, status, COUNT(*) AS n FROM callback_jobs WHERE status IN ('AMBER', 'GREEN', 'RED') GROUP BY assigned_agent_id, status`
+  );
+  const { overall, byAgent } = computeConversion(
+    conversionRows.map((r) => ({
+      assigned_agent_id: r.assigned_agent_id === null || r.assigned_agent_id === undefined ? null : num(r.assigned_agent_id),
+      status: String(r.status),
+      n: num(r.n),
+    })),
+    agents.map((a) => a.id)
+  );
+  report.conversion = overall;
+  report.agents = report.agents.map((a) => ({ ...a, conversion: byAgent.get(a.agent_id) }));
+  return report;
 }
 // V15 END agentKpiService.ts

@@ -36,6 +36,8 @@ interface ComplianceAgentTableProps {
   startDate?: string;
   endDate?: string;
   onInspectContact?: (phone: string) => void;
+  /** Agent logins see the table but cannot add agents, change tags or delete agents. */
+  readOnly?: boolean;
 }
 
 export const ComplianceAgentTable: React.FC<ComplianceAgentTableProps> = ({
@@ -48,6 +50,7 @@ export const ComplianceAgentTable: React.FC<ComplianceAgentTableProps> = ({
   onInspectAgent,
   onDeleteAgent,
   onRemoveAgent,
+  readOnly = false,
   allObligations = [],
   allEvents = [],
   turnaroundReport,
@@ -174,7 +177,7 @@ export const ComplianceAgentTable: React.FC<ComplianceAgentTableProps> = ({
 
           {/* Export Button */}
           <div className="flex flex-wrap items-center gap-2.5">
-            <button
+            {!readOnly && (<button
               id="btn-add-agent"
               type="button"
               onClick={onAddAgent}
@@ -182,7 +185,7 @@ export const ComplianceAgentTable: React.FC<ComplianceAgentTableProps> = ({
             >
               <UserPlus className="w-3.5 h-3.5" />
               <span>Add Agent</span>
-            </button>
+            </button>)}
             <button
               id="btn-export-agent-compliance-excel"
               type="button"
@@ -283,7 +286,12 @@ export const ComplianceAgentTable: React.FC<ComplianceAgentTableProps> = ({
                   </td>
 
                   <td className="px-4 py-3.5">
-                    <button
+                    {readOnly ? (
+                      <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-semibold bg-slate-100 text-slate-700 border border-slate-200">
+                        <TagIcon className="w-3 h-3 text-slate-400" />
+                        {ag.tag || 'Untagged'}
+                      </span>
+                    ) : (<button
                       id={`btn-edit-agent-tag-${ag.agent_id}`}
                       type="button"
                       onClick={() => onEditAgentTag({ id: ag.agent_id, name: ag.agent_name, tag: ag.tag })}
@@ -293,7 +301,7 @@ export const ComplianceAgentTable: React.FC<ComplianceAgentTableProps> = ({
                       <TagIcon className="w-3 h-3 text-slate-400" />
                       {ag.tag || 'Untagged'}
                       <Edit2 className="w-2.5 h-2.5 ml-0.5 opacity-60" />
-                    </button>
+                    </button>)}
                   </td>
 
                   <td className="px-4 py-3.5 text-center font-mono font-bold text-slate-800 text-xs">
@@ -372,7 +380,7 @@ export const ComplianceAgentTable: React.FC<ComplianceAgentTableProps> = ({
                         <span>Drill Down</span>
                         <ChevronRight className="w-3 h-3 text-amber-500" />
                       </button>
-                      {(onDeleteAgent || onRemoveAgent) && (
+                      {!readOnly && (onDeleteAgent || onRemoveAgent) && (
                         <button
                           id={`btn-delete-agent-${ag.agent_id}`}
                           type="button"

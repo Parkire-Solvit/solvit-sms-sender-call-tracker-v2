@@ -37,7 +37,7 @@ export interface AgentKpiRow {
   sms_remaining: number;
   oldest_open_days: number | null;
   pace: AgentKpiPace;
-  /** Pending Submissions only: all GREEN records over all records held by the agent. */
+  /** All GREEN records over all records held by the agent. */
   conversion?: ConversionStat;
 }
 
@@ -49,7 +49,7 @@ export interface AgentKpiReportData {
   requirements: { calls: number; sms: number };
   upload_closed_label: string;
   unassigned_open: number;
-  /** Pending Submissions only: all GREEN records over all records of the type. */
+  /** All GREEN records over all records (per job type for Pending). */
   conversion?: ConversionStat;
   agents: AgentKpiRow[];
 }

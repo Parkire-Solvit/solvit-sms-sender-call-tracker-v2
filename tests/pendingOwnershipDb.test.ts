@@ -180,6 +180,22 @@ async function main() {
   const ok = await cb.logCallbackOutcome(db, jid, "DECLINED", "Customer refused the inspection.", "Mary Muriuki");
   assert(ok.status === "RED", "a real comment is accepted and closes the record");
 
+  // ---- 6b. Callbacks conversion rate in the KPI: all GREEN callbacks over all callbacks ----
+  const cbKpi0 = await kpi.getCallbackAgentKpis(db, Date.now());
+  assert(cbKpi0.conversion.total === 1 && cbKpi0.conversion.green === 0 && cbKpi0.conversion.rate === 0, `callbacks conversion starts at 0 of 1 (got ${JSON.stringify(cbKpi0.conversion)})`);
+  await cb.importCallbackJobs(db, { file_name: "conv.xlsx", imported_by: "Caroline", rows: [
+    { vehicle_reg: "KDD 101A", client_name: "C1", client_phone: "0733200001", customer_email: "", channel_partner: "Partner", initiated_date: "2026-01-01", reason: "x" },
+    { vehicle_reg: "KDD 102A", client_name: "C2", client_phone: "0733200002", customer_email: "", channel_partner: "Partner", initiated_date: "2026-01-01", reason: "x" },
+    { vehicle_reg: "KDD 103A", client_name: "C3", client_phone: "0733200003", customer_email: "", channel_partner: "Partner", initiated_date: "2026-01-01", reason: "x" },
+  ] });
+  const kdd = await db.queryAll("SELECT id, vehicle_reg FROM callback_jobs WHERE vehicle_reg LIKE 'KDD%' ORDER BY vehicle_reg");
+  await cb.logCallbackOutcome(db, Number(kdd[0].id), "SCHEDULED", "Booked for Monday", "Mary Muriuki"); // GREEN
+  await db.execute("UPDATE callback_jobs SET closed_at = '2024-01-01T00:00:00Z' WHERE id = ?", [Number(kdd[0].id)]); // an old closure still counts
+  await cb.logCallbackOutcome(db, Number(kdd[1].id), "WRONG_NUMBER", "", "Mary Muriuki"); // RED
+  const cbKpi = await kpi.getCallbackAgentKpis(db, Date.now());
+  assert(cbKpi.conversion.total === 4 && cbKpi.conversion.green === 1 && cbKpi.conversion.rate === 25, `callbacks conversion is 1 of 4 = 25% across all records (got ${JSON.stringify(cbKpi.conversion)})`);
+  assert(cbKpi.agents.every((a: any) => a.conversion !== undefined), "every callback agent row carries a conversion");
+
   // ---- 7. Callbacks list: oldest first (partners by oldest job, then customers, then vehicles) ----
   await db.execute("DELETE FROM callback_job_logs");
   await db.execute("DELETE FROM callback_job_phones");
