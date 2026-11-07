@@ -425,9 +425,27 @@ export interface ContactJob {
   type_changed_at?: unknown;
 }
 
-/** The number whose calls and SMS count for this job: the client for an inspection job, the solver for a submission job. */
+/**
+ * The job's main contact: the client for an inspection job, the solver for a submission job. It decides how a customer's
+ * jobs are grouped for one agent and which number is shown first. It is NOT the only number that is counted: see
+ * countedPhonesOf.
+ */
 export function primaryPhoneOf(job: { job_type?: unknown; client_phone: string; solver_contact: string }): string {
   return normalizePhone(normalizeJobType(job.job_type) === "SUBMISSION" ? job.solver_contact : job.client_phone);
+}
+
+/**
+ * Every number whose calls and SMS count for this job, main contact first.
+ *  - Inspection job: the client's number only.
+ *  - Submission job: the solver's number AND the client's number. A call or SMS to either one counts towards the same
+ *    maximums (one shared count, never two separate ones), so the targets are unchanged.
+ * Empty numbers are left out and a number that appears twice is listed once.
+ */
+export function countedPhonesOf(job: { job_type?: unknown; client_phone: string; solver_contact: string }): string[] {
+  const phones = normalizeJobType(job.job_type) === "SUBMISSION"
+    ? [normalizePhone(job.solver_contact), normalizePhone(job.client_phone)]
+    : [normalizePhone(job.client_phone)];
+  return phones.filter((p, i) => p !== "" && phones.indexOf(p) === i);
 }
 
 /** Counting starts at the later of the first import and the last type change. NaN when the import time is unreadable. */
@@ -459,9 +477,10 @@ export interface ContactEvent {
  * Pending Submissions keeps one rule Callbacks does not have: an event only counts if it happened on or after
  * the job's first_imported_at.
  * Solver calls are informational: any team agent, OUTGOING, phone equals the solver's phone.
- * A submission job (the car was inspected but the solver has not submitted the data) counts the SOLVER's number as
- * its primary contact, exactly as an inspection job counts the client's. Calls to any other number (the client, a
- * broker) are not counted. Counting starts at the later of first_imported_at and type_changed_at.
+ * An inspection job counts the CLIENT's number. A submission job (the car was inspected but the solver has not
+ * submitted the data) counts BOTH the solver's number and the client's number, as one shared count against the same
+ * maximums (see countedPhonesOf). Calls to any other number (a broker) are not counted. Counting starts at the later of
+ * first_imported_at and type_changed_at.
  */
 export function countClientContacts(
   jobs: ContactJob[],
@@ -493,8 +512,8 @@ export function countClientContacts(
     const ms = countingStartMs(j);
     if (isNaN(ms)) continue;
     firstMs.set(j.id, ms);
-    // byClient holds the PRIMARY contact: the client for an inspection job, the solver for a submission job.
-    push(byClient, primaryPhoneOf(j), j);
+    // byClient holds every counted number: the client for an inspection job, the solver and the client for a submission job.
+    for (const counted of countedPhonesOf(j)) push(byClient, counted, j);
     push(byReg, normalizeRegAlphaNumeric(j.vehicle_reg), j);
     push(bySolver, normalizePhone(j.solver_contact), j);
   }
@@ -585,7 +604,8 @@ export async function computePendingSubmissionActivity(db: Q, jobs: ContactJob[]
 /**
  * Closes AMBER jobs RED (MAX_ATTEMPTS_REACHED) when client_attempt_count >= max_attempts AND client_sms_count >=
  * max_sms_attempts (the Insurance Job Callbacks rule) AND the latest counted call or SMS is at least
- * max_attempts_grace_minutes old. Solver attempts never count.
+ * max_attempts_grace_minutes old. The counts are the job's counted numbers (see countedPhonesOf): the customer for an
+ * inspection job, the solver and the customer together for a submission job. The informational "solver" figure never counts.
  * Safe to call concurrently: the update is conditional on status = 'AMBER' and the log row is only written
  * when exactly one row changed. Returns the number of jobs closed.
  */

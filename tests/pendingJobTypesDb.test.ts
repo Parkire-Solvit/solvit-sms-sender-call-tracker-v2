@@ -99,7 +99,7 @@ async function main() {
   const submitted = await ps.logPendingSubmissionOutcome(db, Number((await jobOf(14)).id), { outcome: "SOLVER_SUBMITTED", comment: "", logged_by: "Amina" });
   assert(submitted.job.status === "GREEN" && submitted.job.latest_outcome === "SOLVER_SUBMITTED", "Submitted closes a submission job GREEN");
 
-  // ---- 4. Counting for a submission job uses the solver's number ----
+  // ---- 4. Counting for a submission job uses the solver's number AND the customer's number, as one shared count ----
   const solverPhone = ps.normalizePhone("0733000001");
   const clientPhone11 = String((await jobOf(11)).client_phone);
   const ts = (offsetSec: number) => new Date(Date.now() + 20_000 + offsetSec * 1000).toISOString();
@@ -108,12 +108,14 @@ async function main() {
   const a11 = await owner(11);
   await ev(a11, "CALL", "OUTGOING", solverPhone, 1);
   await ev(a11, "CALL", "OUTGOING", solverPhone, 2);
-  await ev(a11, "CALL", "OUTGOING", clientPhone11, 3); // a call to the client is allowed but not counted
+  await ev(a11, "CALL", "OUTGOING", clientPhone11, 3); // a call to the customer counts too
   await ev(a11, "SMS", "SENT", solverPhone, 4);
+  await ev(a11, "SMS", "SENT", clientPhone11, 5);      // and so does an SMS to the customer
+  await ev(a11, "CALL", "OUTGOING", ps.normalizePhone("0700999888"), 6); // a broker's number never counts
   const asSubmission = async (ext: number) => { const r = await jobOf(ext); return { ...r, id: Number(r.id), assigned_agent_id: Number(r.assigned_agent_id) }; };
   let act = await ps.computePendingSubmissionActivity(db, [await asSubmission(11)]);
-  assert(act.get(j11).client_attempt_count === 2, `two calls to the solver are counted (got ${act.get(j11).client_attempt_count})`);
-  assert(act.get(j11).client_sms_count === 1, "the SMS to the solver is counted");
+  assert(act.get(j11).client_attempt_count === 3, `two calls to the solver and one to the customer are counted (got ${act.get(j11).client_attempt_count})`);
+  assert(act.get(j11).client_sms_count === 2, `the SMS to the solver and the SMS to the customer are counted together (got ${act.get(j11).client_sms_count})`);
 
   // ---- 5. A later upload with only inspection rows never closes submission jobs ----
   const second = await ps.importPendingSubmissions(db, "inspections.xlsx", "Brian", [mk(1, INS, "0700000001"), mk(2, INS, "0700000002")], { confirmed: true });
