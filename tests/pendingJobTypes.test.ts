@@ -11,7 +11,7 @@ import {
   parseJobTypeParam,
   statusForAgentOutcome,
 } from "../pendingSubmissionOutcomes";
-import { countClientContacts, countingStartMs, normalizePhone, primaryPhoneOf } from "../pendingSubmissions";
+import { countClientContacts, countedPhonesOf, countingStartMs, normalizePhone, primaryPhoneOf } from "../pendingSubmissions";
 
 function assert(condition: boolean, message: string) {
   if (!condition) throw new Error(`Assertion failed: ${message}`);
@@ -74,26 +74,57 @@ const jobs = [mk(1, "SUBMISSION", "KAA 001A"), mk(2, "SUBMISSION", "KAA 002A"), 
 const events = [
   ev("CALL", "OUTGOING", SOLVER, T(1)),
   ev("CALL", "OUTGOING", "+254711000111", T(2)),
-  ev("CALL", "OUTGOING", CLIENT, T(3)),                       // the client: counts for the inspection job only
+  ev("CALL", "OUTGOING", CLIENT, T(3)),                       // the customer: counts for the inspection job AND for a submission job
   ev("CALL", "INCOMING", SOLVER, T(4)),                       // not a counted status
   ev("SMS", "SENT", SOLVER, T(5)),
   ev("SMS", "SENT", "0799000000", T(6), "KAA 002A"),          // registration match
   ev("CALL", "OUTGOING", "0700999888", T(7)),                 // a broker: never counted
 ];
 const out = countClientContacts(jobs, events, team);
-assert(out.get(1)!.client_attempt_count === 2, `submission job counts the two solver calls (got ${out.get(1)!.client_attempt_count})`);
-assert(out.get(2)!.client_attempt_count === 2, "the solver's call counts for each of the solver's vehicles");
+assert(out.get(1)!.client_attempt_count === 3, `submission job counts the two solver calls and the customer call (got ${out.get(1)!.client_attempt_count})`);
+assert(out.get(2)!.client_attempt_count === 3, "the solver's and the customer's calls count for each of the solver's vehicles on that customer");
 assert(out.get(1)!.client_sms_count === 1 && out.get(2)!.client_sms_count === 2, "solver SMS counts, a registration SMS counts for its own vehicle");
-assert(out.get(3)!.client_attempt_count === 1, "the inspection job counts the client call only");
+assert(out.get(3)!.client_attempt_count === 1, "the inspection job counts the customer call only");
 assert(out.get(3)!.client_sms_count === 0, "an SMS to the solver number is not counted for an inspection job");
+assert(out.get(3)!.client_attempt_count + out.get(3)!.client_sms_count === 1, "a call to the solver is not counted for an inspection job");
+
+// ---- a submission job counts the solver AND the customer, as one shared count ----
+const only = (...evs: ReturnType<typeof ev>[]) => countClientContacts([mk(20, "SUBMISSION", "KDD 020D")], evs, team).get(20)!;
+assert(only(ev("CALL", "OUTGOING", CLIENT, T(1))).client_attempt_count === 1, "a call to the customer alone counts for a submission job");
+assert(only(ev("CALL", "OUTGOING", SOLVER, T(1))).client_attempt_count === 1, "a call to the solver alone counts for a submission job");
+assert(only(ev("CALL", "OUTGOING", SOLVER, T(1)), ev("CALL", "OUTGOING", CLIENT, T(2))).client_attempt_count === 2, "one call to each adds up to 2 on the same count (not two separate counts)");
+assert(only(ev("SMS", "SENT", CLIENT, T(1))).client_sms_count === 1, "an SMS to the customer counts for a submission job");
+assert(only(ev("SMS", "SENT", SOLVER, T(1)), ev("SMS", "SENT", CLIENT, T(2))).client_sms_count === 2, "SMS to the solver and to the customer share one SMS count");
+const mixed = only(ev("CALL", "OUTGOING", SOLVER, T(1)), ev("CALL", "OUTGOING", CLIENT, T(2)), ev("CALL", "OUTGOING", SOLVER, T(3)), ev("CALL", "OUTGOING", CLIENT, T(4)));
+assert(mixed.client_attempt_count === 4, "four calls across both numbers reach the maximum of 4");
+assert(only(ev("SMS", "SENT", "0799000000", T(1), "KDD 020D")).client_sms_count === 1, "a registration SMS still counts once");
+assert(only(ev("SMS", "SENT", CLIENT, T(1), "KDD 020D")).client_sms_count === 1, "an SMS matching both the customer number and the registration counts once");
+assert(only(ev("CALL", "OUTGOING", "0700999888", T(1))).client_attempt_count === 0, "a broker's number is still not counted");
+assert(only(ev("CALL", "INCOMING", CLIENT, T(1)), ev("CALL", "CONNECTED", SOLVER, T(2))).client_attempt_count === 0, "only outgoing calls count, for either number");
+// Same number for both (a solver who is also the customer): counted once per event, never twice.
+const same = countClientContacts([mk(21, "SUBMISSION", "KEE 021E", { client_phone: normalizePhone(SOLVER) })], [ev("CALL", "OUTGOING", SOLVER, T(1))], team).get(21)!;
+assert(same.client_attempt_count === 1, "when the customer and the solver share a number, one call counts once");
+// Only the assigned agent counts, for either number.
+const otherAgent = countClientContacts([mk(22, "SUBMISSION", "KFF 022F")], [{ id: 900, agent_id: 2, type: "CALL", status: "OUTGOING", timestamp: T(1), target_phone: CLIENT, reg_no: null }], new Set([1, 2])).get(22)!;
+assert(otherAgent.client_attempt_count === 0, "a call by an agent who is not the assigned agent does not count, for either number");
+// Missing numbers are tolerated.
+const noClient = countClientContacts([mk(23, "SUBMISSION", "KGG 023G", { client_phone: "" })], [ev("CALL", "OUTGOING", SOLVER, T(1)), ev("CALL", "OUTGOING", "", T(2))], team).get(23)!;
+assert(noClient.client_attempt_count === 1, "a submission job with no customer number still counts the solver, and an empty target matches nothing");
+
+// ---- which numbers are counted ----
+assert(countedPhonesOf({ job_type: "INSPECTION", client_phone: normalizePhone(CLIENT), solver_contact: normalizePhone(SOLVER) }).join(",") === [normalizePhone(CLIENT)].join(","), "inspection: the customer only");
+assert(countedPhonesOf({ job_type: "SUBMISSION", client_phone: normalizePhone(CLIENT), solver_contact: normalizePhone(SOLVER) }).join(",") === [normalizePhone(SOLVER), normalizePhone(CLIENT)].join(","), "submission: the solver first, then the customer");
+assert(countedPhonesOf({ job_type: "SUBMISSION", client_phone: normalizePhone(SOLVER), solver_contact: normalizePhone(SOLVER) }).length === 1, "a repeated number is listed once");
+assert(countedPhonesOf({ client_phone: normalizePhone(CLIENT), solver_contact: normalizePhone(SOLVER) }).length === 1, "a job with no type is an inspection job");
+assert(primaryPhoneOf({ job_type: "SUBMISSION", client_phone: normalizePhone(CLIENT), solver_contact: normalizePhone(SOLVER) }) === normalizePhone(SOLVER), "the main contact of a submission job (used for grouping) is still the solver");
 
 // ---- a type change restarts counting ----
 const changed = [mk(4, "SUBMISSION", "KCC 004C", { type_changed_at: T(3) })];
 const out2 = countClientContacts(changed, events, team);
-assert(out2.get(4)!.client_attempt_count === 0, "solver calls made before the type change are not counted after it");
+assert(out2.get(4)!.client_attempt_count === 1, "only the customer call made at the moment of the type change counts: the earlier solver calls do not");
 const later = [ev("CALL", "OUTGOING", SOLVER, T(10)), ev("CALL", "OUTGOING", SOLVER, T(11))];
 const out3 = countClientContacts(changed, [...events, ...later], team);
-assert(out3.get(4)!.client_attempt_count === 2, "solver calls after the type change are counted");
+assert(out3.get(4)!.client_attempt_count === 3, "solver calls after the type change are counted as well");
 
 console.log("All job type tests passed!");
 // V19 END tests/pendingJobTypes.test.ts

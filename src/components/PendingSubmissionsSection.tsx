@@ -1833,6 +1833,7 @@ export default function PendingSubmissionsSection({ isAdmin, signedInAgentName =
                       <div className="space-y-1">
                         <div className="flex items-center gap-2">
                           <span
+                            title={job.job_type === 'SUBMISSION' ? 'Outgoing calls to the solver or the customer (one shared count)' : 'Outgoing calls to the customer'}
                             className={`font-mono font-bold whitespace-nowrap ${
                               job.client_attempt_count >= workflowSettings.max_attempts
                                 ? 'text-rose-600'
@@ -1842,6 +1843,7 @@ export default function PendingSubmissionsSection({ isAdmin, signedInAgentName =
                             Calls {job.client_attempt_count}/{workflowSettings.max_attempts}
                           </span>
                           <span
+                            title={job.job_type === 'SUBMISSION' ? 'SMS to the solver or the customer (one shared count)' : 'SMS to the customer'}
                             className={`font-mono font-bold whitespace-nowrap ${
                               job.client_sms_count >= workflowSettings.max_sms_attempts
                                 ? 'text-rose-600'

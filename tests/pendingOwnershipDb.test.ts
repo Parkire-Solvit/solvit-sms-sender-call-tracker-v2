@@ -112,6 +112,33 @@ async function main() {
   const again = await ps.reassignOpenSubmissions(db, { dryRun: true });
   assert(again.records === 0 && again.closed_records === 0, "a second check finds nothing to do");
 
+  // ---- 2b. Pending Submission counts calls and SMS to the solver AND the customer as one shared count ----
+  const id11 = Number((await jobOf(11)).id);
+  const solver11 = "0700100011", client11 = "0722100011";
+  await db.execute("UPDATE pending_submission_jobs SET first_imported_at = ? WHERE id = ?", [new Date(Date.now() - 3 * 86_400_000).toISOString(), id11]);
+  const mins = (m: number) => new Date(Date.now() - m * 60_000).toISOString();
+  const evt = (type: string, status: string, phone: string, m: number) =>
+    db.execute("INSERT INTO events (agent_id, type, target_phone, status, timestamp) VALUES (?, ?, ?, ?, ?)", [mary, type, phone, status, mins(m)]);
+  const count11 = async () => (await ps.computePendingSubmissionActivity(db, [{ ...(await jobOf(11)), id: id11, assigned_agent_id: mary }])).get(id11);
+  // Two calls and two SMS to the solver, one call and one SMS to the customer: 3 and 3 on the same counts.
+  for (const m of [300, 290]) { await evt("CALL", "OUTGOING", solver11, m); await evt("SMS", "SENT", solver11, m - 1); }
+  await evt("CALL", "OUTGOING", client11, 280); await evt("SMS", "SENT", client11, 279);
+  let a11 = await count11();
+  assert(a11.client_attempt_count === 3 && a11.client_sms_count === 3, `solver and customer contacts share one count (got ${a11.client_attempt_count} calls, ${a11.client_sms_count} SMS)`);
+  const subKpiBefore = await kpi.getPendingSubmissionAgentKpis(db, Date.now(), "SUBMISSION");
+  const maryBefore = subKpiBefore.agents.find((a: any) => a.agent_id === mary);
+  assert(maryBefore.calls_remaining === 1 && maryBefore.sms_remaining === 1, `the KPI has one call and one SMS left against the same targets (got ${maryBefore.calls_remaining}/${maryBefore.sms_remaining})`);
+  assert((await ps.closeMaturedPendingSubmissions(db, { jobId: id11 })) === 0 && (await jobOf(11)).status === "AMBER", "3 and 3 across both numbers is not yet the maximum, so the job stays open");
+  // One more call and SMS to the customer reach 4 and 4: the same rule as before, now fed by both numbers.
+  await evt("CALL", "OUTGOING", client11, 270); await evt("SMS", "SENT", client11, 269);
+  a11 = await count11();
+  assert(a11.client_attempt_count === 4 && a11.client_sms_count === 4, "four calls and four SMS across both numbers");
+  assert((await ps.closeMaturedPendingSubmissions(db, { jobId: id11 })) === 1, "the job closes when the shared counts reach the maximum");
+  const closed11 = await jobOf(11);
+  assert(closed11.status === "RED" && closed11.latest_outcome === "MAX_ATTEMPTS_REACHED", "closed RED as MAX_ATTEMPTS_REACHED");
+  // The same events do not count for an inspection job of a different customer.
+  assert((await jobOf(1)).status === "AMBER", "other jobs are unaffected");
+
   // ---- 3. List order: oldest schedule date first, ties by external id ----
   const listed = await ps.getPendingSubmissionJobs(db, { job_type: "INSPECTION" });
   assert(listed.map((j: any) => j.external_id).join(",") === "2,4,3,1,5", `inspection list is oldest schedule date first (got ${listed.map((j: any) => j.external_id).join(",")})`);

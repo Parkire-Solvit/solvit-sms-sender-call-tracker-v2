@@ -88,8 +88,8 @@ export const PendingCallSessionView: React.FC<PendingCallSessionViewProps> = ({
   availableCompanies = [],
   jobType = 'INSPECTION',
 }) => {
-  // On the Pending Submission tab the agent works with the solver: the solver's number is the one called and counted,
-  // and all of one solver's jobs are on one screen. The client's number is shown as an optional extra contact.
+  // On the Pending Submission tab the agent works with the solver: all of one solver's jobs are on one screen.
+  // Calls and SMS to the solver's number AND to the client's number both count, as one shared count per job.
   const isSub = jobType === 'SUBMISSION';
   const groupKey = (j: PendingSubmissionJob) => (isSub ? j.solver_contact : j.client_phone);
   const [loading, setLoading] = useState<boolean>(true);
@@ -694,7 +694,7 @@ export const PendingCallSessionView: React.FC<PendingCallSessionViewProps> = ({
                         className={`text-[11px] font-bold px-2.5 py-1 rounded-lg border flex items-center gap-1 ${
                           callsMet ? 'bg-red-50 text-red-700 border-red-200 font-black' : 'bg-slate-100 text-slate-700 border-slate-200'
                         }`}
-                        title={`Outgoing calls${isSub ? ' to the solver' : ''}: ${callsCount} / ${maxCalls}`}
+                        title={`Outgoing calls${isSub ? ' to the solver or the customer' : ''}: ${callsCount} / ${maxCalls}`}
                       >
                         <Clock className="w-3 h-3" />
                         <span>
@@ -706,7 +706,7 @@ export const PendingCallSessionView: React.FC<PendingCallSessionViewProps> = ({
                         className={`text-[11px] font-bold px-2.5 py-1 rounded-lg border flex items-center gap-1 ${
                           smsMet ? 'bg-red-50 text-red-700 border-red-200 font-black' : 'bg-slate-100 text-slate-700 border-slate-200'
                         }`}
-                        title={`SMS sent${isSub ? ' to the solver' : ''}: ${smsCount} / ${maxSms}`}
+                        title={`SMS sent${isSub ? ' to the solver or the customer' : ''}: ${smsCount} / ${maxSms}`}
                       >
                         <MessageSquare className="w-3 h-3 text-slate-400" />
                         <span>
@@ -730,11 +730,11 @@ export const PendingCallSessionView: React.FC<PendingCallSessionViewProps> = ({
                   <div className="text-xs text-slate-600 flex flex-wrap items-center gap-x-4 gap-y-1">
                     {isSub ? (
                       <span className="flex items-center gap-1.5 flex-wrap">
-                        <span className="font-bold text-slate-700">Client (optional contact, not counted): </span>
+                        <span className="font-bold text-slate-700">Customer (calls and SMS count too): </span>
                         <a
                           href={`tel:+254${(vehicle.client_phone || '').replace(/\D/g, '').slice(-9)}`}
                           className="font-mono text-slate-700 hover:text-[#ff353e] underline decoration-dotted"
-                          title="Call the client or their broker if the solver needs help getting a document. This call is not counted."
+                          title="Calls and SMS to the customer's number count towards the same target as the solver's. A call to a broker or any other number is not counted."
                         >
                           {vehicle.client_phone_raw || vehicle.client_phone}
                         </a>
