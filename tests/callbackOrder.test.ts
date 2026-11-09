@@ -1,6 +1,6 @@
 // tests/callbackOrder.test.ts
 // Callbacks are ordered oldest first: partners by their oldest job, then customers, then vehicles.
-import { parseCallbackDateMs, callbackReferenceMs, compareCallbacksOldestFirst, sortCallbacksOldestFirst } from "../src/lib/callbackOrder";
+import { parseCallbackDateMs, callbackReferenceMs, compareCallbacksOldestFirst, sortCallbacksNewestFirst, sortCallbacksOldestFirst } from "../src/lib/callbackOrder";
 
 function assert(condition: boolean, message: string) {
   if (!condition) throw new Error(`Assertion failed: ${message}`);
@@ -63,5 +63,13 @@ assert(JSON.stringify(copy) === JSON.stringify(jobs), "the input array is not re
 assert(sortCallbacksOldestFirst([]).length === 0, "empty input gives an empty list");
 const undatedPartner = sortCallbacksOldestFirst([job(1, "Undated", "7", null, null), job(2, "Dated", "8", "2026-01-01")]);
 assert(undatedPartner[0].channel_partner === "Dated", "a partner with only undated jobs goes last");
+
+const newest = sortCallbacksNewestFirst([
+  { ...job(1, "Older Partner", "1", "2026-11-01"), first_imported_at: "2026-11-02T08:00:00Z" },
+  { ...job(2, "New Partner", "2", "2026-10-01"), first_imported_at: "2026-11-08T08:00:00Z" },
+  { ...job(3, "New Partner", "3", "2026-09-01"), first_imported_at: "2026-11-09T08:00:00Z" },
+  { ...job(4, "New Partner", "2", "2026-08-01"), first_imported_at: "2026-11-07T08:00:00Z" },
+]);
+assert(newest.map((j) => j.id).join(",") === "3,2,4,1", `new additions and their groups appear first (got ${newest.map((j) => j.id).join(",")})`);
 
 console.log("All callbackOrder tests passed!");
