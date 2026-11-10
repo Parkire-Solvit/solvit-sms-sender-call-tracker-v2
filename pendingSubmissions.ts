@@ -584,7 +584,47 @@ export async function computePendingSubmissionActivity(db: Q, jobs: ContactJob[]
     const ms = parseDbTimestamp(j.first_imported_at);
     if (!isNaN(ms) && ms < minMs) minMs = ms;
   }
-  if (agents.length === 0 || !isFinite(minMs)) return countClientContacts(jobs, [], teamAgentIds);
+  const applyManualOutcomeFallback = async (activity: Map<number, JobActivity>): Promise<Map<number, JobActivity>> => {
+    // Match the Callbacks counter: an outcome saved by an agent represents a
+    // call attempt even when the Android event has not synced or cannot be
+    // matched. Use the greater count so a later device sync never double-counts
+    // the same outreach. Existing logs are read on every refresh, so historical
+    // records are corrected without a migration.
+    const logs = await db.queryAll<{
+      pending_submission_job_id: unknown;
+      attempt_count: unknown;
+      last_attempt_at: unknown;
+    }>(
+      `SELECT l.pending_submission_job_id,
+              COUNT(*) AS attempt_count,
+              MAX(l.created_at) AS last_attempt_at
+       FROM pending_submission_logs l
+       JOIN pending_submission_jobs j ON j.id = l.pending_submission_job_id
+       WHERE LOWER(TRIM(COALESCE(l.logged_by, ''))) <> 'system'
+         AND l.created_at >= CASE
+           WHEN j.type_changed_at IS NOT NULL AND j.type_changed_at > j.first_imported_at THEN j.type_changed_at
+           ELSE j.first_imported_at
+         END
+       GROUP BY l.pending_submission_job_id`
+    );
+    for (const log of logs) {
+      const jobId = num(log.pending_submission_job_id);
+      if (!activity.has(jobId)) continue;
+      const current = activity.get(jobId)!;
+      const manualCount = num(log.attempt_count);
+      const manualLastMs = parseDbTimestamp(log.last_attempt_at);
+      if (manualCount > current.client_attempt_count) current.client_attempt_count = manualCount;
+      const existingLast = current.last_client_attempt_at ? parseDbTimestamp(current.last_client_attempt_at) : 0;
+      if (Number.isFinite(manualLastMs) && manualLastMs > existingLast) {
+        current.last_client_attempt_at = new Date(manualLastMs).toISOString();
+      }
+    }
+    return activity;
+  };
+
+  if (agents.length === 0 || !isFinite(minMs)) {
+    return applyManualOutcomeFallback(countClientContacts(jobs, [], teamAgentIds));
+  }
 
   // Coarse prefilter only (date-only bound, two days of slack). The exact per-job cutoff is applied in code.
   const lowerBound = new Date(minMs - 2 * DAY_MS).toISOString().slice(0, 10);
@@ -595,7 +635,7 @@ export async function computePendingSubmissionActivity(db: Q, jobs: ContactJob[]
      WHERE agent_id IN (${placeholders}) AND timestamp >= ?`,
     [...agents, lowerBound]
   );
-  return countClientContacts(jobs, events, teamAgentIds);
+  return applyManualOutcomeFallback(countClientContacts(jobs, events, teamAgentIds));
 }
 
 // Max attempts sweep
