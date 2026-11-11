@@ -118,3 +118,38 @@ test("callback activity matches PostgreSQL string foreign keys to numeric job an
   assert.equal(result.get(1)?.attempt_count, 1);
 });
 
+test("historical handset label variants count calls and SMS after a job is reassigned", async () => {
+  const db = {
+    async queryOne(sql: string) {
+      if (sql.includes("FROM callback_settings")) return {
+        id: 1, staff_count: 1, callback_team_tag: "Callback Team",
+        max_attempts: 4, max_sms_attempts: 4,
+        disappearance_alert_fixed_count: 50, disappearance_alert_percentage: 30,
+        updated_at: null,
+      };
+      return null;
+    },
+    async queryAll(sql: string) {
+      if (sql.includes("FROM events")) return [
+        { id: 201, target_phone: "+254 700 000 002", type: "phone-call", status: "dialled", reg_no: null, timestamp: "2026-11-01T08:00:00.000Z", agent_id: 7 },
+        { id: 202, target_phone: "0700000002", type: "text message", status: "sent", reg_no: "KBB 002 B", timestamp: "2026-11-01T08:01:00.000Z", agent_id: 7 },
+      ];
+      if (sql.includes("FROM callback_job_phones")) return [{ callback_job_id: 2, phone_normalised: "700000002" }];
+      if (sql.includes("FROM callback_job_logs")) return [];
+      return [];
+    },
+    async execute() { return { lastInsertId: 0, affectedRows: 0 }; },
+    async transaction(work: (tx: unknown) => Promise<unknown>) { return work(this); },
+  } as any;
+
+  const result = await computeCallbackJobsActivity(db, [{
+    id: 2,
+    assigned_agent_id: 99, // event was made before reassignment from agent 7
+    vehicle_reg: "KBB002B",
+    client_phone: "0700000002",
+  }]);
+
+  assert.equal(result.get(2)?.attempt_count, 1);
+  assert.equal(result.get(2)?.sms_count, 1);
+});
+

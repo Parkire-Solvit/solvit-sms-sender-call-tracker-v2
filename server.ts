@@ -32,6 +32,8 @@ import {
   getUnmatchedActivity,
   runOneTimeClosureReopen,
   CLOSURE_REOPEN_JOB_KEY,
+  normalizeCommunicationType,
+  normalizeCommunicationStatus,
 } from "./insuranceCallbacks";
 import * as XLSX from "xlsx";
 import { seedDefaultAdmin, hashPassword, verifyPassword } from "./auth";
@@ -337,12 +339,18 @@ async function startServer() {
     let name = (agent_name || agentName || "Unknown Agent").trim();
     if (!name || name.toLowerCase() === "agent") name = "Unknown Agent";
 
-    const rawTargetPhone = (target_phone || targetPhone || phoneNumber || phone_number || "Unknown").trim();
+    const eventType = normalizeCommunicationType(type);
+    const eventStatus = normalizeCommunicationStatus(status);
+    if (!eventType) {
+      return res.status(400).json({ error: "Event type must be a call or SMS" });
+    }
+
+    const rawTargetPhone = String(target_phone || targetPhone || phoneNumber || phone_number || "Unknown").trim();
     const finalTargetPhone = rawTargetPhone.replace(/[^\d+]/g, "");
     const finalRegNo = (reg_no || regNo || "").trim();
     const finalDuration = typeof duration === "number" ? Math.max(0, Math.floor(duration)) : 0;
 
-    console.log(`[API] Event received: ${type} from "${name}" to ${finalTargetPhone} (${status}, dur=${finalDuration}s)`);
+    console.log(`[API] Event received: ${eventType} from "${name}" to ${finalTargetPhone} (${eventStatus}, dur=${finalDuration}s)`);
 
     try {
       // Check if target phone is an internal contact
@@ -411,7 +419,7 @@ async function startServer() {
       const result = await db.execute(
         `INSERT INTO events (agent_id, type, target_phone, status, duration, reg_no)
          VALUES (?, ?, ?, ?, ?, ?)`,
-        [resolvedAgentId, type, finalTargetPhone, status, finalDuration, finalRegNo]
+        [resolvedAgentId, eventType, finalTargetPhone, eventStatus, finalDuration, finalRegNo]
       );
 
       // Update agent heartbeat

@@ -64,6 +64,25 @@ export function parseFileNameEndDate(fileName: string): Date | null {
 export const COUNTED_CALL_STATUSES = new Set<string>(["OUTGOING"]);
 
 /**
+ * Canonicalise handset event labels. Older Android builds and imports used
+ * mixed case and a few descriptive labels. Keeping this normalisation in the
+ * counter (as well as at ingestion) repairs historical rows without a data
+ * migration.
+ */
+export function normalizeCommunicationType(raw: unknown): "CALL" | "SMS" | "" {
+  const clean = String(raw ?? "").trim().toUpperCase().replace(/[\s-]+/g, "_");
+  if (["CALL", "PHONE_CALL", "CALL_LOG", "OUTGOING_CALL"].includes(clean)) return "CALL";
+  if (["SMS", "TEXT", "TEXT_MESSAGE", "SMS_SENT"].includes(clean)) return "SMS";
+  return "";
+}
+
+export function normalizeCommunicationStatus(raw: unknown): string {
+  const clean = String(raw ?? "").trim().toUpperCase().replace(/[\s-]+/g, "_");
+  if (["DIALED", "DIALLED", "PLACED", "SENT"].includes(clean)) return "OUTGOING";
+  return clean;
+}
+
+/**
  * Normalization Rules:
  * Phone number:
  *   - Strip every character except digits.
@@ -921,30 +940,21 @@ export async function computeCallbackJobsActivity(
     }
   }
 
-  // Group candidate jobs by assigned_agent_id
-  const jobsByAgent = new Map<string, typeof jobs>();
-  for (const j of jobs) {
-    if (j.assigned_agent_id !== null) {
-      const agentKey = keyOf(j.assigned_agent_id);
-      const list = jobsByAgent.get(agentKey) || [];
-      list.push(j);
-      jobsByAgent.set(agentKey, list);
-    }
-  }
-
   for (const ev of events) {
     if (!ev.agent_id) continue;
-    const candidateJobs = jobsByAgent.get(keyOf(ev.agent_id));
-    if (!candidateJobs || candidateJobs.length === 0) continue;
 
     const normEvPhone = normalizePhone(ev.target_phone);
     const normEvReg = normalizeRegAlphaNumeric(ev.reg_no);
-    const isCall = ev.type === "CALL" && COUNTED_CALL_STATUSES.has(String(ev.status || "").toUpperCase());
-    const isSms = ev.type === "SMS";
+    const eventType = normalizeCommunicationType(ev.type);
+    const isCall = eventType === "CALL" && COUNTED_CALL_STATUSES.has(normalizeCommunicationStatus(ev.status));
+    const isSms = eventType === "SMS";
 
     if (!isCall && !isSms) continue;
 
-    for (const job of candidateJobs) {
+    // A callback-team event belongs to the matching callback record even if
+    // that record was reassigned later. Assignment changes must not erase
+    // outreach that already happened.
+    for (const job of jobs) {
       const jobKey = keyOf(job.id);
       const phones = jobPhonesMap.get(jobKey);
       const phoneMatches = Boolean(normEvPhone && phones && phones.has(normEvPhone));
@@ -1466,10 +1476,11 @@ export async function getUnmatchedActivity(
   );
 
   const candidateEvents = events.filter((ev) => {
-    if (ev.type === "CALL") {
-      return COUNTED_CALL_STATUSES.has(String(ev.status || "").toUpperCase());
+    const eventType = normalizeCommunicationType(ev.type);
+    if (eventType === "CALL") {
+      return COUNTED_CALL_STATUSES.has(normalizeCommunicationStatus(ev.status));
     }
-    if (ev.type === "SMS") {
+    if (eventType === "SMS") {
       return true;
     }
     return false;
@@ -1555,8 +1566,9 @@ export async function getUnmatchedActivity(
   for (const ev of candidateEvents) {
     const normPhone = normalizePhone(ev.target_phone);
     const normReg = normalizeRegAlphaNumeric(ev.reg_no);
-    const isCall = ev.type === "CALL";
-    const isSms = ev.type === "SMS";
+    const eventType = normalizeCommunicationType(ev.type);
+    const isCall = eventType === "CALL";
+    const isSms = eventType === "SMS";
 
     let matched = false;
     for (const j of allJobs) {
