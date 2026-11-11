@@ -59,6 +59,8 @@ import { notifySolver } from "./solverNotifications";
 import { INTEGRATIONS, getIntegrationPublicView, updateIntegrationSettings, getHostPinnacleConfig } from "./integrationSettings";
 import { sendSms, toInternationalMobile } from "./hostPinnacle";
 import { createRateLimiter } from "./rateLimit";
+import { createSharedCache } from "./server/sharedCache";
+import { logSlowRequests, startBusyMonitor } from "./server/monitoring";
 import { outcomesFor, parseJobTypeParam } from "./pendingSubmissionOutcomes";
 import { callbackCommentProblem } from "./src/lib/callbackComment";
 import { getDataResetPreview, buildDataBackup, deleteAllRecords, undoLastUpload, verifyBackupAccess } from "./dataReset";
@@ -109,6 +111,23 @@ async function startServer() {
   // Who is behind each API request, and which sections they may open, is read from the database every time, so a
   // demoted, deactivated, archived or re-tagged account is affected at once. Must come before every guarded route.
   app.use('/api', attachAuth((userId) => loadAuthContext(db, userId)));
+
+  // Slow-request and busy-server warnings in the host's logs.
+  app.use('/api', logSlowRequests);
+  startBusyMonitor();
+
+  // The 15-second refreshes (KPI panels and the pending list) are the same for everyone watching, so they are
+  // calculated at most once per short window and shared. Any change made through the API clears them, so a saved
+  // outcome appears on the next refresh. Call and SMS events from the phones are picked up within the window.
+  const refreshCache = createSharedCache(Number(process.env.REFRESH_CACHE_MS || 10_000));
+  app.use('/api', (req, res, next) => {
+    const fromPhones = /^\/(log-event|log-agent)\b/.test(req.path);
+    if (req.method !== 'GET' && !fromPhones) {
+      refreshCache.clear();
+      res.on('finish', () => refreshCache.clear());
+    }
+    next();
+  });
 
   // An agent login always logs work under its own agent name, so nobody can record an outcome as a colleague.
   // Administrators may still name the person they are logging for.
@@ -1704,14 +1723,16 @@ function computeActivitySummary(events: any[], totalAgents: number = 0) {
   app.get("/api/pending-submissions/jobs", requireSection('pending'), async (req, res) => {
     try {
       const { status, agent_id, search, company } = req.query as Record<string, string | undefined>;
-      await closeMaturedPendingSubmissions(db);
-      await ensureSubmissionsAssigned(db);
-      res.json(await getPendingSubmissionJobs(db, {
-        status,
-        agent_id,
-        search,
-        company,
-        job_type: parseJobTypeParam(req.query.job_type),
+      res.json(await refreshCache.get(`pending-jobs:${req.originalUrl}`, async () => {
+        await closeMaturedPendingSubmissions(db);
+        await ensureSubmissionsAssigned(db);
+        return getPendingSubmissionJobs(db, {
+          status,
+          agent_id,
+          search,
+          company,
+          job_type: parseJobTypeParam(req.query.job_type),
+        });
       }));
     } catch (err) {
       sendError(res, err, "Error fetching pending submission jobs");
@@ -1800,7 +1821,8 @@ function computeActivitySummary(events: any[], totalAgents: number = 0) {
 
   app.get("/api/agent-kpi/pending-submissions", requireSection('pending'), async (req, res) => {
     try {
-      res.json(await getPendingSubmissionAgentKpis(db, Date.now(), parseJobTypeParam(req.query.job_type)));
+      const jobType = parseJobTypeParam(req.query.job_type);
+      res.json(await refreshCache.get(`kpi-pending:${jobType ?? 'ALL'}`, () => getPendingSubmissionAgentKpis(db, Date.now(), jobType)));
     } catch (err) {
       sendError(res, err, "Error building the pending submissions agent KPI");
     }
@@ -1808,7 +1830,7 @@ function computeActivitySummary(events: any[], totalAgents: number = 0) {
 
   app.get("/api/agent-kpi/callbacks", requireSection('callbacks'), async (_req, res) => {
     try {
-      res.json(await getCallbackAgentKpis(db));
+      res.json(await refreshCache.get('kpi-callbacks', () => getCallbackAgentKpis(db)));
     } catch (err) {
       sendError(res, err, "Error building the callbacks agent KPI");
     }
