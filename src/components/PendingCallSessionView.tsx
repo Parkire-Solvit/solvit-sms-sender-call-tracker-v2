@@ -24,7 +24,7 @@ import {
 } from 'lucide-react';
 import type { PendingSubmissionJob, PendingSubmissionLog } from './PendingSubmissionsSection';
 import { groupByCustomerOldestFirst, CustomerGroup } from '../lib/submissionQueue';
-import { saveOutcome } from '../lib/safeSave';
+import { saveOutcome, newFormKey } from '../lib/safeSave';
 
 export interface SessionOutcomeOption {
   value: string;
@@ -175,7 +175,11 @@ export const PendingCallSessionView: React.FC<PendingCallSessionViewProps> = ({
     return groupByCustomerOldestFirst(filtered, groupKey);
   };
 
+  // Identifies the customer screen on display, so Save & Next again on the same screen is a retry, never a second save.
+  const clientFormKey = useRef<string>(newFormKey());
+
   const initializeClientForm = (group: CustomerGroup<PendingSubmissionJob> | undefined) => {
+    clientFormKey.current = newFormKey();
     if (!group) {
       setVehicleForm({});
       return;
@@ -327,7 +331,8 @@ export const PendingCallSessionView: React.FC<PendingCallSessionViewProps> = ({
         const saved = await saveOutcome(
           `/api/pending-submissions/jobs/${v.id}/log`,
           { outcome: f.outcome, comment: f.comment.trim(), logged_by: selectedAgentName },
-          v.vehicle_reg_raw || v.vehicle_reg
+          v.vehicle_reg_raw || v.vehicle_reg,
+          clientFormKey.current
         );
         // Only a confirmation from the server counts as saved. Otherwise this vehicle stays on screen and the outcome is kept on this device.
         if (!saved.ok) {

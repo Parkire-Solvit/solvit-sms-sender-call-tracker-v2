@@ -120,6 +120,28 @@ async function main() {
     const body = await (await fetch(base + "/api/any", { headers: { cookie: cb } })).json();
     assert(body.auth === 2 && body.admin === false, "the request carries the verified account");
 
+    // Sliding renewal: a cookie older than 10 minutes is renewed for another 8 hours while it is used.
+    const cookieIssuedAgo = (userId: number, agoMs: number) => {
+      const h = new Map<string, string>(); const realNow = Date.now;
+      Date.now = () => realNow() - agoMs;
+      setUserSession({ headers: {} } as Request, { setHeader: (k: string, v: string) => h.set(k, v) } as unknown as Response, userId);
+      Date.now = realNow;
+      return h.get("Set-Cookie")!.split(";")[0];
+    };
+    const renewedCookie = async (cookie: string) => (await fetch(base + "/api/any", { headers: { cookie } })).headers.get("set-cookie");
+    assert((await renewedCookie(cookieFor(2))) === null, "a fresh cookie is not re-sent on every request");
+    const oldCookie = cookieIssuedAgo(2, 7.5 * 3600 * 1000); // 30 minutes left of the 8 hours
+    const renewed = await renewedCookie(oldCookie);
+    assert(renewed !== null && /Max-Age=28800/.test(renewed) && /HttpOnly/.test(renewed), "a cookie in use is renewed for another 8 hours");
+    const renewedValue = renewed!.split(";")[0];
+    assert(readSession(fake(renewedValue))!.expiresAt > readSession(fake(oldCookie))!.expiresAt + 7 * 3600 * 1000, "the renewed cookie expires about 7.5 hours later than the old one");
+    assert(readSession(fake(renewedValue))!.userId === 2, "the renewed cookie is for the same account");
+    assert((await status("/api/callbacks", renewedValue)) === 200, "the renewed cookie works");
+    accounts.get(2)!.active = false;
+    assert((await renewedCookie(cookieIssuedAgo(2, 3600 * 1000))) === null, "a deactivated account is not renewed");
+    accounts.get(2)!.active = true;
+    assert((await renewedCookie(cookieIssuedAgo(2, 9 * 3600 * 1000))) === null, "an expired cookie is never renewed (sign in again)");
+
     // If the database cannot be read, the request is refused, not guessed.
     loaderShouldFail = true;
     assert((await status("/api/any", admin)) === 503, "a database failure refuses the request");

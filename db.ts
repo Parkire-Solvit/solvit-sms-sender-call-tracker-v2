@@ -39,6 +39,18 @@ export async function initDatabase(): Promise<DbAdapter> {
     connectionString,
     max: Number(process.env.DB_POOL_SIZE || 10),
     ssl: process.env.DB_SSL === "false" ? false : { rejectUnauthorized: false },
+    // Fail fast instead of waiting forever: a request that cannot get a connection within 10 seconds fails (and an
+    // agent's outcome is kept on the device and retried) rather than hanging the whole server.
+    connectionTimeoutMillis: Number(process.env.DB_CONNECT_TIMEOUT_MS || 10_000),
+    // No single statement may run longer than this, and a transaction left idle is ended by the database.
+    statement_timeout: Number(process.env.DB_STATEMENT_TIMEOUT_MS || 60_000),
+    idle_in_transaction_session_timeout: Number(process.env.DB_IDLE_TX_TIMEOUT_MS || 60_000),
+    // Detect dead network connections instead of waiting on them indefinitely.
+    keepAlive: true,
+  });
+  // An idle connection that drops (database restart, network blip) must not crash the server.
+  pool.on("error", (error) => {
+    console.error("[DB] An idle database connection failed and was discarded:", error.message);
   });
 
   try {
@@ -94,16 +106,22 @@ export async function initDatabase(): Promise<DbAdapter> {
           return nested(tx);
         },
       };
+      let broken: Error | undefined;
       try {
         await client.query("BEGIN");
         const result = await work(tx);
         await client.query("COMMIT");
         return result;
       } catch (error) {
-        await client.query("ROLLBACK");
+        try {
+          await client.query("ROLLBACK");
+        } catch (rollbackError) {
+          // The connection itself is broken: do not hand it back to the pool for the next request.
+          broken = rollbackError as Error;
+        }
         throw error;
       } finally {
-        client.release();
+        client.release(broken);
       }
     },
   };

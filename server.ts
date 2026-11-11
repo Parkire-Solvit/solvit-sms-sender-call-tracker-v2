@@ -102,6 +102,10 @@ async function startServer() {
   // Ensure default system settings exist
   await getSystemSettings(db);
 
+  if (!process.env.SESSION_SECRET || process.env.SESSION_SECRET.trim().length < 32) {
+    console.warn("[AUTH] SESSION_SECRET is not set (or shorter than 32 characters). Every restart or deploy will sign everybody out, and outcomes will not save until they sign in again. Set it on the host.");
+  }
+
   // Who is behind each API request, and which sections they may open, is read from the database every time, so a
   // demoted, deactivated, archived or re-tagged account is affected at once. Must come before every guarded route.
   app.use('/api', attachAuth((userId) => loadAuthContext(db, userId)));

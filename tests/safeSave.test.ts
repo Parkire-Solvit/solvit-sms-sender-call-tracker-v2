@@ -124,47 +124,84 @@ async function main() {
   r = await saveOutcome(URL1, body1, "KAA 001A");
   assert(r.ok && r.duplicate, "a duplicate confirmation is a success");
 
-  // 10. Background flush wins the race, then the screen retries the same form: same id, within 15 minutes.
+  // 10. Background flush wins the race, then the screen retries the SAME FORM: same id, within 15 minutes.
   setup();
   handler = async () => {
     throw new Error("down");
   };
-  await saveOutcome(URL1, body1, "KAA 001A");
+  await saveOutcome(URL1, body1, "KAA 001A", "form-A");
   const firstId = getSaveState().pending[0].id;
   handler = async () => reply(200, JSON.stringify({ success: true }));
   await flushQueue();
   assert(getSaveState().pending.length === 0, "flushed");
   sent.length = 0;
   clock += 5 * 60 * 1000;
-  await saveOutcome(URL1, body1, "KAA 001A");
-  assert(sent[0].body.client_request_id === firstId, "the screen retry reuses the flushed id so the server treats it as a duplicate");
+  await saveOutcome(URL1, body1, "KAA 001A", "form-A");
+  assert(sent[0].body.client_request_id === firstId, "the same form retried reuses the flushed id so the server treats it as a duplicate");
   setup();
   handler = async () => {
     throw new Error("down");
   };
-  await saveOutcome(URL1, body1, "KAA 001A");
+  await saveOutcome(URL1, body1, "KAA 001A", "form-B");
   const id2 = getSaveState().pending[0].id;
   handler = async () => reply(200, JSON.stringify({ success: true }));
   await flushQueue();
   sent.length = 0;
   clock += 16 * 60 * 1000;
-  await saveOutcome(URL1, body1, "KAA 001A");
+  await saveOutcome(URL1, body1, "KAA 001A", "form-B");
   assert(sent[0].body.client_request_id !== id2, "after 15 minutes an identical outcome is a new one");
 
+  // 10b. The bug this fixes: the same outcome from a NEW form (an agent logs "Not picking" twice for the same vehicle)
+  // is a new outcome and is always saved, however soon after the first.
+  setup();
+  handler = async () => reply(200, JSON.stringify({ success: true }));
+  await saveOutcome(URL1, body1, "KAA 001A", "form-1");
+  const firstSave = sent[0].body.client_request_id;
+  clock += 60 * 1000;
+  const second = await saveOutcome(URL1, body1, "KAA 001A", "form-2");
+  assert(second.ok && sent[1].body.client_request_id !== firstSave, "a second identical outcome from a new form gets its own id, so the server saves it");
+  clock += 30 * 1000;
+  await saveOutcome(URL1, body1, "KAA 001A");
+  assert(new Set(sent.map((x) => x.body.client_request_id)).size === 3, "without a form key every call is a new outcome too");
+  // ...while a background-flushed save followed by a new form is still a new outcome.
+  setup();
+  handler = async () => {
+    throw new Error("down");
+  };
+  await saveOutcome(URL1, body1, "KAA 001A", "form-X");
+  const queuedId = getSaveState().pending[0].id;
+  handler = async () => reply(200, JSON.stringify({ success: true }));
+  await flushQueue();
+  sent.length = 0;
+  await saveOutcome(URL1, body1, "KAA 001A", "form-Y");
+  assert(sent[0].body.client_request_id !== queuedId, "a new form after a background save is a new outcome");
 
   // 10c. A batch retried after part of it already saved: the saved part is recognised (same id), not saved twice.
   setup();
   handler = async () => reply(200, JSON.stringify({ success: true }));
-  await saveOutcome(URL1, body1, "KAA 001A");
+  await saveOutcome(URL1, body1, "KAA 001A", "batch-1");
   const savedId = sent[0].body.client_request_id;
   sent.length = 0;
   clock += 60 * 1000;
-  await saveOutcome(URL1, body1, "KAA 001A");
-  assert(sent[0].body.client_request_id === savedId, "an identical retry within two minutes reuses the id so the server answers duplicate");
+  await saveOutcome(URL1, body1, "KAA 001A", "batch-1");
+  assert(sent[0].body.client_request_id === savedId, "an identical retry of the same form within two minutes reuses the id so the server answers duplicate");
   sent.length = 0;
   clock += 3 * 60 * 1000;
-  await saveOutcome(URL1, body1, "KAA 001A");
+  await saveOutcome(URL1, body1, "KAA 001A", "batch-1");
   assert(sent[0].body.client_request_id !== savedId, "after two minutes an identical outcome is a new one");
+
+  // 10d. An identical outcome still waiting on the device is resent with its original id, whichever form sends it,
+  // so a save that reached the server but whose answer was lost can never be stored twice.
+  setup();
+  handler = async () => {
+    throw new Error("down");
+  };
+  await saveOutcome(URL1, body1, "KAA 001A", "form-P");
+  const pendingId = getSaveState().pending[0].id;
+  handler = async () => reply(200, JSON.stringify({ success: true }));
+  sent.length = 0;
+  await saveOutcome(URL1, body1, "KAA 001A", "form-Q");
+  assert(sent[0].body.client_request_id === pendingId && getSaveState().pending.length === 0, "the waiting copy is sent once with its own id and then cleared");
 
   // 11. Flush stops at the first temporary failure.
   setup();

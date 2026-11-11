@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
   Phone,
   PhoneCall,
@@ -22,7 +22,7 @@ import {
   Mail,
 } from 'lucide-react';
 import { CallbackJob, CallbackSettings, CallbackJobLog } from '../types/callbacks';
-import { saveOutcome } from '../lib/safeSave';
+import { saveOutcome, newFormKey } from '../lib/safeSave';
 import { callbackReferenceMs, compareCallbacksOldestFirst } from '../lib/callbackOrder';
 import { callbackCommentProblem, isCommentRequiredForOutcome, MIN_REQUIRED_COMMENT_LENGTH } from '../lib/callbackComment';
 
@@ -255,7 +255,11 @@ export const CallSessionView: React.FC<CallSessionViewProps> = ({
   };
 
   // Initialize form for a given client
+  // Identifies the customer screen on display, so Save & Next again on the same screen is a retry, never a second save.
+  const clientFormKey = useRef<string>(newFormKey());
+
   const initializeClientForm = (clientGroup: CallSessionClientGroup | undefined) => {
+    clientFormKey.current = newFormKey();
     if (!clientGroup) {
       setVehicleForm({});
       return;
@@ -428,7 +432,8 @@ export const CallSessionView: React.FC<CallSessionViewProps> = ({
         const saved = await saveOutcome(
           `/api/callback-jobs/${v.id}/log`,
           { outcome: formData.outcome, comment: (formData.comment || '').trim(), logged_by: loggedBy },
-          v.vehicle_reg_raw || v.vehicle_reg
+          v.vehicle_reg_raw || v.vehicle_reg,
+          clientFormKey.current
         );
         // Only a confirmation from the server counts as saved. A retry after a partial failure is safe because the server ignores duplicates.
         if (!saved.ok) {
