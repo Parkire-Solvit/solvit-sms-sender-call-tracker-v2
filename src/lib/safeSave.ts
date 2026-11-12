@@ -4,6 +4,9 @@
 // - Any failure that may be temporary (no internet, signed out, proxy page, server error) keeps the outcome on this device
 //   and it is sent again automatically. The caller is told it was NOT saved, so the screen never shows a false "saved".
 // - Every send carries a client_request_id, so a retry that already reached the server is recognised and not saved twice.
+// - A retry is recognised by its FORM: the screen passes a form key that stays the same while the same form is retried
+//   and changes when a new form is opened. Two separate outcomes with the same content (an agent logging "Not picking"
+//   twice for the same vehicle) are therefore two saves, never mistaken for a retry of the first one.
 
 export interface SaveResult {
   ok: boolean;
@@ -98,10 +101,15 @@ function stable(value: unknown): string {
   return `{${Object.keys(obj).sort().map((k) => `${JSON.stringify(k)}:${stable(obj[k])}`).join(',')}}`;
 }
 
-function keyFor(url: string, body: Record<string, unknown>): string {
+function keyFor(url: string, body: Record<string, unknown>, formKey: string): string {
   const rest: Record<string, unknown> = { ...body };
   delete rest.client_request_id;
-  return `${url}|${stable(rest)}`;
+  return `${formKey}|${url}|${stable(rest)}`;
+}
+
+/** A new key for a form that has just been opened. Keep it for retries of that form; make a new one for the next form. */
+export function newFormKey(): string {
+  return deps.newId();
 }
 
 function persist() {
@@ -277,12 +285,21 @@ async function runEntry(entry: QueueEntry, viaFlush: boolean): Promise<SaveResul
   }
 }
 
-/** Saves one outcome. Never throws. When ok is false the caller must keep the form on screen and show result.error. */
-export async function saveOutcome(url: string, body: Record<string, unknown>, label: string): Promise<SaveResult> {
-  const key = keyFor(url, body);
-  let entry = queue.find((e) => e.key === key);
+/**
+ * Saves one outcome. Never throws. When ok is false the caller must keep the form on screen and show result.error.
+ * formKey identifies the form on screen (see newFormKey): pressing Save again on the same form is a retry and is never
+ * saved twice; the same content from a NEW form is a new outcome and is always saved. Without a form key every call is
+ * treated as a new outcome, except a resend of one that is still waiting on this device.
+ */
+export async function saveOutcome(url: string, body: Record<string, unknown>, label: string, formKey?: string): Promise<SaveResult> {
+  const key = keyFor(url, body, formKey ?? '');
+  const reuseConfirmed = Boolean(formKey);
+  // An identical outcome that is still waiting on this device (it was never confirmed) is the same outcome being sent
+  // again, from whichever form: it is resent with its original id, so it cannot be saved twice.
+  const contentKey = keyFor(url, body, '');
+  let entry = queue.find((e) => e.key === key || keyFor(e.url, e.body, '') === contentKey);
   if (!entry) {
-    const hit = confirmed.find((c) => c.key === key && deps.now() - c.at < c.ttl);
+    const hit = reuseConfirmed ? confirmed.find((c) => c.key === key && deps.now() - c.at < c.ttl) : undefined;
     if (hit) confirmed = confirmed.filter((c) => c !== hit);
     entry = {
       id: hit ? hit.id : deps.newId(),

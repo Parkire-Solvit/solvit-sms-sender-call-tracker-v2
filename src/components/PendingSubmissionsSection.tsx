@@ -37,7 +37,7 @@ import { groupByCustomerOldestFirst } from '../lib/submissionQueue';
 import { PendingCallSessionView } from './PendingCallSessionView';
 import AgentKpiPanel from './AgentKpiPanel';
 import DataResetPanel from './DataResetPanel';
-import { saveOutcome } from '../lib/safeSave';
+import { saveOutcome, newFormKey } from '../lib/safeSave';
 
 // Feature flags. Each is flipped to true by a LATER fix-pass step. Do not flip early.
 const SHOW_WORKFLOW_EXTENDED = true; // flipped in FIXPASS 2
@@ -366,6 +366,8 @@ export default function PendingSubmissionsSection({ isAdmin, signedInAgentName =
   const [outcomeScheduledPlace, setOutcomeScheduledPlace] = useState<string>('');
   const [outcomeComment, setOutcomeComment] = useState<string>('');
   const [outcomeLoggedBy, setOutcomeLoggedBy] = useState<string>(signedInAgentName || 'Mary');
+  // Identifies the outcome form on screen, so pressing Save again is a retry while a new form is a new outcome.
+  const logFormKey = useRef<string>(newFormKey());
   const [isSubmittingLog, setIsSubmittingLog] = useState<boolean>(false);
 
   // History Modal
@@ -845,7 +847,8 @@ export default function PendingSubmissionsSection({ isAdmin, signedInAgentName =
       const saved = await saveOutcome(
         `/api/pending-submissions/jobs/${selectedJobForLog.id}/log`,
         { outcome: outcomeType, comment: outcomeComment.trim(), logged_by: signedInAgentName || outcomeLoggedBy },
-        selectedJobForLog.vehicle_reg_raw || selectedJobForLog.vehicle_reg
+        selectedJobForLog.vehicle_reg_raw || selectedJobForLog.vehicle_reg,
+        logFormKey.current
       );
       // Only a confirmation from the server counts as saved. Otherwise the form stays open and the outcome is kept on this device.
       if (!saved.ok) throw new Error(saved.error || 'Failed to log outcome');
@@ -1900,6 +1903,7 @@ export default function PendingSubmissionsSection({ isAdmin, signedInAgentName =
                         {/* Log Outcome Button (Exactly 10 agent outcomes) */}
                         <button
                           onClick={() => {
+                            logFormKey.current = newFormKey(); // a new form: its save is a new outcome
                             setSelectedJobForLog(job);
                             setOutcomeType(successOutcome);
                             setOutcomeComment('');

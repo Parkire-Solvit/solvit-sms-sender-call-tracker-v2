@@ -28,6 +28,12 @@ declare global {
 
 const cookieName = 'solvit_admin_session';
 const ttlMs = 8 * 60 * 60 * 1000;
+/**
+ * The session is renewed while it is being used: once a cookie is older than this, the next request gets a fresh
+ * 8 hours. An agent working a full day is therefore never signed out mid-shift, while a browser left unused still
+ * expires 8 hours after its last request. Access itself is re-checked in the database on every request.
+ */
+export const SESSION_RENEW_AFTER_MS = 10 * 60 * 1000;
 const sessionSecret = process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex');
 
 function mac(payload: string): string {
@@ -46,7 +52,7 @@ function cookieValue(request: Request): string | undefined {
  * demoted, deactivated or re-tagged account is affected at once. Cookies from the earlier format fail the check and
  * simply require a fresh login.
  */
-export function readSession(request: Request): { userId: number } | null {
+export function readSession(request: Request): { userId: number; expiresAt: number } | null {
   const value = cookieValue(request);
   if (!value) return null;
   const parts = value.split('.');
@@ -59,7 +65,7 @@ export function readSession(request: Request): { userId: number } | null {
   const expiry = Number(expiryPart);
   if (!(expiry > Date.now() && expiry <= Date.now() + ttlMs)) return null;
   const userId = Number(userPart);
-  return userId > 0 ? { userId } : null;
+  return userId > 0 ? { userId, expiresAt: expiry } : null;
 }
 
 function cookieFlags(request: Request): string {
@@ -92,6 +98,11 @@ export function attachAuth(load: AuthLoader) {
     }
     try {
       request.auth = await load(session.userId);
+      // Sliding renewal: an account that still has access gets a fresh 8 hours once its cookie is 10 minutes old.
+      // A later Set-Cookie from the route itself (sign-in, sign-out) replaces this one, as it should.
+      if (request.auth && session.expiresAt - Date.now() < ttlMs - SESSION_RENEW_AFTER_MS) {
+        setUserSession(request, response, session.userId);
+      }
       next();
     } catch (error) {
       console.error('[AUTH] Could not verify the session:', (error as Error).message);

@@ -51,7 +51,7 @@ import {
 } from '../types/callbacks';
 import { CallSessionView } from './CallSessionView';
 import DataResetPanel from './DataResetPanel';
-import { saveOutcome } from '../lib/safeSave';
+import { saveOutcome, newFormKey } from '../lib/safeSave';
 import { sortCallbacksNewestFirst } from '../lib/callbackOrder';
 import { callbackCommentProblem, isCommentRequiredForOutcome, MIN_REQUIRED_COMMENT_LENGTH } from '../lib/callbackComment';
 import { OnboardingTour } from './OnboardingTour';
@@ -255,6 +255,8 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
   const [selectedOutcome, setSelectedOutcome] = useState<string>('SCHEDULED');
   const [outcomeComment, setOutcomeComment] = useState('');
   const [outcomeLoggedBy, setOutcomeLoggedBy] = useState('Caroline');
+  // Identifies the outcome form on screen, so pressing Save again is a retry while a new form is a new outcome.
+  const outcomeFormKey = useRef<string>(newFormKey());
   const [isSubmittingOutcome, setIsSubmittingOutcome] = useState(false);
   const [outcomeError, setOutcomeError] = useState<string | null>(null);
 
@@ -715,6 +717,7 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
 
   // Open Outcome logging modal
   const openOutcomeModal = (job: CallbackJob) => {
+    outcomeFormKey.current = newFormKey(); // a new form: its save is a new outcome, retries of it are not
     setOutcomeJob(job);
     setIsJobScheduledQuestion(null);
     setSelectedOutcome('SCHEDULED');
@@ -767,7 +770,8 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
       const saved = await saveOutcome(
         `/api/callback-jobs/${outcomeJob.id}/outcome`,
         { outcome: selectedOutcome, comment: outcomeComment.trim(), logged_by: (signedInAgentName || outcomeLoggedBy).trim() || 'Agent' },
-        outcomeJob.vehicle_reg_raw || outcomeJob.vehicle_reg
+        outcomeJob.vehicle_reg_raw || outcomeJob.vehicle_reg,
+        outcomeFormKey.current
       );
       // Only a confirmation from the server counts as saved. Otherwise the form stays open and the outcome is kept on this device.
       if (!saved.ok) throw new Error(saved.error || 'Failed to log outcome.');
