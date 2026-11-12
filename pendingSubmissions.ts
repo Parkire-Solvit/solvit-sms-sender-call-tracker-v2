@@ -1,6 +1,12 @@
 // FIXPASS pendingSubmissions.ts
 import { DbAdapter, DbTransactionClient } from "./db";
-import { COUNTED_CALL_STATUSES, hasReachedMaxAttempts, normalizeRegAlphaNumeric } from "./insuranceCallbacks";
+import {
+  COUNTED_CALL_STATUSES,
+  hasReachedMaxAttempts,
+  normalizeCommunicationStatus,
+  normalizeCommunicationType,
+  normalizeRegAlphaNumeric,
+} from "./insuranceCallbacks";
 import { HttpError } from "./httpError";
 import {
   ABSENT_CLOSE_OUTCOMES,
@@ -526,8 +532,11 @@ export function countClientContacts(
     const agentId = Number(ev.agent_id);
     const ts = parseDbTimestamp(ev.timestamp);
     if (isNaN(ts)) continue;
-    const isCall = ev.type === "CALL" && COUNTED_CALL_STATUSES.has(String(ev.status ?? "").toUpperCase());
-    const isSms = ev.type === "SMS";
+    // The same reading of the phone app's labels as Callbacks: older app builds sent "sms", "Text", "Phone Call",
+    // "Dialled" and similar. Without this, those calls and SMS were counted in Callbacks but missed in Pending.
+    const eventType = normalizeCommunicationType(ev.type);
+    const isCall = eventType === "CALL" && COUNTED_CALL_STATUSES.has(normalizeCommunicationStatus(ev.status));
+    const isSms = eventType === "SMS";
     if (!isCall && !isSms) continue;
 
     const phone = normalizePhone(ev.target_phone);

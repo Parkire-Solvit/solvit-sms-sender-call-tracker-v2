@@ -169,13 +169,12 @@ export const CallSessionView: React.FC<CallSessionViewProps> = ({
     }
 
     setExpandedHistoryJobIds((prev) => new Set(prev).add(jobId));
+    await refreshHistory(jobId);
+  };
 
-    // Cache hit: do not refetch
-    if (historyCache[jobId] !== undefined) {
-      return;
-    }
-
-    // Cache miss: fetch from API
+  // History is always read fresh from the server when it is opened (and after a save), so an outcome that was
+  // just logged always shows. What was already loaded stays on screen while the fresh copy loads.
+  const refreshHistory = async (jobId: number) => {
     setLoadingHistoryIds((prev) => new Set(prev).add(jobId));
     try {
       const res = await fetch(`/api/callback-jobs/${jobId}/logs`);
@@ -260,6 +259,8 @@ export const CallSessionView: React.FC<CallSessionViewProps> = ({
 
   const initializeClientForm = (clientGroup: CallSessionClientGroup | undefined) => {
     clientFormKey.current = newFormKey();
+    // A new customer screen starts with History closed, so whatever is opened is read fresh from the server.
+    setExpandedHistoryJobIds(new Set());
     if (!clientGroup) {
       setVehicleForm({});
       return;
@@ -441,6 +442,8 @@ export const CallSessionView: React.FC<CallSessionViewProps> = ({
         }
         const updated = saved.data;
         if (onJobUpdated && !saved.duplicate) onJobUpdated(updated);
+        // Any History already loaded for this vehicle is now out of date: reload it so the new outcome shows.
+        if (historyCache[v.id] !== undefined) void refreshHistory(v.id);
         return updated;
       });
 

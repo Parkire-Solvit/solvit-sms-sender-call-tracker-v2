@@ -68,6 +68,21 @@ assert(bad.get(7)!.client_attempt_count === 0 && bad.get(7)!.client_sms_count ==
 const unassigned = countClientContacts([job(8, null, "0722111222", "KAA 001A")], events, team);
 assert(unassigned.get(8)!.client_attempt_count === 0 && unassigned.get(8)!.client_sms_count === 0, "an unassigned record has no counted activity");
 
+// Older phone-app labels are read the same way as in Callbacks (they used to be missed in Pending).
+const legacy = countClientContacts([job(10, ALICE, "0744000010", "KDD 010D")], [
+  ev(ALICE, "sms", "Sent", "0744000010", T(1)),            // lower-case SMS label
+  ev(ALICE, "Text Message", null, "0744000010", T(2)),     // descriptive SMS label
+  ev(ALICE, "SMS", "SENT", "0744000010", T(3)),            // the current label
+  ev(ALICE, "Phone Call", "dialled", "0744000010", T(4)),  // descriptive call label and status
+  ev(ALICE, "call", "Outgoing", "0744000010", T(5)),       // lower-case call label
+  ev(ALICE, "CALL", "placed", "0744000010", T(6)),         // "placed" means outgoing
+  ev(ALICE, "call", "incoming", "0744000010", T(7)),       // incoming: never counted
+  ev(ALICE, "Missed", "MISSED", "0744000010", T(8)),       // not a call or SMS label: ignored
+], team).get(10)!;
+assert(legacy.client_sms_count === 3, `three SMS with old and new labels all count (got ${legacy.client_sms_count})`);
+assert(legacy.client_attempt_count === 3, `three outgoing calls with old and new labels count, the incoming one does not (got ${legacy.client_attempt_count})`);
+
+// Empty input
 // Empty input
 assert(countClientContacts([], events, team).size === 0, "no jobs gives an empty map");
 

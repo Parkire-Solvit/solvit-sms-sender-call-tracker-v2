@@ -5,7 +5,7 @@
 // the client's number together (one shared count). The Summary groups a submission job under the solver's number.
 import * as XLSX from "xlsx";
 import { DbAdapter } from "./db";
-import { normalizeRegAlphaNumeric } from "./insuranceCallbacks";
+import { normalizeCommunicationType, normalizeRegAlphaNumeric } from "./insuranceCallbacks";
 import {
   ContactEvent,
   ContactJob,
@@ -112,11 +112,13 @@ export async function getPendingMaxAttemptsTimeline(db: DbAdapter, jobType: Pend
         const ts = parseDbTimestamp(ev.timestamp);
         if (isNaN(ts) || (!isNaN(firstMs) && ts < firstMs)) continue;
         const phoneMatch = countedPhones.has(normalizePhone(ev.target_phone));
-        const regMatch = ev.type === "SMS" && reg !== "" && normalizeRegAlphaNumeric(ev.reg_no) === reg;
+        const evType = normalizeCommunicationType(ev.type); // older app labels ("sms", "Phone Call") read the same way
+        if (!evType) continue;
+        const regMatch = evType === "SMS" && reg !== "" && normalizeRegAlphaNumeric(ev.reg_no) === reg;
         if (!phoneMatch && !regMatch) continue;
         const act = countClientContacts([ctx], [ev], teamIds).get(job.id);
         const counted = teamIds.has(agentId) && !!act && act.client_attempt_count + act.client_sms_count > 0;
-        if (ev.type === "CALL") {
+        if (evType === "CALL") {
           chronology.push({
             kind: "CALL",
             status: String(ev.status || "OUTGOING"),
