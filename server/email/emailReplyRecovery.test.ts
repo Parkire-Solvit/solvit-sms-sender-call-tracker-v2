@@ -4,6 +4,7 @@ import fs from 'node:fs/promises';
 import pg from 'pg';
 import { PGlite } from '@electric-sql/pglite';
 import { initDatabase } from '../../db';
+import { storeOutbound } from './emailRepository';
 import type { GraphClient, GraphMessage } from './graphClient';
 import { reconcileHistoricalReplies, type EmailRuntimeConfig } from './emailSyncService';
 
@@ -56,6 +57,11 @@ test('recovery closes a subject-matched reply without headers or conversation ID
         getMessageHeaders: async () => ({ id: reply.id, internetMessageId: headerInternetMessageId, internetMessageHeaders: [] }),
       } as unknown as GraphClient,
     };
+    // An automatic response with the exact customer and subject must not
+    // satisfy the SLA, even though the subject fallback could otherwise match.
+    assert.equal(await storeOutbound(mailbox, { ...reply,
+      internetMessageHeaders: [{ name: 'Auto-Submitted', value: 'auto-replied' }],
+    }, true), null);
     const preview = await reconcileHistoricalReplies(config, 2, true);
     assert.equal(preview.ticketsClosed, 1);
     assert.equal((await db.query<{ first_response_at: string | null }>('SELECT first_response_at FROM email_threads')).rows[0].first_response_at, null);

@@ -238,7 +238,7 @@ export async function storeInbound(
 }
 
 export async function storeOutbound(sourceMailbox: string, message: GraphMessage, dryRun = false): Promise<number | null> {
-  if (message['@removed']) return null;
+  if (message['@removed'] || emailExclusionReason(message)) return null;
   const identity = emailIdentity(message);
   const sentAt = new Date(message.sentDateTime || '');
   if (!identity.internetMessageId || Number.isNaN(sentAt.getTime())) return null;
