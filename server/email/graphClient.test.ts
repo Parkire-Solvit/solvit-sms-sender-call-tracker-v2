@@ -184,3 +184,21 @@ test('bounded recovery keeps newest pages and returns them chronologically', asy
     assert.equal(messages[9].id,'message-1');
   } finally { console.warn = originalWarn; }
 });
+
+test('historical recovery visits pages beyond the polling limit', async () => {
+  let requests = 0;
+  const client = new GraphClient(config, (async (input) => {
+    if (String(input).includes('/token')) return new Response(JSON.stringify({ access_token: 'mock', expires_in: 3600 }));
+    requests++;
+    const next = "https://graph.microsoft.com/v1.0/users('mercy@example.com')/mailfolders('sentitems')/messages?$skiptoken=" + requests;
+    return new Response(JSON.stringify({
+      value: [{ id: `message-${requests}`, sentDateTime: new Date(Date.UTC(2026, 8, 23, 12, 12 - requests)).toISOString() }],
+      ...(requests < 12 ? { '@odata.nextLink': next } : {}),
+    }));
+  }) as typeof fetch);
+  const messages = await client.getRecentFolderMessages('mercy@example.com', 'sentitems', new Date('2026-09-21T00:00:00Z'), { complete: true });
+  assert.equal(requests, 12);
+  assert.equal(messages.length, 12);
+  assert.equal(messages[0].id, 'message-12');
+  assert.equal(messages[11].id, 'message-1');
+});

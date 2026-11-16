@@ -7,6 +7,8 @@ test('normalizes reply, forward and external prefixes without changing ticket te
     'cs test 08 - different agent responds');
   assert.equal(normalizedReplySubject('RE: [EXTERNAL] Fwd:   Valuation   Request '), 'valuation request');
   assert.equal(normalizedReplySubject('Renewal: KCK 681F'), 'renewal: kck 681f');
+  assert.equal(normalizedReplySubject('RE: Re: KCR305A Heritage Insurance valuation'),
+    normalizedReplySubject('Re: KCR305A Heritage Insurance valuation'));
 });
 
 test('keeps later customer replies on the original subject ticket', () => {

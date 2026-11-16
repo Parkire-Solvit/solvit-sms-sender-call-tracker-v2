@@ -1,6 +1,7 @@
 import { getPostgresPool } from '../../db';
 import { GraphClient, type GraphMessage } from './graphClient';
 import { emailIdentity, isAddressedToGroup, isFromMonitoredMailbox } from './messageIdentity';
+import { normalizedReplySubject } from './replySubjectFallback';
 import {
   emailHealth, emitDueAlerts, ensureEmailTeam, getDeltaLink, getEmailSettings, isStoredEmail,
   countOpenEmailThreads, recordOptionalFolderAbsent, recordSyncFailure, saveDeltaLink, storeInbound, storeOutbound,
@@ -140,7 +141,7 @@ async function syncFolder(config: EmailRuntimeConfig, mailbox: string, folder: s
         const detail = await config.graph.getMessageHeaders(mailbox, item.id);
         const message: GraphMessage = { ...item, internetMessageHeaders: detail.internetMessageHeaders };
         const identity = emailIdentity(message);
-        const isReplyCandidate = Boolean(identity.inReplyTo || identity.references.length || message.conversationId);
+        const isReplyCandidate = Boolean(identity.inReplyTo || identity.references.length || message.conversationId || normalizedReplySubject(message.subject));
         if (isReplyCandidate) metrics.replyCandidates++;
         if (await storeOutbound(mailbox, message)) {
           metrics.processed++;
@@ -194,7 +195,9 @@ async function reconcileRecentSent(
     const detail = await config.graph.getMessageHeaders(mailbox, item.id);
     const message = { ...item, internetMessageHeaders: detail.internetMessageHeaders };
     const identity = emailIdentity(message);
-    if (!identity.inReplyTo && !identity.references.length && !message.conversationId) continue;
+    // Outlook can omit both RFC headers and conversation identity. Allow the
+    // repository's recipient-checked, unambiguous subject fallback to run.
+    if (!identity.inReplyTo && !identity.references.length && !message.conversationId && !normalizedReplySubject(message.subject)) continue;
     metrics.replyCandidates++;
     if (await storeOutbound(mailbox, message)) {
       metrics.processed++;
@@ -293,13 +296,13 @@ export async function reconcileHistoricalReplies(
     days, dryRun, sentScanned: 0, replyCandidates: 0, repliesMatched: 0, ticketsClosed: 0, repliesUnmatched: 0,
   };
   for (const mailbox of config.mailboxes) {
-    const items = await config.graph.getRecentFolderMessages(mailbox, 'sentitems', since);
+    const items = await config.graph.getRecentFolderMessages(mailbox, 'sentitems', since, { complete: true });
     for (const item of items) {
       result.sentScanned++;
       const detail = await config.graph.getMessageHeaders(mailbox, item.id);
       const message: GraphMessage = { ...item, internetMessageHeaders: detail.internetMessageHeaders };
       const identity = emailIdentity(message);
-      if (!identity.inReplyTo && !identity.references.length && !message.conversationId) continue;
+      if (!identity.inReplyTo && !identity.references.length && !message.conversationId && !normalizedReplySubject(message.subject)) continue;
       result.replyCandidates++;
       // Always preview in a rolled-back transaction first. This gives an exact
       // count of open tickets and keeps preview mode completely non-mutating.

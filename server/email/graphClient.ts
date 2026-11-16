@@ -132,7 +132,7 @@ export class GraphClient {
     return page;
   }
 
-  async getRecentFolderMessages(mailbox: string, folder: string, since: Date): Promise<GraphMessage[]> {
+  async getRecentFolderMessages(mailbox: string, folder: string, since: Date, options: { complete?: boolean } = {}): Promise<GraphMessage[]> {
     if (!folder || folder.includes('/') || Number.isNaN(since.getTime())) throw new Error('Invalid recent-message query');
     const path = `${this.mailboxPath(mailbox)}/mailFolders/${encodeURIComponent(folder)}/messages`;
     const base = `${graphOrigin}${path}`;
@@ -149,7 +149,9 @@ export class GraphClient {
     });
     let url: string | undefined = `${base}?${params}`;
     const messages: GraphMessage[] = [];
-    for (let pageNumber = 0; url && pageNumber < 10; pageNumber++) {
+    // Interactive polling is bounded; an explicit historical reconciliation
+    // must visit every page in the requested period before claiming completion.
+    for (let pageNumber = 0; url && (options.complete || pageNumber < 10); pageNumber++) {
       const parsed = new URL(url);
       const match = /^\/v1\.0\/users(?:\/([^/]+)|\('([^']+)'\))\/mailfolders(?:\/([^/]+)|\('([^']+)'\))\/messages$/i.exec(parsed.pathname);
       const linkMailbox = match ? decodeURIComponent(match[1] || match[2]) : '';
