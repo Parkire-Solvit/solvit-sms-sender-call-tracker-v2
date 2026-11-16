@@ -1,7 +1,8 @@
 // V19 pendingMaxAttemptsReport.ts
 // Pending Submissions max attempts Excel report, in the same format as the Callbacks max attempts report:
 // a Summary sheet, one sheet per insurance company (the Callbacks version uses channel partner), and a Raw Data sheet.
-// One report per job type. An inspection job counts the client's number, a submission job counts the solver's number.
+// One report per job type. An inspection job counts the client's number. A submission job counts the solver's number and
+// the client's number together (one shared count). The Summary groups a submission job under the solver's number.
 import * as XLSX from "xlsx";
 import { DbAdapter } from "./db";
 import { normalizeRegAlphaNumeric } from "./insuranceCallbacks";
@@ -15,7 +16,7 @@ import {
   getPendingSubmissionSettings,
   normalizePhone,
   parseDbTimestamp,
-  primaryPhoneOf,
+  countedPhonesOf,
 } from "./pendingSubmissions";
 import { PendingJobType } from "./pendingSubmissionOutcomes";
 
@@ -105,12 +106,12 @@ export async function getPendingMaxAttemptsTimeline(db: DbAdapter, jobType: Pend
         job_type: job.job_type,
         type_changed_at: job.type_changed_at,
       };
-      const clientPhone = primaryPhoneOf(job);
+      const countedPhones = new Set(countedPhonesOf(job));
       const reg = normalizeRegAlphaNumeric(job.vehicle_reg);
       for (const ev of eventsByAgent.get(agentId) ?? []) {
         const ts = parseDbTimestamp(ev.timestamp);
         if (isNaN(ts) || (!isNaN(firstMs) && ts < firstMs)) continue;
-        const phoneMatch = clientPhone !== "" && normalizePhone(ev.target_phone) === clientPhone;
+        const phoneMatch = countedPhones.has(normalizePhone(ev.target_phone));
         const regMatch = ev.type === "SMS" && reg !== "" && normalizeRegAlphaNumeric(ev.reg_no) === reg;
         if (!phoneMatch && !regMatch) continue;
         const act = countClientContacts([ctx], [ev], teamIds).get(job.id);
@@ -178,7 +179,8 @@ export function buildPendingMaxAttemptsWorkbook(
 ) {
   const wb = XLSX.utils.book_new();
   const isSubmission = jobType === "SUBMISSION";
-  // The number that is counted: the client's for an inspection job, the solver's for a submission job.
+  // The number a job is grouped under: the client's for an inspection job, the solver's for a submission job.
+  // (A submission job also counts calls and SMS to the client's number, but the Summary row stays per solver.)
   const primaryLabel = isSubmission ? "Solver Phone" : "Client Phone";
   const primaryOf = (j: PendingSubmissionJobView) =>
     isSubmission ? j.solver_contact_raw || j.solver_contact || "" : j.client_phone_raw || j.client_phone || "";

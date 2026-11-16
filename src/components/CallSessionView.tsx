@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
   Phone,
   PhoneCall,
@@ -22,7 +22,9 @@ import {
   Mail,
 } from 'lucide-react';
 import { CallbackJob, CallbackSettings, CallbackJobLog } from '../types/callbacks';
-import { saveOutcome } from '../lib/safeSave';
+import { saveOutcome, newFormKey } from '../lib/safeSave';
+import { callbackReferenceMs, compareCallbacksOldestFirst } from '../lib/callbackOrder';
+import { callbackCommentProblem, isCommentRequiredForOutcome, MIN_REQUIRED_COMMENT_LENGTH } from '../lib/callbackComment';
 
 export interface CallSessionClientGroup {
   client_phone: string;
@@ -69,8 +71,8 @@ const SESSION_OUTCOME_OPTIONS: OutcomeOption[] = [
   {
     value: 'WRONG_NUMBER',
     label: 'Wrong Number',
-    description: 'Stays Amber · Number incorrect',
-    resultingStatus: 'AMBER',
+    description: 'Goes Red · Final disposition',
+    resultingStatus: 'RED',
   },
   {
     value: 'DECLINED',
@@ -103,30 +105,10 @@ function getOutcomeLabel(outcome?: string | null): string {
   return OUTCOME_LABEL_MAP[outcome] || outcome.replace(/_/g, ' ');
 }
 
-function parseInitiatedDate(dateStr?: string | null): number {
-  if (!dateStr || !String(dateStr).trim()) return Infinity;
-  const s = String(dateStr).trim();
-  const parsed = Date.parse(s);
-  if (!isNaN(parsed)) return parsed;
-
-  const parts = s.split(/[\/\-\.]/);
-  if (parts.length === 3 && parts[2].length === 4) {
-    const d = parseInt(parts[0], 10);
-    const m = parseInt(parts[1], 10) - 1;
-    const y = parseInt(parts[2], 10);
-    const testDate = new Date(y, m, d).getTime();
-    if (!isNaN(testDate)) return testDate;
-  }
-  return Infinity;
-}
-
 function getGroupEarliestDate(vehicles: CallbackJob[]): number {
   let min = Infinity;
   for (const v of vehicles) {
-    let t = parseInitiatedDate(v.initiated_date);
-    if (t === Infinity && v.created_at) {
-      t = parseInitiatedDate(v.created_at);
-    }
+    const t = callbackReferenceMs(v);
     if (t < min) min = t;
   }
   return min;
@@ -266,13 +248,18 @@ export const CallSessionView: React.FC<CallSessionViewProps> = ({
       return g;
     });
 
-    // Sort by earliest initiated_date, oldest first
-    groups.sort((a, b) => a.earliestDate - b.earliestDate);
+    // Customers by their earliest initiated date, oldest first (undated last). A customer's vehicles are oldest first too.
+    groups.forEach((g) => g.vehicles.sort(compareCallbacksOldestFirst));
+    groups.sort((a, b) => (a.earliestDate === b.earliestDate ? 0 : a.earliestDate < b.earliestDate ? -1 : 1));
     return groups;
   };
 
   // Initialize form for a given client
+  // Identifies the customer screen on display, so Save & Next again on the same screen is a retry, never a second save.
+  const clientFormKey = useRef<string>(newFormKey());
+
   const initializeClientForm = (clientGroup: CallSessionClientGroup | undefined) => {
+    clientFormKey.current = newFormKey();
     if (!clientGroup) {
       setVehicleForm({});
       return;
@@ -387,13 +374,22 @@ export const CallSessionView: React.FC<CallSessionViewProps> = ({
 
   const currentClient = queue[0];
 
-  // Validate that every vehicle on screen has an outcome selected (comment is now optional)
+  // Every vehicle on screen needs an outcome. Customer Rejected and Done Elsewhere also need a real comment.
   const isFormValid = useMemo(() => {
     if (!currentClient || currentClient.vehicles.length === 0) return false;
     return currentClient.vehicles.every((v) => {
       const data = vehicleForm[v.id];
-      return Boolean(data?.outcome && data.outcome.trim() !== '');
+      if (!data?.outcome || data.outcome.trim() === '') return false;
+      return callbackCommentProblem(data.outcome, data.comment) === null;
     });
+  }, [currentClient, vehicleForm]);
+
+  const missingCommentCount = useMemo(() => {
+    if (!currentClient) return 0;
+    return currentClient.vehicles.filter((v) => {
+      const data = vehicleForm[v.id];
+      return !!data?.outcome && callbackCommentProblem(data.outcome, data.comment) !== null;
+    }).length;
   }, [currentClient, vehicleForm]);
 
   // Handle outcome change for a vehicle
@@ -436,7 +432,8 @@ export const CallSessionView: React.FC<CallSessionViewProps> = ({
         const saved = await saveOutcome(
           `/api/callback-jobs/${v.id}/log`,
           { outcome: formData.outcome, comment: (formData.comment || '').trim(), logged_by: loggedBy },
-          v.vehicle_reg_raw || v.vehicle_reg
+          v.vehicle_reg_raw || v.vehicle_reg,
+          clientFormKey.current
         );
         // Only a confirmation from the server counts as saved. A retry after a partial failure is safe because the server ignores duplicates.
         if (!saved.ok) {
@@ -961,7 +958,12 @@ export const CallSessionView: React.FC<CallSessionViewProps> = ({
                     <div>
                       <div className="flex items-center justify-between mb-1">
                         <label className="text-[11px] font-bold text-slate-700">
-                          Callback Notes &amp; Summary <span className="text-slate-400 font-normal">(Optional)</span>
+                          Callback Notes &amp; Summary{' '}
+                          {isCommentRequiredForOutcome(formData.outcome) ? (
+                            <span className="text-red-500 font-bold">* Required (min {MIN_REQUIRED_COMMENT_LENGTH} characters)</span>
+                          ) : (
+                            <span className="text-slate-400 font-normal">(Optional)</span>
+                          )}
                         </label>
                       </div>
                       <textarea
@@ -969,8 +971,16 @@ export const CallSessionView: React.FC<CallSessionViewProps> = ({
                         rows={2}
                         value={formData.comment}
                         onChange={(e) => handleCommentChange(vehicle.id, e.target.value)}
-                        placeholder={`e.g. Spoke with customer regarding ${vehicle.vehicle_reg_raw}; appointment scheduled / callback requested... (optional)`}
-                        className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-800 font-medium placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-[#ff353e]/20 focus:border-[#ff353e] resize-none"
+                        placeholder={
+                          isCommentRequiredForOutcome(formData.outcome)
+                            ? `Explain why for ${vehicle.vehicle_reg_raw} (required)...`
+                            : `e.g. Spoke with customer regarding ${vehicle.vehicle_reg_raw}; appointment scheduled / callback requested... (optional)`
+                        }
+                        className={`w-full px-3 py-2 bg-slate-50 border rounded-xl text-xs text-slate-800 font-medium placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-[#ff353e]/20 focus:border-[#ff353e] resize-none ${
+                          isCommentRequiredForOutcome(formData.outcome) && callbackCommentProblem(formData.outcome, formData.comment)
+                            ? 'border-red-300'
+                            : 'border-slate-200'
+                        }`}
                       />
                     </div>
                   </div>
@@ -986,9 +996,19 @@ export const CallSessionView: React.FC<CallSessionViewProps> = ({
                 <div className="flex items-center gap-1.5 text-amber-700 font-semibold">
                   <AlertCircle className="w-4 h-4 text-amber-500 flex-shrink-0" />
                   <span>
-                    Select an outcome for all{' '}
-                    <span className="font-bold text-amber-900">{currentClient.vehicles.length}</span>{' '}
-                    vehicle{currentClient.vehicles.length === 1 ? '' : 's'} to enable Save &amp; Next.
+                    {missingCommentCount > 0 ? (
+                      <>
+                        Add a comment (min {MIN_REQUIRED_COMMENT_LENGTH} characters) for{' '}
+                        <span className="font-bold text-amber-900">{missingCommentCount}</span>{' '}
+                        vehicle{missingCommentCount === 1 ? '' : 's'} marked Customer Rejected or Done Elsewhere.
+                      </>
+                    ) : (
+                      <>
+                        Select an outcome for all{' '}
+                        <span className="font-bold text-amber-900">{currentClient.vehicles.length}</span>{' '}
+                        vehicle{currentClient.vehicles.length === 1 ? '' : 's'} to enable Save &amp; Next.
+                      </>
+                    )}
                   </span>
                 </div>
               ) : (

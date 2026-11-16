@@ -36,7 +36,8 @@ import {
   HelpCircle,
   AlertTriangle,
   Activity,
-  RotateCcw
+  RotateCcw,
+  Target
 } from 'lucide-react';
 import {
   CallbackJob,
@@ -50,7 +51,9 @@ import {
 } from '../types/callbacks';
 import { CallSessionView } from './CallSessionView';
 import DataResetPanel from './DataResetPanel';
-import { saveOutcome } from '../lib/safeSave';
+import { saveOutcome, newFormKey } from '../lib/safeSave';
+import { sortCallbacksNewestFirst } from '../lib/callbackOrder';
+import { callbackCommentProblem, isCommentRequiredForOutcome, MIN_REQUIRED_COMMENT_LENGTH } from '../lib/callbackComment';
 import { OnboardingTour } from './OnboardingTour';
 import { AgentReviewModal } from './AgentReviewModal';
 import { UnmatchedActivityModal } from './UnmatchedActivityModal';
@@ -58,6 +61,11 @@ import { UnmatchedActivityModal } from './UnmatchedActivityModal';
 interface InsuranceCallbackSectionProps {
   onOpenSettings?: () => void;
   allAgents?: { id: number; name: string; tag?: string }[];
+  /** When false (callback_agent role), management controls (upload, settings,
+   * allocation edits) are hidden. Agents can still view jobs and log outcomes. */
+  canManage?: boolean;
+  /** Set for an agent login: outcomes are always logged under this name and it cannot be changed. */
+  signedInAgentName?: string | null;
 }
 
 interface OutcomeOption {
@@ -100,9 +108,9 @@ const OUTCOME_OPTIONS: OutcomeOption[] = [
   {
     value: 'WRONG_NUMBER',
     label: 'Wrong Number',
-    description: 'Stays Amber · Number incorrect',
-    category: 'NO_AMBER',
-    resultingStatus: 'AMBER',
+    description: 'Goes Red · Final disposition',
+    category: 'NO_RED',
+    resultingStatus: 'RED',
   },
   {
     value: 'DECLINED',
@@ -140,6 +148,8 @@ function getOutcomeLabel(outcome?: string | null): string {
 export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> = ({
   onOpenSettings,
   allAgents = [],
+  canManage = true,
+  signedInAgentName = null,
 }) => {
   // Data state
   const [jobs, setJobs] = useState<CallbackJob[]>([]);
@@ -245,6 +255,8 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
   const [selectedOutcome, setSelectedOutcome] = useState<string>('SCHEDULED');
   const [outcomeComment, setOutcomeComment] = useState('');
   const [outcomeLoggedBy, setOutcomeLoggedBy] = useState('Caroline');
+  // Identifies the outcome form on screen, so pressing Save again is a retry while a new form is a new outcome.
+  const outcomeFormKey = useRef<string>(newFormKey());
   const [isSubmittingOutcome, setIsSubmittingOutcome] = useState(false);
   const [outcomeError, setOutcomeError] = useState<string | null>(null);
 
@@ -661,6 +673,7 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
   };
 
   const fetchReviewAndUnmatchedCounts = async () => {
+    if (!canManage) return;
     try {
       const [reviewRes, unmatchedRes] = await Promise.all([
         fetch('/api/agents/needs-review'),
@@ -695,6 +708,7 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
       );
       fetchJobs();
       fetchReviewAndUnmatchedCounts();
+      setKpiRefreshToken((value) => value + 1);
     } catch (err: any) {
       console.error('Error assigning callback job:', err);
       alert('Error updating assignment: ' + err.message);
@@ -703,12 +717,13 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
 
   // Open Outcome logging modal
   const openOutcomeModal = (job: CallbackJob) => {
+    outcomeFormKey.current = newFormKey(); // a new form: its save is a new outcome, retries of it are not
     setOutcomeJob(job);
     setIsJobScheduledQuestion(null);
     setSelectedOutcome('SCHEDULED');
     setOutcomeComment('');
     setOutcomeError(null);
-    const defaultAgent = job.assigned_agent_name || importedBy || 'Caroline';
+    const defaultAgent = signedInAgentName || job.assigned_agent_name || importedBy || 'Caroline';
     setOutcomeLoggedBy(defaultAgent);
   };
 
@@ -741,7 +756,12 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
       setOutcomeError('Please select a specific outcome.');
       return;
     }
-    // Comment is now optional
+    // Customer Rejected and Done Elsewhere must be explained (the server enforces the same rule).
+    const commentProblem = callbackCommentProblem(selectedOutcome, outcomeComment);
+    if (commentProblem) {
+      setOutcomeError(commentProblem);
+      return;
+    }
 
     setIsSubmittingOutcome(true);
     setOutcomeError(null);
@@ -749,8 +769,9 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
     try {
       const saved = await saveOutcome(
         `/api/callback-jobs/${outcomeJob.id}/outcome`,
-        { outcome: selectedOutcome, comment: outcomeComment.trim(), logged_by: outcomeLoggedBy.trim() || 'Agent' },
-        outcomeJob.vehicle_reg_raw || outcomeJob.vehicle_reg
+        { outcome: selectedOutcome, comment: outcomeComment.trim(), logged_by: (signedInAgentName || outcomeLoggedBy).trim() || 'Agent' },
+        outcomeJob.vehicle_reg_raw || outcomeJob.vehicle_reg,
+        outcomeFormKey.current
       );
       // Only a confirmation from the server counts as saved. Otherwise the form stays open and the outcome is kept on this device.
       if (!saved.ok) throw new Error(saved.error || 'Failed to log outcome.');
@@ -940,6 +961,7 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
       });
       setSelectedUnassignedJobIds(new Set());
       await fetchJobs();
+      setKpiRefreshToken((value) => value + 1);
     } catch (err: any) {
       setBulkMessage({ type: 'error', text: err.message || 'Error bulk assigning jobs' });
     } finally {
@@ -1471,6 +1493,7 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
       setUploadFile(null);
       if (fileInputRef.current) fileInputRef.current.value = '';
       fetchJobs();
+      setKpiRefreshToken((value) => value + 1);
     } catch (err) {
       console.error('Confirm import error:', err);
       setUploadError((err as Error).message);
@@ -1600,7 +1623,8 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
       Map<string, { client_name: string | null; client_phone_raw: string; vehicles: CallbackJob[] }>
     >();
 
-    filteredJobs.forEach((job) => {
+    // New additions first: partners by their newest visible import, then customers and vehicles.
+    sortCallbacksNewestFirst<CallbackJob>(filteredJobs).forEach((job) => {
       const partner = job.channel_partner || 'Unassigned Partner';
       if (!partnerMap.has(partner)) {
         partnerMap.set(partner, new Map());
@@ -1657,7 +1681,10 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
       }
     });
 
-    return { total: sourceJobs.length, amber, green, red, needsAction };
+    // Conversion: every GREEN (scheduled) callback out of every callback in scope, open or closed.
+    const conversionRate = sourceJobs.length === 0 ? null : Math.round((green / sourceJobs.length) * 1000) / 10;
+
+    return { total: sourceJobs.length, amber, green, red, needsAction, conversionRate };
   }, [jobs, selectedAgent, settings]);
 
   const togglePartnerCollapse = (partner: string) => {
@@ -1806,8 +1833,8 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
           </div>
 
           <div className="flex items-center gap-2.5 flex-wrap sm:flex-nowrap">
-            {/* Max Attempts Report Button */}
-            <button
+            {/* Max Attempts Report Button (administrators only) */}
+            {canManage && (<button
               id="btn-open-max-attempts-report"
               onClick={openMaxAttemptsReport}
               className="px-3.5 py-2 rounded-xl text-xs font-bold border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 transition-all flex items-center gap-1.5 shadow-2xs cursor-pointer"
@@ -1820,10 +1847,10 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
                   {totalMaxAttemptsCount}
                 </span>
               )}
-            </button>
+            </button>)}
 
-            {/* Unmatched Activity Button */}
-            <button
+            {/* Unmatched Activity Button (administrators only) */}
+            {canManage && (<button
               id="btn-open-unmatched-activity"
               onClick={() => setIsUnmatchedActivityOpen(true)}
               className="px-3.5 py-2 rounded-xl text-xs font-bold border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 transition-all flex items-center gap-1.5 shadow-2xs cursor-pointer"
@@ -1836,28 +1863,33 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
                   {unmatchedCount}
                 </span>
               )}
-            </button>
+            </button>)}
 
-            {/* Team Settings Button */}
-            <button
-              id="btn-open-callback-settings"
-              onClick={() => setIsSettingsOpen(true)}
-              className="px-3.5 py-2 rounded-xl text-xs font-bold border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 transition-all flex items-center gap-1.5 shadow-2xs cursor-pointer"
-              title="Configure staff balancing and max attempts"
-            >
-              <SettingsIcon className="w-3.5 h-3.5 text-slate-500" />
-              <span>Team Settings</span>
-            </button>
+            {/* Management controls (admins only) */}
+            {canManage && (
+              <>
+                {/* Team Settings Button */}
+                <button
+                  id="btn-open-callback-settings"
+                  onClick={() => setIsSettingsOpen(true)}
+                  className="px-3.5 py-2 rounded-xl text-xs font-bold border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 transition-all flex items-center gap-1.5 shadow-2xs cursor-pointer"
+                  title="Configure staff balancing and max attempts"
+                >
+                  <SettingsIcon className="w-3.5 h-3.5 text-slate-500" />
+                  <span>Team Settings</span>
+                </button>
 
-            {/* Upload latest pending scheduling list Button */}
-            <button
-              id="btn-open-import-modal"
-              onClick={openUploadModal}
-              className="px-4 py-2 rounded-xl text-xs font-bold bg-[#ff353e] hover:bg-[#e0262f] text-white shadow-sm hover:shadow transition-all flex items-center gap-2 cursor-pointer"
-            >
-              <Upload className="w-3.5 h-3.5" />
-              <span>Upload latest pending scheduling list</span>
-            </button>
+                {/* Upload latest pending scheduling list Button */}
+                <button
+                  id="btn-open-import-modal"
+                  onClick={openUploadModal}
+                  className="px-4 py-2 rounded-xl text-xs font-bold bg-[#ff353e] hover:bg-[#e0262f] text-white shadow-sm hover:shadow transition-all flex items-center gap-2 cursor-pointer"
+                >
+                  <Upload className="w-3.5 h-3.5" />
+                  <span>Upload latest pending scheduling list</span>
+                </button>
+              </>
+            )}
 
             {/* Refresh Button */}
             <button
@@ -2038,7 +2070,7 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
               </div>
             )}
           </div>
-          <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-5 gap-3">
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
             <div
               id="tile-overview-total"
               onClick={() => openDrilldown('TOTAL')}
@@ -2117,6 +2149,21 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
                 <ChevronRight className="w-3.5 h-3.5 text-red-500 group-hover:translate-x-0.5 transition-transform" />
               </div>
               <span className="text-2xl font-black text-red-700 mt-0.5 block">{stats.needsAction}</span>
+            </div>
+
+            <div
+              id="tile-overview-conversion-rate"
+              title={`All closed green callbacks (${stats.green}) out of all callbacks in scope (${stats.total}), open and closed`}
+              className="col-span-2 sm:col-span-3 lg:col-span-1 bg-emerald-50 rounded-xl p-3 border border-emerald-200/80 text-emerald-800"
+            >
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] font-bold uppercase tracking-wider block">Conversion Rate</span>
+                <Target className="w-3.5 h-3.5 text-emerald-600" />
+              </div>
+              <span className="text-2xl font-black mt-0.5 block">
+                {stats.conversionRate === null ? 'n/a' : `${stats.conversionRate}%`}
+              </span>
+              <span className="text-[10px] font-semibold opacity-70 block">{stats.green} of {stats.total} scheduled</span>
             </div>
           </div>
         </div>
@@ -2259,13 +2306,15 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
               Upload Brian&rsquo;s daily valuation Excel export (.xlsx) to queue pending callbacks and auto-balance records across your callback team.
             </p>
           </div>
-          <button
-            onClick={openUploadModal}
-            className="px-5 py-2.5 rounded-xl text-xs font-bold bg-[#ff353e] hover:bg-[#e0262f] text-white shadow-sm transition-all inline-flex items-center gap-2 cursor-pointer"
-          >
-            <Upload className="w-4 h-4" />
-            <span>Upload latest pending scheduling list</span>
-          </button>
+          {canManage && (
+            <button
+              onClick={openUploadModal}
+              className="px-5 py-2.5 rounded-xl text-xs font-bold bg-[#ff353e] hover:bg-[#e0262f] text-white shadow-sm transition-all inline-flex items-center gap-2 cursor-pointer"
+            >
+              <Upload className="w-4 h-4" />
+              <span>Upload latest pending scheduling list</span>
+            </button>
+          )}
         </div>
       ) : groupedData.size === 0 ? (
         <div className="bg-white rounded-3xl p-12 border border-slate-200 text-center space-y-2">
@@ -2287,7 +2336,7 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
       ) : (
         <div className="space-y-5">
           {/* Bulk Assignment Bar in Unassigned filter view */}
-          {selectedAgent === '__unassigned__' && (
+          {canManage && selectedAgent === '__unassigned__' && (
             <div className="bg-white rounded-2xl p-4 border border-amber-200 shadow-xs space-y-3">
               <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
                 {/* Left: Select all checkbox & selection count */}
@@ -2698,7 +2747,12 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
                                       </span>
                                     )}
 
-                                    {/* Assigned Agent Dropdown */}
+                                    {/* Assigned Agent Dropdown (administrators); agents see the name only */}
+                                    {!canManage ? (
+                                      <span className="text-xs font-bold px-2.5 py-1 bg-slate-50 border border-slate-200 rounded-lg text-slate-700">
+                                        {vehicle.assigned_agent_name || 'Unassigned'}
+                                      </span>
+                                    ) : (
                                     <div className="relative inline-flex items-center" onClick={(e) => e.stopPropagation()}>
                                       <select
                                         id={`select-assign-agent-${vehicle.id}`}
@@ -2721,6 +2775,7 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
                                       </select>
                                       <ChevronDown className="w-3 h-3 text-slate-400 absolute right-1.5 pointer-events-none" />
                                     </div>
+                                    )}
 
                                     {/* History Toggle Button */}
                                     <button
@@ -2981,14 +3036,28 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 pt-0.5">
                   <div className="sm:col-span-2">
                     <label className="text-[11px] font-bold text-slate-700 block mb-1">
-                      Callback Notes & Summary <span className="text-slate-400 font-normal">(Optional)</span>
+                      Callback Notes & Summary{' '}
+                      {isCommentRequiredForOutcome(selectedOutcome) ? (
+                        <span className="text-red-500 font-bold">* Required (min {MIN_REQUIRED_COMMENT_LENGTH} characters)</span>
+                      ) : (
+                        <span className="text-slate-400 font-normal">(Optional)</span>
+                      )}
                     </label>
                     <textarea
                       rows={2}
                       value={outcomeComment}
                       onChange={(e) => setOutcomeComment(e.target.value)}
-                      placeholder="Notes (e.g. callback requested tomorrow 2pm, optional)..."
-                      className="w-full px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-800 font-medium placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-[#ff353e]/20 focus:border-[#ff353e] resize-none"
+                      required={isCommentRequiredForOutcome(selectedOutcome)}
+                      placeholder={
+                        isCommentRequiredForOutcome(selectedOutcome)
+                          ? 'Explain why (e.g. customer refused inspection because...)'
+                          : 'Notes (e.g. callback requested tomorrow 2pm, optional)...'
+                      }
+                      className={`w-full px-3 py-1.5 bg-slate-50 border rounded-xl text-xs text-slate-800 font-medium placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-[#ff353e]/20 focus:border-[#ff353e] resize-none ${
+                        isCommentRequiredForOutcome(selectedOutcome) && outcomeComment.trim().length < MIN_REQUIRED_COMMENT_LENGTH
+                          ? 'border-red-300'
+                          : 'border-slate-200'
+                      }`}
                     />
                   </div>
                   <div>
@@ -2996,9 +3065,11 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
                     <input
                       type="text"
                       required
-                      value={outcomeLoggedBy}
+                      value={signedInAgentName || outcomeLoggedBy}
                       onChange={(e) => setOutcomeLoggedBy(e.target.value)}
-                      className="w-full px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-800 font-semibold focus:outline-none focus:ring-2 focus:ring-[#ff353e]/20 focus:border-[#ff353e]"
+                      readOnly={Boolean(signedInAgentName)}
+                      title={signedInAgentName ? 'Outcomes are logged under your own name' : undefined}
+                      className={`w-full px-3 py-1.5 border border-slate-200 rounded-xl text-xs text-slate-800 font-semibold focus:outline-none focus:ring-2 focus:ring-[#ff353e]/20 focus:border-[#ff353e] ${signedInAgentName ? 'bg-slate-100 cursor-not-allowed' : 'bg-slate-50'}`}
                     />
                   </div>
                 </div>
@@ -3861,6 +3932,7 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
               </div>
 
               <div className="flex items-center gap-2">
+                {(canManage || drilldownModalType !== 'MAX_ATTEMPTS') && (
                 <button
                   id="btn-download-drilldown-excel"
                   onClick={() => handleExportDrilldownToExcel()}
@@ -3872,6 +3944,7 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
                   <span className="hidden sm:inline">Download Excel</span>
                   <span className="sm:hidden">Excel</span>
                 </button>
+                )}
                 <button
                   onClick={() => setDrilldownModalType(null)}
                   className="text-slate-400 hover:text-slate-600 p-1.5 rounded-xl hover:bg-slate-100 transition-colors cursor-pointer"

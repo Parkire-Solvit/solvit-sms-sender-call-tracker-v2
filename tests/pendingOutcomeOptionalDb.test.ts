@@ -46,6 +46,7 @@ async function main() {
   const j1 = await idOf(1);
   let res = await ps.logPendingSubmissionOutcome(db, j1, { outcome: "CALL_BACK", logged_by: "Mary" });
   assert(res.job.status === "AMBER" && res.job.latest_outcome === "CALL_BACK", "an outcome with no note saves and keeps the record open");
+  assert(res.job.client_attempt_count === 1, `a saved outcome counts as a call attempt when no phone event has synced (got ${res.job.client_attempt_count})`);
   res = await ps.logPendingSubmissionOutcome(db, j1, { outcome: "NOT_PICKING", comment: "   ", logged_by: "Mary" });
   assert(res.job.latest_outcome === "NOT_PICKING", "a blank note also saves");
   const logs = await db.queryAll("SELECT comment FROM pending_submission_logs WHERE pending_submission_job_id = ? ORDER BY id", [j1]);

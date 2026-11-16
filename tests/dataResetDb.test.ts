@@ -97,7 +97,12 @@ async function main() {
   assert(/^callbacks-backup-\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2}\.xlsx$/.test(bk.filename), "backup file name is dated");
 
   // Undo safeguards
-  assert((await statusOf(() => dr.undoLastUpload(db, "callbacks", { reset_key: "wrong", confirm_phrase: "REMOVE LAST UPLOAD", backup_token: bk.token }))) === 403, "undo refuses a wrong key");
+  // Callbacks undo needs no reset key (the typed phrase, the backup and the admin session still apply).
+  assert(pv.undo_requires_key === false, "callbacks undo is reported as keyless");
+  assert((await dr.getDataResetPreview(db, "pending-submissions")).undo_requires_key === true, "pending undo still needs the key");
+  assert((await statusOf(async () => dr.verifyBackupAccess("callbacks", ""))) === 0, "callbacks backup works without a key");
+  assert((await statusOf(async () => dr.verifyBackupAccess("callbacks", "wrong"))) === 403, "a key that is supplied is still checked");
+  assert((await statusOf(async () => dr.verifyBackupAccess("pending-submissions", ""))) === 403, "pending backup still needs the key");
   assert((await statusOf(() => dr.undoLastUpload(db, "callbacks", { reset_key: KEY, confirm_phrase: "remove last upload", backup_token: bk.token }))) === 400, "undo needs the exact phrase");
   assert((await statusOf(() => dr.undoLastUpload(db, "callbacks", { reset_key: KEY, confirm_phrase: "REMOVE LAST UPLOAD" }))) === 409, "undo needs a backup");
   assert((await count("SELECT COUNT(*) AS n FROM callback_jobs")) === 12, "nothing changed after the refusals");
@@ -105,7 +110,7 @@ async function main() {
 
   // Undo upload B
   const bk2 = await backup("callbacks");
-  const undoB = await dr.undoLastUpload(db, "callbacks", { reset_key: KEY, confirm_phrase: "REMOVE LAST UPLOAD", backup_token: bk2.token });
+  const undoB = await dr.undoLastUpload(db, "callbacks", { confirm_phrase: "REMOVE LAST UPLOAD", backup_token: bk2.token });
   assert(undoB.success && undoB.removed_records === 2 && undoB.restored_records === 2, "undo B removed 2 and restored 2");
   assert((await count("SELECT COUNT(*) AS n FROM callback_jobs")) === 10, "back to 10 records");
   assert((await count("SELECT COUNT(*) AS n FROM callback_jobs WHERE status = 'AMBER'")) === 10, "records 9 and 10 are open again");

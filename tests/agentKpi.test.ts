@@ -52,6 +52,11 @@ assert(a.oldest_open_days === 10, `oldest open record is 10 days old (got ${a.ol
 assert(b.in_scope === 0 && b.completion_rate === null && b.all_clear === true && b.oldest_open_days === null, "an agent with no records has no rate and is all clear");
 assert(out.unassigned_open === 2, `two open records belong to nobody on the team (got ${out.unassigned_open})`);
 
+const lifetime = computeAgentKpis(records, [{ id: A, name: "Alice" }], req, NOW, null).agents[0];
+assert(lifetime.completed === 2, `lifetime KPI includes the record closed 40 days ago (got ${lifetime.completed})`);
+assert(lifetime.closed_by_upload === 2, `lifetime KPI still reports upload closures separately (got ${lifetime.closed_by_upload})`);
+assert(lifetime.in_scope === 6 && lifetime.completion_rate === 33.3, `lifetime rate uses open plus all agent completions (got ${lifetime.in_scope}/${lifetime.completion_rate})`);
+
 // completion of 100 percent
 const perfect = computeAgentKpis([rec(A, "x", "GREEN", 2, 2), rec(A, "y", "RED", 4, 4)], [{ id: A, name: "Alice" }], req, NOW);
 assert(perfect.agents[0].completion_rate === 100 && perfect.agents[0].all_clear === true, "all closed gives 100 percent and all clear");

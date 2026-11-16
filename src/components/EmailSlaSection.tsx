@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { AlertTriangle, ChevronDown, Mail, RefreshCw, Settings2 } from 'lucide-react';
+import { AlertTriangle, ChevronDown, Mail, RefreshCw, Search, Settings2, X } from 'lucide-react';
 import { emailDeadlineLabel } from '../../shared/emailDeadlineLabel';
 import { emailCompletionOutcome, emailCompletionTime } from '../../shared/emailCompletionLabel';
 import { EmailSlaReports } from './EmailSlaReports';
@@ -114,6 +114,8 @@ export function EmailSlaSection({ employeeEmail }: { employeeEmail?: string }) {
   const [owner, setOwner] = useState('');
   const [receivedFrom, setReceivedFrom] = useState('');
   const [receivedTo, setReceivedTo] = useState('');
+  const [searchInput, setSearchInput] = useState('');
+  const [search, setSearch] = useState('');
   const [error, setError] = useState('');
   const [outlookNotice, setOutlookNotice] = useState('');
   const [busy, setBusy] = useState(false);
@@ -137,6 +139,7 @@ export function EmailSlaSection({ employeeEmail }: { employeeEmail?: string }) {
         ...(owner ? { owner } : {}),
         ...(receivedFrom ? { from: receivedFrom } : {}),
         ...(receivedTo ? { to: receivedTo } : {}),
+        ...(search ? { search } : {}),
       });
       const [nextThreads, nextMembers, nextAlerts, nextSummary, nextSettings] = await Promise.all([
         api<Thread[]>(`/api/email/threads?${query}`), api<TeamMember[]>(isEmployee ? '/api/email/assignment-targets' : '/api/email/team'),
@@ -148,7 +151,12 @@ export function EmailSlaSection({ employeeEmail }: { employeeEmail?: string }) {
       setSummary(nextSummary); setSettings(nextSettings);
       setLastUpdatedAt(Date.now()); setError('');
     } catch (cause) { if (sequence === refreshSequence.current) setError((cause as Error).message); }
-  }, [filter, owner, receivedFrom, receivedTo, isEmployee]);
+  }, [filter, owner, receivedFrom, receivedTo, search, isEmployee]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => setSearch(searchInput.trim()), 300);
+    return () => window.clearTimeout(timer);
+  }, [searchInput]);
 
   useEffect(() => {
     void refresh();
@@ -318,7 +326,12 @@ export function EmailSlaSection({ employeeEmail }: { employeeEmail?: string }) {
         {reconciliation.error && <p className="mt-3 text-sm text-red-700">{reconciliation.error}</p>}
         {reconciliation.result && <p className="mt-3 text-sm text-slate-700">Scanned {reconciliation.result.sentScanned} sent emails; found {reconciliation.result.replyCandidates} reply candidates, matched {reconciliation.result.repliesMatched}, and {reconciliation.result.dryRun ? 'would close' : 'closed'} <strong>{reconciliation.result.ticketsClosed}</strong> open tickets. {reconciliation.result.repliesUnmatched} candidates were left untouched.</p>}
       </section>}
-      <section className="p-5 rounded-2xl border border-slate-200 bg-white shadow-sm"><div className="flex flex-wrap items-center justify-between gap-3 mb-4"><div><h3 className="font-semibold">CS emails</h3><p className="mt-1 text-xs text-slate-500">All times are Nairobi time (UTC+3). SLA counts Mon–Fri, 08:00–17:00, excluding configured holidays. Auto-refreshes every 15 seconds and when you return to this tab.{lastUpdatedAt ? ` Last updated ${new Date(lastUpdatedAt).toLocaleTimeString('en-KE', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}.` : ''}</p></div><div className="flex flex-wrap gap-2">
+      <section className="p-5 rounded-2xl border border-slate-200 bg-white shadow-sm"><div className="mb-4 space-y-3"><div className="flex flex-wrap items-center justify-between gap-3"><div><h3 className="font-semibold">CS emails</h3><p className="mt-1 text-xs text-slate-500">All times are Nairobi time (UTC+3). SLA counts Mon–Fri, 08:00–17:00, excluding configured holidays. Auto-refreshes every 15 seconds and when you return to this tab.{lastUpdatedAt ? ` Last updated ${new Date(lastUpdatedAt).toLocaleTimeString('en-KE', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}.` : ''}</p></div><p className="text-xs font-medium text-slate-500">{threads.length} conversation{threads.length === 1 ? '' : 's'} found</p></div>
+        <div className="relative">
+          <Search aria-hidden="true" className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+          <input aria-label="Search Email SLA" type="search" value={searchInput} maxLength={200} onChange={(event) => setSearchInput(event.target.value)} placeholder="Search ticket ID, subject, customer email or owner" className="w-full rounded-xl border border-slate-200 bg-slate-50 py-2.5 pl-10 pr-10 text-sm text-slate-800 outline-none transition focus:border-blue-400 focus:bg-white focus:ring-2 focus:ring-blue-100" />
+          {searchInput && <button type="button" onClick={() => setSearchInput('')} aria-label="Clear Email SLA search" className="absolute right-2 top-1/2 inline-flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-200 hover:text-slate-700"><X aria-hidden="true" className="h-4 w-4" /></button>}
+        </div><div className="flex flex-wrap gap-2">
         <select aria-label="Email status filter" value={filter} onChange={(event) => setFilter(event.target.value)} className="border rounded-lg px-2 py-1.5 text-sm">{filters.filter(([value]) => !isEmployee || value !== 'unassigned').map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select>
         {!isEmployee && <select aria-label="Email owner filter" value={owner} onChange={(event) => setOwner(event.target.value)} className="border rounded-lg px-2 py-1.5 text-sm"><option value="">All owners</option>{members.map((member) => <option key={member.id} value={member.email}>{member.display_name}</option>)}</select>}
         <label className="flex items-center gap-2 text-xs text-slate-500"><span>From</span><input aria-label="Emails received from" title="Start of received-date range" type="date" value={receivedFrom} max={receivedTo || undefined} onChange={(event) => setReceivedFrom(event.target.value)} className="border rounded-lg px-2 py-1.5 text-sm text-slate-800" /></label>
@@ -353,7 +366,7 @@ export function EmailSlaSection({ employeeEmail }: { employeeEmail?: string }) {
               </details>
             </div>
           </article>)}
-          {!threads.length && <p className="py-8 text-center text-sm text-slate-500">No email conversations match this filter.</p>}
+          {!threads.length && <p className="py-8 text-center text-sm text-slate-500">No email conversations match your search and filters.</p>}
         </div>
       </section>
     </>}

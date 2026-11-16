@@ -19,6 +19,8 @@ interface Preview {
   section: DataResetSection;
   label: string;
   reset_key_configured: boolean;
+  /** False for Callbacks: removing the last upload then needs no reset key. */
+  undo_requires_key?: boolean;
   delete_all_phrase: string;
   undo_phrase: string;
   totals: { jobs: number; open: number; closed: number; logs: number; phones: number };
@@ -48,6 +50,9 @@ export default function DataResetPanel({ section, onChanged }: Props) {
   const [busy, setBusy] = useState<'backup' | 'run' | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState<string | null>(null);
+
+  // Delete-all always needs the reset key. Remove-last-upload needs it only where the server says so (not Callbacks).
+  const needsKey = mode === 'delete' || preview?.undo_requires_key !== false;
 
   const loadPreview = useCallback(async () => {
     try {
@@ -90,7 +95,7 @@ export default function DataResetPanel({ section, onChanged }: Props) {
       const res = await fetch(`/api/data-reset/${section}/backup`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ reset_key: resetKey }),
+        body: JSON.stringify({ reset_key: needsKey ? resetKey : '' }),
       });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
@@ -128,7 +133,7 @@ export default function DataResetPanel({ section, onChanged }: Props) {
       const payload =
         mode === 'delete'
           ? { reset_key: resetKey, confirm_phrase: phrase, confirm_count: countText, backup_token: backupToken }
-          : { reset_key: resetKey, confirm_phrase: phrase, backup_token: backupToken, allow_worked: allowWorked };
+          : { reset_key: needsKey ? resetKey : '', confirm_phrase: phrase, backup_token: backupToken, allow_worked: allowWorked };
       const res = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -168,7 +173,7 @@ export default function DataResetPanel({ section, onChanged }: Props) {
   const last = preview.last_upload;
   const expectedPhrase = mode === 'delete' ? preview.delete_all_phrase : preview.undo_phrase;
   const needsWorkedConsent = mode === 'undo' && !!last && last.worked_created_count > 0;
-  const stepOneDone = resetKey.length > 0 && backupToken.length > 0;
+  const stepOneDone = (!needsKey || resetKey.length > 0) && backupToken.length > 0;
   const canRun =
     stepOneDone &&
     phrase === expectedPhrase &&
@@ -190,7 +195,9 @@ export default function DataResetPanel({ section, onChanged }: Props) {
 
       {!preview.reset_key_configured && (
         <div className="p-2.5 bg-amber-50 border border-amber-200 rounded-xl text-[11px] text-amber-800">
-          Data reset is switched off. An administrator must set DATA_RESET_KEY (at least 12 characters) on the server before these actions can run.
+          {preview.undo_requires_key === false
+            ? 'Delete all records is switched off. An administrator must set DATA_RESET_KEY (at least 12 characters) on the server before it can run. Removing the last upload does not need the key.'
+            : 'Data reset is switched off. An administrator must set DATA_RESET_KEY (at least 12 characters) on the server before these actions can run.'}
         </div>
       )}
 
@@ -233,7 +240,7 @@ export default function DataResetPanel({ section, onChanged }: Props) {
             )}
             <button
               type="button"
-              disabled={!preview.reset_key_configured || !last || !last.can_undo}
+              disabled={(preview.undo_requires_key !== false && !preview.reset_key_configured) || !last || !last.can_undo}
               onClick={() => startFlow('undo')}
               className="px-3 py-1.5 rounded-xl text-xs font-bold border border-red-300 text-red-700 bg-white hover:bg-red-50 disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1.5 cursor-pointer"
             >
@@ -286,22 +293,26 @@ export default function DataResetPanel({ section, onChanged }: Props) {
           )}
 
           <div>
-            <label className="block text-[11px] font-bold text-slate-700 mb-1">Step 1. Reset key and backup</label>
-            <input
-              type="password"
-              autoComplete="off"
-              value={resetKey}
-              onChange={(e) => {
-                setResetKey(e.target.value);
-                setBackupToken('');
-                setBackupName('');
-              }}
-              placeholder="Reset key"
-              className={inputClass}
-            />
+            <label className="block text-[11px] font-bold text-slate-700 mb-1">
+              {needsKey ? 'Step 1. Reset key and backup' : 'Step 1. Backup'}
+            </label>
+            {needsKey && (
+              <input
+                type="password"
+                autoComplete="off"
+                value={resetKey}
+                onChange={(e) => {
+                  setResetKey(e.target.value);
+                  setBackupToken('');
+                  setBackupName('');
+                }}
+                placeholder="Reset key"
+                className={inputClass}
+              />
+            )}
             <button
               type="button"
-              disabled={resetKey.length === 0 || busy !== null}
+              disabled={(needsKey && resetKey.length === 0) || busy !== null}
               onClick={downloadBackup}
               className="mt-2 px-3 py-1.5 rounded-xl text-xs font-bold bg-slate-800 hover:bg-slate-900 text-white disabled:opacity-40 flex items-center gap-1.5 cursor-pointer"
             >

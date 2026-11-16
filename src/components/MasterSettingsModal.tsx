@@ -29,7 +29,7 @@ import {
   RefreshCw,
 } from 'lucide-react';
 import { SystemSettings, SettingsChangeLog, DEFAULT_SETTINGS } from '../types/compliance';
-import { CallbackSettings, UserAccount, ChannelPartnerAllocation } from '../types/callbacks';
+import { CallbackSettings, UserAccount, ChannelPartnerAllocation, AgentLinkOption } from '../types/callbacks';
 
 interface MasterSettingsModalProps {
   isOpen: boolean;
@@ -78,6 +78,9 @@ export const MasterSettingsModal: React.FC<MasterSettingsModalProps> = ({
   const [newUsername, setNewUsername] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [newDisplayName, setNewDisplayName] = useState('');
+  const [newRole, setNewRole] = useState<'admin' | 'agent'>('agent');
+  const [newAgentId, setNewAgentId] = useState<string>('');
+  const [agentOptions, setAgentOptions] = useState<AgentLinkOption[]>([]);
   const [isCreatingUser, setIsCreatingUser] = useState(false);
   const [editingUserId, setEditingUserId] = useState<number | null>(null);
   const [editingDisplayName, setEditingDisplayName] = useState('');
@@ -97,6 +100,7 @@ export const MasterSettingsModal: React.FC<MasterSettingsModalProps> = ({
       fetchSettings();
       fetchCallbackSettings();
       fetchUsers();
+      fetchAgentOptions();
       fetchAllocations();
     }
   }, [isOpen]);
@@ -119,6 +123,37 @@ export const MasterSettingsModal: React.FC<MasterSettingsModalProps> = ({
     }
   };
 
+  const fetchAgentOptions = async () => {
+    try {
+      const res = await fetch('/api/users/agent-options');
+      if (res.ok) setAgentOptions(await res.json());
+    } catch {
+      // The link selectors simply stay empty if this cannot be loaded.
+    }
+  };
+
+  const handleLinkAgent = async (u: UserAccount, value: string) => {
+    setUserError(null);
+    setUserSuccess(null);
+    try {
+      const res = await fetch(`/api/users/${u.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ agent_id: value === '' ? null : Number(value) }),
+      });
+      if (res.ok) {
+        setUserSuccess(value === '' ? `Account "${u.username}" is no longer linked to an agent.` : `Account "${u.username}" linked to the selected agent.`);
+        fetchUsers();
+        fetchAgentOptions();
+      } else {
+        const data = await res.json().catch(() => ({}));
+        setUserError(data.error || 'Failed to link the agent');
+      }
+    } catch {
+      setUserError('Network error linking the agent');
+    }
+  };
+
   const handleCreateUser = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newUsername.trim() || !newPassword.trim() || !newDisplayName.trim()) {
@@ -136,14 +171,19 @@ export const MasterSettingsModal: React.FC<MasterSettingsModalProps> = ({
           username: newUsername.trim(),
           password: newPassword.trim(),
           display_name: newDisplayName.trim(),
+          role: newRole,
+          agent_id: newRole === 'agent' && newAgentId ? Number(newAgentId) : null,
         }),
       });
       if (res.ok) {
         setNewUsername('');
         setNewPassword('');
         setNewDisplayName('');
+        setNewRole('agent');
+        setNewAgentId('');
         setUserSuccess('Team user account created successfully.');
         fetchUsers();
+        fetchAgentOptions();
       } else {
         const data = await res.json().catch(() => ({}));
         setUserError(data.error || 'Failed to create user account');
@@ -173,6 +213,30 @@ export const MasterSettingsModal: React.FC<MasterSettingsModalProps> = ({
       }
     } catch (err) {
       setUserError('Network error updating user status');
+    }
+  };
+
+  const handleChangeRole = async (u: UserAccount) => {
+    const nextRole = u.role === 'admin' ? 'agent' : 'admin';
+    setUserError(null);
+    setUserSuccess(null);
+    try {
+      const res = await fetch(`/api/users/${u.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ role: nextRole }),
+      });
+      if (res.ok) {
+        setUserSuccess(
+          `Account "${u.username}" access level set to ${nextRole === 'admin' ? 'Administrator' : 'Agent'}.`
+        );
+        fetchUsers();
+      } else {
+        const data = await res.json().catch(() => ({}));
+        setUserError(data.error || 'Failed to update access level');
+      }
+    } catch (err) {
+      setUserError('Network error updating access level');
     }
   };
 
@@ -1210,6 +1274,18 @@ export const MasterSettingsModal: React.FC<MasterSettingsModalProps> = ({
                     </div>
                   </div>
 
+                  {/* Accounts that still have full administrator access */}
+                  {users.filter((u) => u.role === 'admin' && u.active).length > 0 && (
+                    <div className="p-3 bg-amber-50 border border-amber-200 rounded-xl text-xs text-amber-900 flex items-start gap-2">
+                      <AlertCircle className="w-4 h-4 text-amber-600 flex-shrink-0 mt-0.5" />
+                      <span>
+                        <span className="font-bold">Full administrator access:</span>{' '}
+                        {users.filter((u) => u.role === 'admin' && u.active).map((u) => u.username).join(', ')}.{' '}
+                        Switch agents to the Agent level and link their agent record so they only see the sections their team tag opens. At least one administrator must remain.
+                      </span>
+                    </div>
+                  )}
+
                   {/* Feedback alerts */}
                   {userError && (
                     <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-700 flex items-start gap-2">
@@ -1231,7 +1307,7 @@ export const MasterSettingsModal: React.FC<MasterSettingsModalProps> = ({
                       <h3 className="text-sm font-bold text-slate-900">Add New Team Member Account</h3>
                     </div>
 
-                    <form onSubmit={handleCreateUser} className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                    <form onSubmit={handleCreateUser} className="grid grid-cols-1 sm:grid-cols-5 gap-3">
                       <div>
                         <label className="text-[11px] font-bold text-slate-700 block mb-1">Username / Login ID</label>
                         <input
@@ -1250,9 +1326,42 @@ export const MasterSettingsModal: React.FC<MasterSettingsModalProps> = ({
                           required
                           placeholder="e.g. Mercy W., Brian O."
                           value={newDisplayName}
-                          onChange={(e) => setNewDisplayName(e.target.value)}
+                          onChange={(e) => {
+                            setNewDisplayName(e.target.value);
+                            // Suggest the agent with the same name (an administrator can still change or clear it).
+                            const typed = e.target.value.trim().toLowerCase();
+                            if (!newAgentId && typed) {
+                              const match = agentOptions.find((a) => !a.linked_username && a.name.trim().toLowerCase() === typed);
+                              if (match) setNewAgentId(String(match.id));
+                            }
+                          }}
                           className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none font-medium"
                         />
+                      </div>
+                      <div>
+                        <label className="text-[11px] font-bold text-slate-700 block mb-1">Access Level</label>
+                        <select
+                          value={newRole}
+                          onChange={(e) => setNewRole(e.target.value as 'admin' | 'agent')}
+                          className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none font-medium bg-white"
+                        >
+                          <option value="agent">Agent (sections follow their team tag)</option>
+                          <option value="admin">Administrator (full access)</option>
+                        </select>
+                      </div>
+                      <div>
+                        <label className="text-[11px] font-bold text-slate-700 block mb-1">Linked Agent</label>
+                        <select
+                          value={newRole === 'agent' ? newAgentId : ''}
+                          disabled={newRole !== 'agent'}
+                          onChange={(e) => setNewAgentId(e.target.value)}
+                          className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none font-medium bg-white disabled:bg-slate-50 disabled:text-slate-400"
+                        >
+                          <option value="">No agent linked (Call Activity only)</option>
+                          {agentOptions.filter((a) => !a.linked_username).map((a) => (
+                            <option key={a.id} value={a.id}>{a.name}{a.tag ? ` (${a.tag})` : ''}</option>
+                          ))}
+                        </select>
                       </div>
                       <div>
                         <label className="text-[11px] font-bold text-slate-700 block mb-1">Temporary Password</label>
@@ -1311,6 +1420,8 @@ export const MasterSettingsModal: React.FC<MasterSettingsModalProps> = ({
                             <tr className="border-b border-slate-200 bg-slate-50/70 text-slate-500 font-bold uppercase tracking-wider text-[10px]">
                               <th className="py-2.5 px-3">User</th>
                               <th className="py-2.5 px-3">Display Name</th>
+                              <th className="py-2.5 px-3">Access Level</th>
+                              <th className="py-2.5 px-3">Linked Agent</th>
                               <th className="py-2.5 px-3">Status</th>
                               <th className="py-2.5 px-3">Created</th>
                               <th className="py-2.5 px-3 text-right">Actions</th>
@@ -1360,6 +1471,58 @@ export const MasterSettingsModal: React.FC<MasterSettingsModalProps> = ({
                                         >
                                           Edit
                                         </button>
+                                      </div>
+                                    )}
+                                  </td>
+                                  <td className="py-2.5 px-3">
+                                    <div className="flex items-center gap-1.5">
+                                      <span
+                                        className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold border ${
+                                          u.role === 'admin'
+                                            ? 'bg-indigo-50 text-indigo-700 border-indigo-200'
+                                            : 'bg-sky-50 text-sky-700 border-sky-200'
+                                        }`}
+                                      >
+                                        {u.role === 'admin' ? 'Administrator' : 'Agent'}
+                                      </span>
+                                      <button
+                                        type="button"
+                                        onClick={() => handleChangeRole(u)}
+                                        className="text-slate-400 hover:text-indigo-600 text-[10px] underline"
+                                        title={
+                                          u.role === 'admin'
+                                            ? 'Make this an agent login (sections follow the linked agent tag)'
+                                            : 'Grant full admin access'
+                                        }
+                                      >
+                                        {u.role === 'admin' ? 'Make Agent' : 'Make Admin'}
+                                      </button>
+                                    </div>
+                                  </td>
+                                  <td className="py-2.5 px-3">
+                                    {u.role === 'admin' ? (
+                                      <span className="text-[10px] text-slate-400">All sections</span>
+                                    ) : (
+                                      <div className="space-y-1">
+                                        <select
+                                          value={u.agent_id ?? ''}
+                                          onChange={(e) => handleLinkAgent(u, e.target.value)}
+                                          className="max-w-[170px] px-2 py-1 text-[11px] border border-slate-300 rounded-md bg-white font-medium"
+                                        >
+                                          <option value="">No agent linked</option>
+                                          {agentOptions
+                                            .filter((a) => !a.linked_username || a.id === u.agent_id)
+                                            .map((a) => (
+                                              <option key={a.id} value={a.id}>{a.name}</option>
+                                            ))}
+                                        </select>
+                                        <div className="text-[10px] text-slate-500">
+                                          {u.agent_archived
+                                            ? 'Agent archived: this login cannot sign in'
+                                            : u.agent_id
+                                            ? `Tag: ${u.agent_tag || 'none'}`
+                                            : 'Call Activity only'}
+                                        </div>
                                       </div>
                                     )}
                                   </td>
@@ -1419,7 +1582,7 @@ export const MasterSettingsModal: React.FC<MasterSettingsModalProps> = ({
                                 </tr>
                                 {resettingUserId === u.id && (
                                   <tr className="bg-amber-50/50">
-                                    <td colSpan={5} className="py-2.5 px-3">
+                                    <td colSpan={7} className="py-2.5 px-3">
                                       <div className="flex items-center gap-2 justify-end">
                                         <span className="text-[11px] text-slate-600 font-semibold">
                                           New Password for {u.username}:

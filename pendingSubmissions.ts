@@ -425,9 +425,27 @@ export interface ContactJob {
   type_changed_at?: unknown;
 }
 
-/** The number whose calls and SMS count for this job: the client for an inspection job, the solver for a submission job. */
+/**
+ * The job's main contact: the client for an inspection job, the solver for a submission job. It decides how a customer's
+ * jobs are grouped for one agent and which number is shown first. It is NOT the only number that is counted: see
+ * countedPhonesOf.
+ */
 export function primaryPhoneOf(job: { job_type?: unknown; client_phone: string; solver_contact: string }): string {
   return normalizePhone(normalizeJobType(job.job_type) === "SUBMISSION" ? job.solver_contact : job.client_phone);
+}
+
+/**
+ * Every number whose calls and SMS count for this job, main contact first.
+ *  - Inspection job: the client's number only.
+ *  - Submission job: the solver's number AND the client's number. A call or SMS to either one counts towards the same
+ *    maximums (one shared count, never two separate ones), so the targets are unchanged.
+ * Empty numbers are left out and a number that appears twice is listed once.
+ */
+export function countedPhonesOf(job: { job_type?: unknown; client_phone: string; solver_contact: string }): string[] {
+  const phones = normalizeJobType(job.job_type) === "SUBMISSION"
+    ? [normalizePhone(job.solver_contact), normalizePhone(job.client_phone)]
+    : [normalizePhone(job.client_phone)];
+  return phones.filter((p, i) => p !== "" && phones.indexOf(p) === i);
 }
 
 /** Counting starts at the later of the first import and the last type change. NaN when the import time is unreadable. */
@@ -459,9 +477,10 @@ export interface ContactEvent {
  * Pending Submissions keeps one rule Callbacks does not have: an event only counts if it happened on or after
  * the job's first_imported_at.
  * Solver calls are informational: any team agent, OUTGOING, phone equals the solver's phone.
- * A submission job (the car was inspected but the solver has not submitted the data) counts the SOLVER's number as
- * its primary contact, exactly as an inspection job counts the client's. Calls to any other number (the client, a
- * broker) are not counted. Counting starts at the later of first_imported_at and type_changed_at.
+ * An inspection job counts the CLIENT's number. A submission job (the car was inspected but the solver has not
+ * submitted the data) counts BOTH the solver's number and the client's number, as one shared count against the same
+ * maximums (see countedPhonesOf). Calls to any other number (a broker) are not counted. Counting starts at the later of
+ * first_imported_at and type_changed_at.
  */
 export function countClientContacts(
   jobs: ContactJob[],
@@ -493,8 +512,8 @@ export function countClientContacts(
     const ms = countingStartMs(j);
     if (isNaN(ms)) continue;
     firstMs.set(j.id, ms);
-    // byClient holds the PRIMARY contact: the client for an inspection job, the solver for a submission job.
-    push(byClient, primaryPhoneOf(j), j);
+    // byClient holds every counted number: the client for an inspection job, the solver and the client for a submission job.
+    for (const counted of countedPhonesOf(j)) push(byClient, counted, j);
     push(byReg, normalizeRegAlphaNumeric(j.vehicle_reg), j);
     push(bySolver, normalizePhone(j.solver_contact), j);
   }
@@ -565,7 +584,47 @@ export async function computePendingSubmissionActivity(db: Q, jobs: ContactJob[]
     const ms = parseDbTimestamp(j.first_imported_at);
     if (!isNaN(ms) && ms < minMs) minMs = ms;
   }
-  if (agents.length === 0 || !isFinite(minMs)) return countClientContacts(jobs, [], teamAgentIds);
+  const applyManualOutcomeFallback = async (activity: Map<number, JobActivity>): Promise<Map<number, JobActivity>> => {
+    // Match the Callbacks counter: an outcome saved by an agent represents a
+    // call attempt even when the Android event has not synced or cannot be
+    // matched. Use the greater count so a later device sync never double-counts
+    // the same outreach. Existing logs are read on every refresh, so historical
+    // records are corrected without a migration.
+    const logs = await db.queryAll<{
+      pending_submission_job_id: unknown;
+      attempt_count: unknown;
+      last_attempt_at: unknown;
+    }>(
+      `SELECT l.pending_submission_job_id,
+              COUNT(*) AS attempt_count,
+              MAX(l.created_at) AS last_attempt_at
+       FROM pending_submission_logs l
+       JOIN pending_submission_jobs j ON j.id = l.pending_submission_job_id
+       WHERE LOWER(TRIM(COALESCE(l.logged_by, ''))) <> 'system'
+         AND l.created_at >= CASE
+           WHEN j.type_changed_at IS NOT NULL AND j.type_changed_at > j.first_imported_at THEN j.type_changed_at
+           ELSE j.first_imported_at
+         END
+       GROUP BY l.pending_submission_job_id`
+    );
+    for (const log of logs) {
+      const jobId = num(log.pending_submission_job_id);
+      if (!activity.has(jobId)) continue;
+      const current = activity.get(jobId)!;
+      const manualCount = num(log.attempt_count);
+      const manualLastMs = parseDbTimestamp(log.last_attempt_at);
+      if (manualCount > current.client_attempt_count) current.client_attempt_count = manualCount;
+      const existingLast = current.last_client_attempt_at ? parseDbTimestamp(current.last_client_attempt_at) : 0;
+      if (Number.isFinite(manualLastMs) && manualLastMs > existingLast) {
+        current.last_client_attempt_at = new Date(manualLastMs).toISOString();
+      }
+    }
+    return activity;
+  };
+
+  if (agents.length === 0 || !isFinite(minMs)) {
+    return applyManualOutcomeFallback(countClientContacts(jobs, [], teamAgentIds));
+  }
 
   // Coarse prefilter only (date-only bound, two days of slack). The exact per-job cutoff is applied in code.
   const lowerBound = new Date(minMs - 2 * DAY_MS).toISOString().slice(0, 10);
@@ -576,7 +635,7 @@ export async function computePendingSubmissionActivity(db: Q, jobs: ContactJob[]
      WHERE agent_id IN (${placeholders}) AND timestamp >= ?`,
     [...agents, lowerBound]
   );
-  return countClientContacts(jobs, events, teamAgentIds);
+  return applyManualOutcomeFallback(countClientContacts(jobs, events, teamAgentIds));
 }
 
 // Max attempts sweep
@@ -585,7 +644,8 @@ export async function computePendingSubmissionActivity(db: Q, jobs: ContactJob[]
 /**
  * Closes AMBER jobs RED (MAX_ATTEMPTS_REACHED) when client_attempt_count >= max_attempts AND client_sms_count >=
  * max_sms_attempts (the Insurance Job Callbacks rule) AND the latest counted call or SMS is at least
- * max_attempts_grace_minutes old. Solver attempts never count.
+ * max_attempts_grace_minutes old. The counts are the job's counted numbers (see countedPhonesOf): the customer for an
+ * inspection job, the solver and the customer together for a submission job. The informational "solver" figure never counts.
  * Safe to call concurrently: the update is conditional on status = 'AMBER' and the log row is only written
  * when exactly one row changed. Returns the number of jobs closed.
  */
@@ -1151,7 +1211,8 @@ export async function getPendingSubmissionJobs(
     )`;
     params.push(term, term, term, term, term, term, term, term);
   }
-  sql += ` ORDER BY j.first_imported_at DESC, j.id DESC`;
+  // Oldest schedule date first (the job that needs attention first). Undated records last. Ties by external id.
+  sql += ` ORDER BY CASE WHEN j.schedule_date IS NULL THEN 1 ELSE 0 END ASC, j.schedule_date ASC, j.external_id ASC, j.id ASC`;
 
   const rows = (await db.queryAll<any>(sql, params)).map((r) => ({
     ...r,
@@ -1351,6 +1412,8 @@ export interface PendingSubmissionTeam {
   agents: Array<{ id: number; name: string; open_count: number }>;
   unassigned_open_count: number;
   orphaned_open_count: number;
+  /** Closed (GREEN or RED) records that no agent owns. They still show as Unassigned and carry no KPI credit. */
+  unassigned_closed_count: number;
 }
 
 /** Active agents with their open load, plus open (AMBER) records nobody active is working on. */
@@ -1371,11 +1434,15 @@ export async function getPendingSubmissionTeam(db: Q): Promise<PendingSubmission
     else if (activeIds.has(agentId)) load.set(agentId, n);
     else orphaned += n;
   }
+  const closedRow = await db.queryOne<{ n: unknown }>(
+    `SELECT COUNT(*) AS n FROM pending_submission_jobs WHERE status <> 'AMBER' AND assigned_agent_id IS NULL`
+  );
   return {
     callback_team_tag: settings.callback_team_tag,
     agents: agents.map((a) => ({ id: a.id, name: a.name, open_count: load.get(a.id) ?? 0 })),
     unassigned_open_count: unassigned,
     orphaned_open_count: orphaned,
+    unassigned_closed_count: num(closedRow?.n),
   };
 }
 
@@ -1383,6 +1450,8 @@ export interface ReassignResult {
   dry_run: boolean;
   /** Open records that are (dry run) or were (real run) moved. */
   records: number;
+  /** Closed records with no owner that are (dry run) or were (real run) given to the team. */
+  closed_records: number;
   /** Distinct clients involved. All of a client's records go to one agent. */
   clients: number;
   /** Distinct agents that receive records. */
@@ -1424,16 +1493,37 @@ export async function reassignOpenSubmissions(db: DbAdapter, opts: { dryRun: boo
     agents,
     held
   );
+
+  // Closed records that nobody owns (closed while unassigned, or closed before an agent was available) are given to the
+  // team too, so every record has an owner. They are planned after the open work, keeping a customer with the agent who
+  // already holds that customer. Closed records held by an archived agent keep that agent: that history is not rewritten.
+  const closedRows = await db.queryAll<{ id: unknown; client_phone: string; solver_contact: string; job_type: unknown }>(
+    `SELECT id, client_phone, solver_contact, job_type FROM pending_submission_jobs WHERE status <> 'AMBER' AND assigned_agent_id IS NULL`
+  );
+  const closedPool = closedRows.map((j) => ({ id: num(j.id), job_type: normalizeJobType(j.job_type), key: groupKeyFor(j) }));
+  const heldAfterOpen = [...held];
+  for (const r of pool) {
+    const agentId = plan.get(`${r.job_type}|${r.key}`);
+    if (agentId !== null && agentId !== undefined) heldAfterOpen.push({ job_type: r.job_type, key: r.key, agent_id: agentId });
+  }
+  const closedPlan = planAssignmentsByType(
+    closedPool.map((r) => ({ job_type: r.job_type, key: r.key })),
+    agents,
+    heldAfterOpen
+  );
+
   const agentsUsed = new Set<number>();
   for (const v of plan.values()) if (v !== null) agentsUsed.add(v);
+  for (const v of closedPlan.values()) if (v !== null) agentsUsed.add(v);
 
   const summary: ReassignResult = {
     dry_run: opts.dryRun,
     records: pool.length,
-    clients: new Set(pool.map((r) => `${r.job_type}|${r.key}`)).size,
+    closed_records: closedPool.length,
+    clients: new Set([...pool, ...closedPool].map((r) => `${r.job_type}|${r.key}`)).size,
     agents_used: agentsUsed.size,
   };
-  if (opts.dryRun || pool.length === 0) return summary;
+  if (opts.dryRun || (pool.length === 0 && closedPool.length === 0)) return summary;
 
   await db.transaction(async (tx) => {
     for (const r of pool) {
@@ -1449,6 +1539,15 @@ export async function reassignOpenSubmissions(db: DbAdapter, opts: { dryRun: boo
         );
       }
     }
+    // Ownership only: no history row and no change to closed_at, status or outcome, so the record's history is untouched.
+    for (const r of closedPool) {
+      const agentId = closedPlan.get(`${r.job_type}|${r.key}`) ?? null;
+      if (agentId === null) continue;
+      await tx.execute(
+        `UPDATE pending_submission_jobs SET assigned_agent_id = ? WHERE id = ? AND status <> 'AMBER' AND assigned_agent_id IS NULL`,
+        [agentId, r.id]
+      );
+    }
   });
   return summary;
 }
@@ -1458,7 +1557,7 @@ export async function reassignOpenSubmissions(db: DbAdapter, opts: { dryRun: boo
 // ---------------------------------------------------------------------------
 
 export interface AssignmentSyncResult {
-  /** Open records that had no active agent and were given one. */
+  /** Records (open, and closed ones nobody owned) that had no active agent and were given one. */
   assigned: number;
   /** Untouched open records moved to even out the workload after a team change. */
   rebalanced: number;
@@ -1494,13 +1593,31 @@ export function syncPendingSubmissionAssignments(db: DbAdapter): Promise<Assignm
   return run;
 }
 
+/**
+ * Self-healing guard for the job list: if any record has no owner while an active agent exists, run the normal
+ * assignment sync (serialised, same rules). A cheap one-row check when everything is owned, so it is safe to call on
+ * every list load. It never throws, because a failed assignment must not break the list.
+ */
+export async function ensureSubmissionsAssigned(db: DbAdapter): Promise<void> {
+  try {
+    const orphan = await db.queryOne<{ id: unknown }>(
+      `SELECT id FROM pending_submission_jobs WHERE assigned_agent_id IS NULL LIMIT 1`
+    );
+    if (!orphan) return;
+    const result = await syncPendingSubmissionAssignments(db);
+    if (result.assigned > 0) console.log(`[PENDING] Assignment guard: gave ${result.assigned} unowned record(s) to the team.`);
+  } catch (err) {
+    console.error("[PENDING] Assignment guard failed:", err);
+  }
+}
+
 async function runAssignmentSync(db: DbAdapter): Promise<AssignmentSyncResult> {
   const settings = await getPendingSubmissionSettings(db);
   const agents = await getValidSubmissionAgents(db, settings.callback_team_tag);
   if (agents.length === 0) return { ...NO_SYNC };
 
   const assignedResult = await reassignOpenSubmissions(db, { dryRun: false });
-  const result: AssignmentSyncResult = { ...NO_SYNC, assigned: assignedResult.records };
+  const result: AssignmentSyncResult = { ...NO_SYNC, assigned: assignedResult.records + assignedResult.closed_records };
 
   const signature = teamSignature(agents);
   const row = await db.queryOne<{ team_signature: string | null }>(

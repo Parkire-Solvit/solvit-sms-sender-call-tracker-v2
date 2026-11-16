@@ -1,5 +1,5 @@
 // V15 src/components/AgentKpiPanel.tsx
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Target, RefreshCw, ChevronDown, Phone, MessageSquare, AlertTriangle, CheckCircle2, Gauge } from 'lucide-react';
 
 export interface AgentKpiPace {
@@ -12,6 +12,12 @@ export interface AgentKpiPace {
   hours_to_clear: number | null;
   projected_finish_at: string | null;
   advice: string[];
+}
+
+export interface ConversionStat {
+  green: number;
+  total: number;
+  rate: number | null;
 }
 
 export interface AgentKpiRow {
@@ -31,16 +37,20 @@ export interface AgentKpiRow {
   sms_remaining: number;
   oldest_open_days: number | null;
   pace: AgentKpiPace;
+  /** All GREEN records over all records held by the agent. */
+  conversion?: ConversionStat;
 }
 
 export interface AgentKpiReportData {
   section: 'callbacks' | 'pending_submissions';
   generated_at: string;
-  window_days: number;
+  window_days: number | null;
   pace_lookback_working_days: number;
   requirements: { calls: number; sms: number };
   upload_closed_label: string;
   unassigned_open: number;
+  /** All GREEN records over all records (per job type for Pending). */
+  conversion?: ConversionStat;
   agents: AgentKpiRow[];
 }
 
@@ -75,8 +85,13 @@ export default function AgentKpiPanel({ section, focusAgentId = null, focusAgent
         : 'Pending Inspection'
       : SECTION_TITLE[section];
 
-  const load = useCallback(async () => {
-    setLoading(true);
+  // A background refresh keeps the numbers on screen and does not flash the spinner.
+  // Only the first load and the manual refresh button show the spinner.
+  const inFlight = useRef<boolean>(false);
+  const load = useCallback(async (silent: boolean = false) => {
+    if (inFlight.current) return;
+    inFlight.current = true;
+    if (!silent) setLoading(true);
     try {
       const res = await fetch(path);
       if (!res.ok) {
@@ -88,18 +103,32 @@ export default function AgentKpiPanel({ section, focusAgentId = null, focusAgent
     } catch (e) {
       setError((e as Error).message || 'Failed to load the KPI.');
     } finally {
-      setLoading(false);
+      inFlight.current = false;
+      if (!silent) setLoading(false);
     }
   }, [path]);
 
+  // Load on first show, and again whenever the parent signals a change (refreshToken).
+  const hasLoadedOnce = useRef<boolean>(false);
   useEffect(() => {
-    load();
+    load(hasLoadedOnce.current);
+    hasLoadedOnce.current = true;
   }, [load, refreshToken]);
 
-  // Refresh every 5 minutes while the panel is on screen
+  // Near real time: refresh every 15 seconds while the tab is visible, so changes made by
+  // other people show up too. Refresh straight away when the tab comes back into view.
   useEffect(() => {
-    const timer = setInterval(load, 5 * 60 * 1000);
-    return () => clearInterval(timer);
+    const timer = setInterval(() => {
+      if (!document.hidden) void load(true);
+    }, 15 * 1000);
+    const onVisible = () => {
+      if (!document.hidden) void load(true);
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      clearInterval(timer);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
   }, [load]);
 
   const rows = useMemo(() => {
@@ -136,7 +165,7 @@ export default function AgentKpiPanel({ section, focusAgentId = null, focusAgent
         </button>
         <button
           type="button"
-          onClick={load}
+          onClick={() => load()}
           disabled={loading}
           className="p-2 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-600 transition-all shadow-2xs cursor-pointer disabled:opacity-50"
           title="Refresh the KPI"
@@ -163,6 +192,20 @@ export default function AgentKpiPanel({ section, focusAgentId = null, focusAgent
               <span>
                 <span className="font-bold">{report.unassigned_open}</span> open record{report.unassigned_open === 1 ? '' : 's'} belong to no active agent, so they are in nobody's KPI until they are assigned.
               </span>
+            </div>
+          )}
+
+          {report && report.conversion && (
+            <div className="flex items-center justify-between gap-3 rounded-2xl bg-emerald-50 border border-emerald-200 px-4 py-2.5">
+              <div>
+                <div className="text-xs font-black text-emerald-900">Team conversion rate</div>
+                <div className="text-[11px] text-emerald-800">
+                  {report.conversion.green} of {report.conversion.total} records closed green (all records, no date limit)
+                </div>
+              </div>
+              <div className="text-2xl font-black text-emerald-900 leading-none">
+                {report.conversion.rate === null ? 'n/a' : `${report.conversion.rate}%`}
+              </div>
             </div>
           )}
 
@@ -195,6 +238,17 @@ export default function AgentKpiPanel({ section, focusAgentId = null, focusAgent
                       <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400 mt-1">Completion</div>
                     </div>
                   </div>
+
+                  {r.conversion && (
+                    <div className="flex items-center justify-between gap-2 rounded-xl bg-emerald-50 border border-emerald-200 px-3 py-1.5">
+                      <span className="text-[11px] font-bold text-emerald-900">
+                        Conversion: {r.conversion.green} of {r.conversion.total} records closed green
+                      </span>
+                      <span className="text-sm font-black text-emerald-900">
+                        {r.conversion.rate === null ? 'n/a' : `${r.conversion.rate}%`}
+                      </span>
+                    </div>
+                  )}
 
                   <div className="w-full h-2 bg-slate-100 rounded-full overflow-hidden">
                     <div
@@ -247,7 +301,7 @@ export default function AgentKpiPanel({ section, focusAgentId = null, focusAgent
 
           {report && (
             <p className="text-[10px] text-slate-400">
-              Counts records that are open now or were closed in the last {report.window_days} days. Records closed because an upload no longer contained them are shown separately as {report.upload_closed_label.toLowerCase()} and do not count as completed. Rates use outgoing calls over the last {report.pace_lookback_working_days} working days.
+              Counts records that are open now or {report.window_days === null ? 'were completed at any time' : `were closed in the last ${report.window_days} days`}. Records closed because an upload no longer contained them are shown separately as {report.upload_closed_label.toLowerCase()} and do not count as completed. Rates use outgoing calls over the last {report.pace_lookback_working_days} working days.
             </p>
           )}
         </div>
