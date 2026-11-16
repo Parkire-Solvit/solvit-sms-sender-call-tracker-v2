@@ -130,7 +130,7 @@ async function syncFolder(config: EmailRuntimeConfig, mailbox: string, folder: s
         // Headers identify customer follow-ups. Only request them for messages
         // addressed to CS; full bodies and attachments are never retrieved.
         const detail = await config.graph.getMessageHeaders(mailbox, item.id);
-        const message: GraphMessage = { ...item, internetMessageHeaders: detail.internetMessageHeaders };
+        const message: GraphMessage = { ...item, internetMessageId: detail.internetMessageId || item.internetMessageId, internetMessageHeaders: detail.internetMessageHeaders };
         if (!emailIdentity(message).internetMessageId) continue;
         if (await storeInbound(mailbox, config.groupAddress, message, settings, config.monitoringStart, config.mailboxes)) {
           metrics.processed++;
@@ -139,7 +139,7 @@ async function syncFolder(config: EmailRuntimeConfig, mailbox: string, folder: s
       } else {
         metrics.sentScanned++;
         const detail = await config.graph.getMessageHeaders(mailbox, item.id);
-        const message: GraphMessage = { ...item, internetMessageHeaders: detail.internetMessageHeaders };
+        const message: GraphMessage = { ...item, internetMessageId: detail.internetMessageId || item.internetMessageId, internetMessageHeaders: detail.internetMessageHeaders };
         const identity = emailIdentity(message);
         const isReplyCandidate = Boolean(identity.inReplyTo || identity.references.length || message.conversationId || normalizedReplySubject(message.subject));
         if (isReplyCandidate) metrics.replyCandidates++;
@@ -172,7 +172,7 @@ async function reconcileRecentInbox(config: EmailRuntimeConfig, mailbox: string)
     if (!isAddressedToGroup(item, config.groupAddress) && !addressedDirectlyToMailbox) continue;
     // Known copies need only their mailbox-local identity, not another header request.
     const detail = await isStoredEmail(item) ? item : await config.graph.getMessageHeaders(mailbox, item.id);
-    const message: GraphMessage = { ...item, internetMessageHeaders: detail.internetMessageHeaders };
+    const message: GraphMessage = { ...item, internetMessageId: detail.internetMessageId || item.internetMessageId, internetMessageHeaders: detail.internetMessageHeaders };
     if (!emailIdentity(message).internetMessageId) continue;
     if (await storeInbound(mailbox, config.groupAddress, message, settings, config.monitoringStart, config.mailboxes)) {
       metrics.processed++;
@@ -193,7 +193,7 @@ async function reconcileRecentSent(
   for (const item of items) {
     metrics.sentScanned++;
     const detail = await config.graph.getMessageHeaders(mailbox, item.id);
-    const message = { ...item, internetMessageHeaders: detail.internetMessageHeaders };
+    const message = { ...item, internetMessageId: detail.internetMessageId || item.internetMessageId, internetMessageHeaders: detail.internetMessageHeaders };
     const identity = emailIdentity(message);
     // Outlook can omit both RFC headers and conversation identity. Allow the
     // repository's recipient-checked, unambiguous subject fallback to run.
@@ -300,7 +300,7 @@ export async function reconcileHistoricalReplies(
     for (const item of items) {
       result.sentScanned++;
       const detail = await config.graph.getMessageHeaders(mailbox, item.id);
-      const message: GraphMessage = { ...item, internetMessageHeaders: detail.internetMessageHeaders };
+      const message: GraphMessage = { ...item, internetMessageId: detail.internetMessageId || item.internetMessageId, internetMessageHeaders: detail.internetMessageHeaders };
       const identity = emailIdentity(message);
       if (!identity.inReplyTo && !identity.references.length && !message.conversationId && !normalizedReplySubject(message.subject)) continue;
       result.replyCandidates++;

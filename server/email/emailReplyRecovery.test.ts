@@ -45,6 +45,7 @@ test('recovery closes a subject-matched reply without headers or conversation ID
       sentDateTime: sentAt.toISOString(),
     };
     let messages = [reply];
+    let headerInternetMessageId: string | undefined;
     const config: EmailRuntimeConfig = {
       mailboxes: [mailbox], groupAddress: 'cs-team@solvit.co.ke', monitoringStart: receivedAt,
       graph: {
@@ -52,7 +53,7 @@ test('recovery closes a subject-matched reply without headers or conversation ID
           assert.equal(options?.complete, true);
           return messages;
         },
-        getMessageHeaders: async () => ({ id: reply.id, internetMessageHeaders: [] }),
+        getMessageHeaders: async () => ({ id: reply.id, internetMessageId: headerInternetMessageId, internetMessageHeaders: [] }),
       } as unknown as GraphClient,
     };
     const preview = await reconcileHistoricalReplies(config, 2, true);
@@ -78,6 +79,20 @@ test('recovery closes a subject-matched reply without headers or conversation ID
     assert.ok((await db.query<{ acknowledged_at: string | null }>('SELECT acknowledged_at FROM email_alerts')).rows[0].acknowledged_at);
     assert.equal((await reconcileHistoricalReplies(config, 2, false)).ticketsClosed, 0);
     assert.equal((await db.query('SELECT * FROM email_messages')).rows.length, 1);
+
+    // The list response may lack an RFC ID even when the detail response has it.
+    // Discarding that detail silently prevents the reply from being persisted.
+    await db.query(`INSERT INTO email_threads(mailbox,root_internet_message_id,subject,customer_email,
+      received_at,response_due_at,resolution_due_at,status)
+      VALUES ($1,'<another-customer@example.com>','Re: KCR305A Heritage Insurance valuation','customer@example.com',$2,$3,$3,'UNASSIGNED')`,
+    [mailbox, receivedAt, new Date(sentAt.getTime() + 60_000)]);
+    messages = [{ ...reply, id: 'detail-id-copy', internetMessageId: undefined,
+      subject: 'RE: Re: KCR305A Heritage Insurance valuation' }];
+    headerInternetMessageId = '<detail-response@example.com>';
+    assert.equal((await reconcileHistoricalReplies(config, 2, false)).ticketsClosed, 1);
+    const recovered = await db.query<{ internet_message_id: string }>(
+      "SELECT internet_message_id FROM email_messages WHERE graph_message_id='detail-id-copy'");
+    assert.equal(recovered.rows[0].internet_message_id, headerInternetMessageId);
   } finally {
     t.mock.restoreAll();
     if (previousDatabaseUrl === undefined) delete process.env.DATABASE_URL;
