@@ -18,7 +18,8 @@ import {
   parseDbTimestamp,
   countedPhonesOf,
 } from "./pendingSubmissions";
-import { PendingJobType } from "./pendingSubmissionOutcomes";
+import { JOB_TYPE_LABELS, PendingJobType } from "./pendingSubmissionOutcomes";
+import { PendingDateRange, describeDateRange, jobInDateRange, pendingJobDetailColumns } from "./shared/pendingPerformance";
 
 export type ChronologyEntry =
   | { kind: "OUTCOME"; outcome: string; comment: string; logged_by: string; logged_by_phone: string | null; timestamp: string; counted: false }
@@ -38,8 +39,9 @@ export interface PendingMaxAttemptsGroup {
 const DAY_MS = 86_400_000;
 
 /** Every record of one job type that reached max attempts, grouped by insurance company, each with its merged call, SMS and outcome trail. */
-export async function getPendingMaxAttemptsTimeline(db: DbAdapter, jobType: PendingJobType = "INSPECTION"): Promise<PendingMaxAttemptsGroup[]> {
-  const grouped = await getPendingSubmissionMaxAttemptsReport(db, jobType);
+/** "ALL" (the Overall tab) includes both job types. */
+export async function getPendingMaxAttemptsTimeline(db: DbAdapter, jobType: PendingJobType | "ALL" = "INSPECTION"): Promise<PendingMaxAttemptsGroup[]> {
+  const grouped = await getPendingSubmissionMaxAttemptsReport(db, jobType === "ALL" ? undefined : jobType);
   const allJobs = grouped.flatMap((g) => g.jobs);
   if (allJobs.length === 0) return [];
 
@@ -170,20 +172,33 @@ export function filterMaxAttemptsGroups(groups: PendingMaxAttemptsGroup[], agent
   return out;
 }
 
+/** Keeps only the records whose date for the range's basis falls inside the range. No range keeps everything. */
+export function filterMaxAttemptsGroupsByDate(groups: PendingMaxAttemptsGroup[], range: PendingDateRange | null): PendingMaxAttemptsGroup[] {
+  if (!range) return groups;
+  return groups
+    .map((g) => ({ ...g, records: g.records.filter((r) => jobInDateRange(r.job, range)) }))
+    .filter((g) => g.records.length > 0);
+}
+
 export function buildPendingMaxAttemptsWorkbook(
   groups: PendingMaxAttemptsGroup[],
   agentFilter: string,
   companyFilter: string,
   nowMs: number = Date.now(),
-  jobType: PendingJobType = "INSPECTION"
+  jobType: PendingJobType | "ALL" = "INSPECTION",
+  range: PendingDateRange | null = null
 ) {
   const wb = XLSX.utils.book_new();
+  const isAll = jobType === "ALL";
   const isSubmission = jobType === "SUBMISSION";
   // The number a job is grouped under: the client's for an inspection job, the solver's for a submission job.
   // (A submission job also counts calls and SMS to the client's number, but the Summary row stays per solver.)
-  const primaryLabel = isSubmission ? "Solver Phone" : "Client Phone";
+  // The Overall report holds both types, so each job uses its own type's number.
+  const primaryLabel = isAll ? "Counted Phone" : isSubmission ? "Solver Phone" : "Client Phone";
   const primaryOf = (j: PendingSubmissionJobView) =>
-    isSubmission ? j.solver_contact_raw || j.solver_contact || "" : j.client_phone_raw || j.client_phone || "";
+    (isAll ? j.job_type === "SUBMISSION" : isSubmission)
+      ? j.solver_contact_raw || j.solver_contact || ""
+      : j.client_phone_raw || j.client_phone || "";
 
   // Sheet 1: Summary. One row per counted phone with the maximum counts for that phone.
   type SummaryRow = {
@@ -227,6 +242,7 @@ export function buildPendingMaxAttemptsWorkbook(
     "Assigned Agent": e.agent,
     "Outgoing Calls": e.calls,
     "SMS Sent": e.sms,
+    "Total Attempts (Calls + SMS)": e.calls + e.sms,
   }));
   XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(summaryRows), "Summary");
 
@@ -235,11 +251,13 @@ export function buildPendingMaxAttemptsWorkbook(
     for (const rec of records) {
       const j = rec.job;
       const base = {
+        ...(isAll ? { "Job Type": JOB_TYPE_LABELS[j.job_type] } : {}),
         "Vehicle Registration": j.vehicle_reg_raw || j.vehicle_reg,
         "Solver Name": j.solver_name || "N/A",
         [primaryLabel]: primaryOf(j),
         ...(isSubmission ? { "Client Phone": j.client_phone_raw || j.client_phone || "" } : {}),
         "Insurance Company": company,
+        ...pendingJobDetailColumns(j),
       };
       const agent = j.assigned_agent_name || "Unassigned";
       if (rec.chronology.length === 0) {
@@ -264,7 +282,7 @@ export function buildPendingMaxAttemptsWorkbook(
   };
 
   const allRaw: Array<Record<string, unknown>> = [];
-  const used = new Set<string>(["summary", "raw data"]);
+  const used = new Set<string>(["summary", "raw data", "report info"]);
   for (const g of groups) {
     const rows = rowsFor(g.insurance_company, g.records);
     allRaw.push(...rows);
@@ -281,13 +299,23 @@ export function buildPendingMaxAttemptsWorkbook(
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows), finalName);
   }
   XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(allRaw), "Raw Data");
+  // The period the report covers, so a filtered file is never mistaken for the full history.
+  XLSX.utils.book_append_sheet(
+    wb,
+    XLSX.utils.json_to_sheet([
+      { Field: "Job type", Value: isAll ? "Overall (Pending Inspection and Pending Submission)" : JOB_TYPE_LABELS[jobType] },
+      { Field: "Date range", Value: describeDateRange(range) },
+      { Field: "Generated", Value: new Date(nowMs).toISOString() },
+    ]),
+    "Report Info"
+  );
 
   const buffer = XLSX.write(wb, { type: "buffer", bookType: "xlsx" }) as Buffer;
   const clean = (s: string) => s.trim().toLowerCase().replace(/[^a-z0-9_-]+/g, "_") || "all";
   const agentPart = agentFilter && agentFilter.toUpperCase() !== "ALL" ? clean(agentFilter) : "all";
   const companyPart = companyFilter && companyFilter.toUpperCase() !== "ALL" ? clean(companyFilter) : "all";
   const today = new Date(nowMs).toISOString().split("T")[0];
-  const typePart = isSubmission ? "submission" : "inspection";
+  const typePart = isAll ? "overall" : isSubmission ? "submission" : "inspection";
   return { buffer, filename: `pending_${typePart}_max_attempts_report_${agentPart}_${companyPart}_${today}.xlsx`, summaryRows: summaryRows.length };
 }
 // V19 END pendingMaxAttemptsReport.ts

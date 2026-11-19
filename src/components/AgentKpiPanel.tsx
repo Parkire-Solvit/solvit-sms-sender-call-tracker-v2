@@ -49,8 +49,10 @@ export interface AgentKpiReportData {
   requirements: { calls: number; sms: number };
   upload_closed_label: string;
   unassigned_open: number;
-  /** All GREEN records over all records (per job type for Pending). */
+  /** All GREEN records over all records (per job type for Pending, where records closed by upload are not counted). */
   conversion?: ConversionStat;
+  /** Pending only: the date range applied, as text, or null when all records are included. */
+  date_range?: string | null;
   agents: AgentKpiRow[];
 }
 
@@ -61,8 +63,10 @@ interface AgentKpiPanelProps {
   focusAgentName?: string | null;
   /** Increase this number to make the panel reload (for example after a list refresh). */
   refreshToken?: number;
-  /** Pending Submissions only: show the KPI of one job type (a Pending Inspection or a Pending Submission). */
+  /** Pending Submissions only: show the KPI of one job type (a Pending Inspection or a Pending Submission). Omitted: both types (Overall). */
   jobType?: 'INSPECTION' | 'SUBMISSION';
+  /** Pending Submissions only: date range query parameters (date_basis, date_from, date_to). Empty: all records. */
+  dateParams?: Record<string, string>;
 }
 
 const SECTION_TITLE: Record<AgentKpiPanelProps['section'], string> = {
@@ -70,20 +74,29 @@ const SECTION_TITLE: Record<AgentKpiPanelProps['section'], string> = {
   pending_submissions: 'Pending Submissions',
 };
 
-export default function AgentKpiPanel({ section, focusAgentId = null, focusAgentName = null, refreshToken = 0, jobType }: AgentKpiPanelProps) {
+export default function AgentKpiPanel({ section, focusAgentId = null, focusAgentName = null, refreshToken = 0, jobType, dateParams }: AgentKpiPanelProps) {
   const [report, setReport] = useState<AgentKpiReportData | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<boolean>(true);
 
   const basePath = section === 'callbacks' ? '/api/agent-kpi/callbacks' : '/api/agent-kpi/pending-submissions';
-  const path = section === 'pending_submissions' && jobType ? `${basePath}?job_type=${jobType}` : basePath;
-  const title =
-    section === 'pending_submissions' && jobType
-      ? jobType === 'SUBMISSION'
-        ? 'Pending Submission'
-        : 'Pending Inspection'
-      : SECTION_TITLE[section];
+  const isPending = section === 'pending_submissions';
+  const query = new URLSearchParams();
+  if (isPending && jobType) query.set('job_type', jobType);
+  if (isPending && dateParams) for (const [k, v] of Object.entries(dateParams)) query.set(k, v);
+  const queryText = query.toString();
+  const path = queryText ? `${basePath}?${queryText}` : basePath;
+  const title = isPending
+    ? jobType === 'SUBMISSION'
+      ? 'Pending Submission'
+      : jobType === 'INSPECTION'
+        ? 'Pending Inspection'
+        : 'Overall (Pending Inspection and Pending Submission)'
+    : SECTION_TITLE[section];
+  // Pending: only records an agent closed green count; records closed by an upload do not.
+  const conversionTitle = isPending ? 'Agent conversion rate' : 'Team conversion rate';
+  const conversionScope = report?.date_range ? `records in range: ${report.date_range}` : 'all records, no date limit';
 
   // A background refresh keeps the numbers on screen and does not flash the spinner.
   // Only the first load and the manual refresh button show the spinner.
@@ -198,9 +211,11 @@ export default function AgentKpiPanel({ section, focusAgentId = null, focusAgent
           {report && report.conversion && (
             <div className="flex items-center justify-between gap-3 rounded-2xl bg-emerald-50 border border-emerald-200 px-4 py-2.5">
               <div>
-                <div className="text-xs font-black text-emerald-900">Team conversion rate</div>
+                <div className="text-xs font-black text-emerald-900">{conversionTitle}</div>
                 <div className="text-[11px] text-emerald-800">
-                  {report.conversion.green} of {report.conversion.total} records closed green (all records, no date limit)
+                  {isPending
+                    ? `${report.conversion.green} of ${report.conversion.total} records converted by an agent; records closed by upload are not counted (${conversionScope})`
+                    : `${report.conversion.green} of ${report.conversion.total} records closed green (${conversionScope})`}
                 </div>
               </div>
               <div className="text-2xl font-black text-emerald-900 leading-none">
@@ -242,7 +257,9 @@ export default function AgentKpiPanel({ section, focusAgentId = null, focusAgent
                   {r.conversion && (
                     <div className="flex items-center justify-between gap-2 rounded-xl bg-emerald-50 border border-emerald-200 px-3 py-1.5">
                       <span className="text-[11px] font-bold text-emerald-900">
-                        Conversion: {r.conversion.green} of {r.conversion.total} records closed green
+                        {isPending
+                          ? `Agent conversion: ${r.conversion.green} of ${r.conversion.total} records converted`
+                          : `Conversion: ${r.conversion.green} of ${r.conversion.total} records closed green`}
                       </span>
                       <span className="text-sm font-black text-emerald-900">
                         {r.conversion.rate === null ? 'n/a' : `${r.conversion.rate}%`}
@@ -301,7 +318,9 @@ export default function AgentKpiPanel({ section, focusAgentId = null, focusAgent
 
           {report && (
             <p className="text-[10px] text-slate-400">
-              Counts records that are open now or {report.window_days === null ? 'were completed at any time' : `were closed in the last ${report.window_days} days`}. Records closed because an upload no longer contained them are shown separately as {report.upload_closed_label.toLowerCase()} and do not count as completed. Rates use outgoing calls over the last {report.pace_lookback_working_days} working days.
+              {report.date_range
+                ? `Counts records in the selected range (${report.date_range}).`
+                : `Counts records that are open now or ${report.window_days === null ? 'were completed at any time' : `were closed in the last ${report.window_days} days`}.`} Records closed because an upload no longer contained them are shown separately as {report.upload_closed_label.toLowerCase()} and do not count as completed. Rates use outgoing calls over the last {report.pace_lookback_working_days} working days.
             </p>
           )}
         </div>
