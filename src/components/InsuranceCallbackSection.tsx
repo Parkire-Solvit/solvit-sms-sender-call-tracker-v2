@@ -602,7 +602,11 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
     }
   };
 
+  // A failed save is shown in the panel; it never silently snaps back to the previous agent.
+  const [allocationError, setAllocationError] = useState<string | null>(null);
+
   const handleUpdateAllocation = async (partner: string, agentId: number | null) => {
+    setAllocationError(null);
     try {
       const res = await fetch('/api/channel-partner-allocations', {
         method: 'POST',
@@ -612,11 +616,15 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
           assigned_agent_id: agentId,
         }),
       });
-      if (res.ok) {
-        fetchAllocations();
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        setAllocationError(`Could not save the agent for ${partner}: ${body.error || `server error ${res.status}`}. Please try again.`);
       }
     } catch (err) {
       console.error('Failed to update allocation:', err);
+      setAllocationError(`Could not save the agent for ${partner}: the server could not be reached. Please try again.`);
+    } finally {
+      fetchAllocations();
     }
   };
 
@@ -3804,6 +3812,12 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
                 <p className="text-[11px] text-slate-500 mb-2">
                   Map each underwriter or channel partner to a designated callback agent.
                 </p>
+
+                {allocationError && (
+                  <div role="alert" className="mb-2 p-2.5 bg-red-50 border border-red-200 rounded-lg text-[11px] font-semibold text-red-700">
+                    {allocationError}
+                  </div>
+                )}
 
                 {loadingAllocations ? (
                   <div className="p-3 text-center text-xs text-slate-400 flex items-center justify-center gap-1.5">
