@@ -70,7 +70,7 @@ interface AgentKpiPanelProps {
 }
 
 const SECTION_TITLE: Record<AgentKpiPanelProps['section'], string> = {
-  callbacks: 'Callbacks',
+  callbacks: 'Pending Scheduling',
   pending_submissions: 'Pending Submissions',
 };
 
@@ -94,8 +94,8 @@ export default function AgentKpiPanel({ section, focusAgentId = null, focusAgent
         ? 'Pending Inspection'
         : 'Overall (Pending Inspection and Pending Submission)'
     : SECTION_TITLE[section];
-  // Pending: only records an agent closed green count; records closed by an upload do not.
-  const conversionTitle = isPending ? 'Agent conversion rate' : 'Team conversion rate';
+  // Only records an agent closed green count; records closed by an upload do not (both sections).
+  const conversionTitle = 'Agent conversion rate';
   const conversionScope = report?.date_range ? `records in range: ${report.date_range}` : 'all records, no date limit';
 
   // A background refresh keeps the numbers on screen and does not flash the spinner.
@@ -213,9 +213,7 @@ export default function AgentKpiPanel({ section, focusAgentId = null, focusAgent
               <div>
                 <div className="text-xs font-black text-emerald-900">{conversionTitle}</div>
                 <div className="text-[11px] text-emerald-800">
-                  {isPending
-                    ? `${report.conversion.green} of ${report.conversion.total} records converted by an agent; records closed by upload are not counted (${conversionScope})`
-                    : `${report.conversion.green} of ${report.conversion.total} records closed green (${conversionScope})`}
+                  {`${report.conversion.green} of ${report.conversion.total} records converted by an agent; records closed by upload are not counted (${conversionScope})`}
                 </div>
               </div>
               <div className="text-2xl font-black text-emerald-900 leading-none">
@@ -257,9 +255,7 @@ export default function AgentKpiPanel({ section, focusAgentId = null, focusAgent
                   {r.conversion && (
                     <div className="flex items-center justify-between gap-2 rounded-xl bg-emerald-50 border border-emerald-200 px-3 py-1.5">
                       <span className="text-[11px] font-bold text-emerald-900">
-                        {isPending
-                          ? `Agent conversion: ${r.conversion.green} of ${r.conversion.total} records converted`
-                          : `Conversion: ${r.conversion.green} of ${r.conversion.total} records closed green`}
+                        {`Agent conversion: ${r.conversion.green} of ${r.conversion.total} records converted`}
                       </span>
                       <span className="text-sm font-black text-emerald-900">
                         {r.conversion.rate === null ? 'n/a' : `${r.conversion.rate}%`}

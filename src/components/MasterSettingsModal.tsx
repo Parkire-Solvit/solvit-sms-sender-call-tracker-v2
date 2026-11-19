@@ -513,7 +513,7 @@ export const MasterSettingsModal: React.FC<MasterSettingsModalProps> = ({
             }`}
           >
             <Car className="w-4 h-4 text-[#ff353e]" />
-            Callbacks
+            Pending Scheduling
           </button>
           <button
             id="tab-team-accounts-btn"
