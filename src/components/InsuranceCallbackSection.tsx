@@ -1651,6 +1651,7 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
     let green = 0;
     let red = 0;
     let needsAction = 0;
+    let agentConverted = 0;
     const maxAtt = settings?.max_attempts || 4;
 
     const sourceJobs =
@@ -1673,6 +1674,8 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
         amber++;
       } else if (j.status === 'GREEN') {
         green++;
+        // Closed by an upload (absent from the latest export) is not an agent conversion.
+        if (j.latest_outcome !== 'ABSENT_FROM_LATEST_EXPORT') agentConverted++;
       } else if (j.status === 'RED') {
         red++;
       }
@@ -1681,10 +1684,22 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
       }
     });
 
-    // Conversion: every GREEN (scheduled) callback out of every callback in scope, open or closed.
-    const conversionRate = sourceJobs.length === 0 ? null : Math.round((green / sourceJobs.length) * 1000) / 10;
+    // Agent conversion rate: callbacks an agent closed green (scheduled), closed by upload excluded.
+    // Closure rate: every closed callback (green, including closed by upload, and red). Both out of every callback in scope.
+    const rate = (n: number) => (sourceJobs.length === 0 ? null : Math.round((n / sourceJobs.length) * 1000) / 10);
+    const closed = green + red;
 
-    return { total: sourceJobs.length, amber, green, red, needsAction, conversionRate };
+    return {
+      total: sourceJobs.length,
+      amber,
+      green,
+      red,
+      needsAction,
+      agentConverted,
+      closed,
+      conversionRate: rate(agentConverted),
+      closureRate: rate(closed),
+    };
   }, [jobs, selectedAgent, settings]);
 
   const togglePartnerCollapse = (partner: string) => {
@@ -1811,7 +1826,7 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
             </div>
             <div>
               <div className="flex items-center gap-2">
-                <h1 className="text-xl font-black text-slate-900 tracking-tight">Callbacks to clients pending scheduling</h1>
+                <h1 className="text-xl font-black text-slate-900 tracking-tight">Pending Scheduling</h1>
                 <button
                   id="btn-open-onboarding-tour"
                   type="button"
@@ -2070,7 +2085,7 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
               </div>
             )}
           </div>
-          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+          <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-3">
             <div
               id="tile-overview-total"
               onClick={() => openDrilldown('TOTAL')}
@@ -2153,17 +2168,32 @@ export const InsuranceCallbackSection: React.FC<InsuranceCallbackSectionProps> =
 
             <div
               id="tile-overview-conversion-rate"
-              title={`All closed green callbacks (${stats.green}) out of all callbacks in scope (${stats.total}), open and closed`}
-              className="col-span-2 sm:col-span-3 lg:col-span-1 bg-emerald-50 rounded-xl p-3 border border-emerald-200/80 text-emerald-800"
+              title={`Callbacks an agent closed green (${stats.agentConverted}) out of all callbacks in scope (${stats.total}). Callbacks closed by upload are not counted.`}
+              className="col-span-1 sm:col-span-2 lg:col-span-1 bg-emerald-50 rounded-xl p-3 border border-emerald-200/80 text-emerald-800"
             >
               <div className="flex items-center justify-between">
-                <span className="text-[11px] font-bold uppercase tracking-wider block">Conversion Rate</span>
+                <span className="text-[11px] font-bold uppercase tracking-wider block">Agent Conversion Rate</span>
                 <Target className="w-3.5 h-3.5 text-emerald-600" />
               </div>
               <span className="text-2xl font-black mt-0.5 block">
                 {stats.conversionRate === null ? 'n/a' : `${stats.conversionRate}%`}
               </span>
-              <span className="text-[10px] font-semibold opacity-70 block">{stats.green} of {stats.total} scheduled</span>
+              <span className="text-[10px] font-semibold opacity-70 block">{stats.agentConverted} of {stats.total} scheduled by an agent</span>
+            </div>
+
+            <div
+              id="tile-overview-closure-rate"
+              title={`Every closed callback (${stats.closed}), including closed by upload, out of all callbacks in scope (${stats.total})`}
+              className="col-span-1 sm:col-span-2 lg:col-span-1 bg-sky-50 rounded-xl p-3 border border-sky-200/80 text-sky-800"
+            >
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] font-bold uppercase tracking-wider block">Closure Rate</span>
+                <CheckCircle2 className="w-3.5 h-3.5 text-sky-600" />
+              </div>
+              <span className="text-2xl font-black mt-0.5 block">
+                {stats.closureRate === null ? 'n/a' : `${stats.closureRate}%`}
+              </span>
+              <span className="text-[10px] font-semibold opacity-70 block">{stats.closed} of {stats.total} closed</span>
             </div>
           </div>
         </div>

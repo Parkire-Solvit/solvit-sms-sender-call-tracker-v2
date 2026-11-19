@@ -34,6 +34,9 @@ import { DATE_BASIS_COLUMNS, PendingDateRange, dateRangeBoundsMs, describeDateRa
 
 const DAY_MS = 86_400_000;
 
+/** A Callbacks record closed GREEN with this outcome was closed by an upload, not by an agent. */
+export const CALLBACK_UPLOAD_CLOSE_OUTCOMES: ReadonlyArray<string> = ["ABSENT_FROM_LATEST_EXPORT"];
+
 export type KpiSection = "callbacks" | "pending_submissions";
 
 export interface AgentKpiReport {
@@ -268,17 +271,20 @@ export async function getCallbackAgentKpis(db: DbAdapter, nowMs: number = Date.n
 
   const report = await buildReport(db, "callbacks", nowMs, agents, records, { calls: settings.max_attempts, sms: settings.max_sms_attempts }, "Closed by upload", null);
 
-  // Conversion rate: all GREEN (scheduled) callbacks over all callbacks, with no date window, overall and per agent.
-  const conversionRows = await db.queryAll<{ assigned_agent_id: unknown; status: string; n: unknown }>(
-    `SELECT assigned_agent_id, status, COUNT(*) AS n FROM callback_jobs WHERE status IN ('AMBER', 'GREEN', 'RED') GROUP BY assigned_agent_id, status`
+  // Agent conversion rate: callbacks an agent closed GREEN (scheduled) over all callbacks, with no date window,
+  // overall and per agent. Callbacks closed because an upload no longer contained them are not conversions.
+  const conversionRows = await db.queryAll<{ assigned_agent_id: unknown; status: string; latest_outcome: string | null; n: unknown }>(
+    `SELECT assigned_agent_id, status, latest_outcome, COUNT(*) AS n FROM callback_jobs WHERE status IN ('AMBER', 'GREEN', 'RED') GROUP BY assigned_agent_id, status, latest_outcome`
   );
   const { overall, byAgent } = computeConversion(
     conversionRows.map((r) => ({
       assigned_agent_id: r.assigned_agent_id === null || r.assigned_agent_id === undefined ? null : num(r.assigned_agent_id),
       status: String(r.status),
+      latest_outcome: r.latest_outcome ?? null,
       n: num(r.n),
     })),
-    agents.map((a) => a.id)
+    agents.map((a) => a.id),
+    CALLBACK_UPLOAD_CLOSE_OUTCOMES
   );
   report.conversion = overall;
   report.agents = report.agents.map((a) => ({ ...a, conversion: byAgent.get(a.agent_id) }));

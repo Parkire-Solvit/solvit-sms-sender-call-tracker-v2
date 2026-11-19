@@ -36,7 +36,7 @@ export function landingView(role: AccountRole | null, sections: ReadonlyArray<Se
 
 export const VIEW_LABELS: Record<AppView, string> = {
   admin: 'Call Activity',
-  'insurance-callbacks': 'Callbacks',
+  'insurance-callbacks': 'Pending Scheduling',
   email: 'Email SLA',
   'pending-submissions': 'Pending Submissions',
 };
