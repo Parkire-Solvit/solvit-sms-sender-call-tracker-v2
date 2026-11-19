@@ -186,6 +186,8 @@ export function conversionStat(green: number, total: number): ConversionStat {
 export interface ConversionRow {
   assigned_agent_id: number | null;
   status: string;
+  /** Latest outcome of the records. Only read when excludeGreenOutcomes is given. */
+  latest_outcome?: string | null;
   /** Number of records with this agent and status. */
   n: number;
 }
@@ -196,7 +198,9 @@ export interface ConversionRow {
  */
 export function computeConversion(
   rows: ConversionRow[],
-  agentIds: number[]
+  agentIds: number[],
+  /** GREEN records with one of these latest outcomes are not conversions (Pending: closed by upload). */
+  excludeGreenOutcomes: ReadonlyArray<string> = []
 ): { overall: ConversionStat; byAgent: Map<number, ConversionStat> } {
   const green = new Map<number, number>();
   const total = new Map<number, number>();
@@ -204,12 +208,13 @@ export function computeConversion(
   let overallTotal = 0;
   for (const r of rows) {
     const n = Number(r.n) || 0;
+    const isGreen = r.status === "GREEN" && !excludeGreenOutcomes.includes(r.latest_outcome ?? "");
     overallTotal += n;
-    if (r.status === "GREEN") overallGreen += n;
+    if (isGreen) overallGreen += n;
     if (r.assigned_agent_id === null || r.assigned_agent_id === undefined) continue;
     const id = Number(r.assigned_agent_id);
     total.set(id, (total.get(id) ?? 0) + n);
-    if (r.status === "GREEN") green.set(id, (green.get(id) ?? 0) + n);
+    if (isGreen) green.set(id, (green.get(id) ?? 0) + n);
   }
   const byAgent = new Map<number, ConversionStat>();
   for (const id of agentIds) byAgent.set(id, conversionStat(green.get(id) ?? 0, total.get(id) ?? 0));

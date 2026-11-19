@@ -36,6 +36,21 @@ import { toNairobiInputValue, nairobiInputToIso, formatNairobiDisplay } from '..
 import { groupByCustomerOldestFirst } from '../lib/submissionQueue';
 import { PendingCallSessionView } from './PendingCallSessionView';
 import AgentKpiPanel from './AgentKpiPanel';
+import PendingOverallDashboard from './PendingOverallDashboard';
+import {
+  DATE_BASIS_LABELS,
+  DEFAULT_DATE_BASIS,
+  PENDING_DATE_BASES,
+  PendingDateBasis,
+  countJobsWithoutBasisDate,
+  dateRangeToParams,
+  describeDateRange,
+  jobInDateRange,
+  parseDateRangeParams,
+  pendingJobDetailColumns,
+  performanceSummaryRows,
+  summarizePendingPerformance,
+} from '../../shared/pendingPerformance';
 import DataResetPanel from './DataResetPanel';
 import { saveOutcome, newFormKey } from '../lib/safeSave';
 
@@ -89,6 +104,10 @@ export interface PendingSubmissionJob {
   customer_email: string | null;
   schedule_date: string | null;
   latest_pending_reason: string | null;
+  /** The reason in the upload that first created the job; null for jobs created before it was recorded. */
+  original_pending_reason: string | null;
+  /** When an agent last logged an outcome (system outcomes excluded). */
+  last_outcome_at: string | null;
   status: 'GREEN' | 'AMBER' | 'RED';
   latest_outcome: string | null;
   assigned_agent_id: number | null;
@@ -300,12 +319,32 @@ export default function PendingSubmissionsSection({ isAdmin, signedInAgentName =
   // Every job, both types. `jobs` below is the part that belongs to the tab being viewed.
   const [allJobs, setAllJobs] = useState<PendingSubmissionJob[]>([]);
   const [jobType, setJobType] = useState<PendingJobType>('INSPECTION');
-  const jobs = useMemo(() => allJobs.filter((j) => (j.job_type ?? 'INSPECTION') === jobType), [allJobs, jobType]);
+  // The Overall tab (admins only) is a read-only dashboard of both job types together.
+  const [showOverall, setShowOverall] = useState<boolean>(false);
+
+  // Date range. With no dates chosen every record is included, exactly as before. Once a date is chosen the range
+  // applies to the whole section: the list, the tiles, the Agent KPI panel and both exports.
+  const [dateBasis, setDateBasis] = useState<PendingDateBasis>(DEFAULT_DATE_BASIS);
+  const [dateFrom, setDateFrom] = useState<string>('');
+  const [dateTo, setDateTo] = useState<string>('');
+  const activeRange = useMemo(
+    () => parseDateRangeParams({ date_from: dateFrom, date_to: dateTo, date_basis: dateBasis }),
+    [dateFrom, dateTo, dateBasis]
+  );
+  const dateParams = useMemo(() => dateRangeToParams(activeRange), [activeRange]);
+  const rangedAllJobs = useMemo(() => allJobs.filter((j) => jobInDateRange(j, activeRange)), [allJobs, activeRange]);
+
+  const jobs = useMemo(() => rangedAllJobs.filter((j) => (j.job_type ?? 'INSPECTION') === jobType), [rangedAllJobs, jobType]);
   const tabOpenCounts = useMemo(() => {
     const out: Record<PendingJobType, number> = { INSPECTION: 0, SUBMISSION: 0 };
-    for (const j of allJobs) if (j.status === 'AMBER') out[(j.job_type ?? 'INSPECTION') as PendingJobType] += 1;
+    for (const j of rangedAllJobs) if (j.status === 'AMBER') out[(j.job_type ?? 'INSPECTION') as PendingJobType] += 1;
     return out;
-  }, [allJobs]);
+  }, [rangedAllJobs]);
+  // Jobs of the current view that have no date for the chosen basis, so no range can include them.
+  const jobsWithoutRangeDate = useMemo(() => {
+    const scope = showOverall ? allJobs : allJobs.filter((j) => (j.job_type ?? 'INSPECTION') === jobType);
+    return countJobsWithoutBasisDate(scope, activeRange);
+  }, [allJobs, showOverall, jobType, activeRange]);
   const [loading, setLoading] = useState<boolean>(true);
   const [refreshing, setRefreshing] = useState<boolean>(false);
 
@@ -566,6 +605,7 @@ export default function PendingSubmissionsSection({ isAdmin, signedInAgentName =
 
   // Switching tab starts that tab with clean filters and ends any call session.
   const switchTab = (type: PendingJobType) => {
+    setShowOverall(false);
     if (type === jobType) return;
     setJobType(type);
     setStatusFilter('ALL');
@@ -696,11 +736,11 @@ export default function PendingSubmissionsSection({ isAdmin, signedInAgentName =
       if (j.latest_outcome === 'MAX_ATTEMPTS_REACHED') maxAttempts++;
     }
 
-    // Conversion: every GREEN record (agent-closed and closed by upload) out of every record in scope, open or closed.
-    const closedGreen = green + submitted;
-    const conversionRate = scoped.length === 0 ? null : Math.round((closedGreen / scoped.length) * 1000) / 10;
+    // Agent conversion rate (records an agent closed green, closed by upload excluded) and closure rate (every
+    // closed record, including closed by upload), both out of every record in scope. One definition, shared with the exports.
+    const perf = summarizePendingPerformance(scoped);
 
-    return { total: scoped.length, amber, green, submitted, red, overdue, maxAttempts, closedGreen, conversionRate };
+    return { total: scoped.length, amber, green, submitted, red, overdue, maxAttempts, perf };
   }, [jobs, agentFilter]);
 
   // One group per customer, ordered by the customer's oldest schedule date (longest overdue first, any company).
@@ -1069,8 +1109,12 @@ export default function PendingSubmissionsSection({ isAdmin, signedInAgentName =
   const handleExportMaxAttempts = async () => {
     try {
       const params = new URLSearchParams();
-      params.set('job_type', jobType);
-      if (agentFilter === 'UNASSIGNED') params.set('agent', 'UNASSIGNED');
+      // The Overall tab reports both job types together; the agent filter belongs to the working tabs only.
+      params.set('job_type', showOverall ? 'ALL' : jobType);
+      for (const [k, v] of Object.entries(dateParams)) params.set(k, String(v));
+      if (showOverall) {
+        // no agent filter
+      } else if (agentFilter === 'UNASSIGNED') params.set('agent', 'UNASSIGNED');
       else if (agentFilter !== 'ALL') {
         // The agent name is sent so that the file name is readable. The server also accepts the agent id.
         params.set('agent', agents.find((a) => String(a.id) === agentFilter)?.name || agentFilter);
@@ -1085,7 +1129,7 @@ export default function PendingSubmissionsSection({ isAdmin, signedInAgentName =
       const disposition = res.headers.get('Content-Disposition') || '';
       const name =
         /filename="([^"]+)"/.exec(disposition)?.[1] ||
-        `pending_${jobType.toLowerCase()}_max_attempts_report_${new Date().toISOString().split('T')[0]}.xlsx`;
+        `pending_${showOverall ? 'overall' : jobType.toLowerCase()}_max_attempts_report_${new Date().toISOString().split('T')[0]}.xlsx`;
       const url = URL.createObjectURL(blob);
       const link = document.createElement('a');
       link.href = url;
@@ -1101,12 +1145,14 @@ export default function PendingSubmissionsSection({ isAdmin, signedInAgentName =
 
   // Export to Excel
   const handleExportExcel = () => {
-    if (filteredJobs.length === 0) {
+    // The Overall tab exports every job of both types in the date range; a working tab exports its visible list.
+    const source = showOverall ? rangedAllJobs : filteredJobs;
+    if (source.length === 0) {
       alert('No jobs to export');
       return;
     }
 
-    const rows = filteredJobs.map((j) => ({
+    const rows = source.map((j) => ({
       'Job Type': j.job_type === 'SUBMISSION' ? 'Pending Submission' : 'Pending Inspection',
       'External ID': j.external_id,
       'Vehicle Reg': j.vehicle_reg_raw || j.vehicle_reg,
@@ -1121,13 +1167,22 @@ export default function PendingSubmissionsSection({ isAdmin, signedInAgentName =
       'Is Overdue': j.is_overdue ? 'YES' : 'NO',
       'First Imported': j.first_imported_at,
       'Last Seen': j.last_seen_in_import_at,
+      ...pendingJobDetailColumns(j),
     }));
 
+    const typeLabel = showOverall ? 'Overall' : jobType === 'SUBMISSION' ? 'Pending Submission' : 'Pending Inspection';
     const ws = XLSX.utils.json_to_sheet(rows);
     const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, jobType === 'SUBMISSION' ? 'Pending Submission' : 'Pending Inspection');
+    XLSX.utils.book_append_sheet(wb, ws, typeLabel);
+    // Summary: the performance figures of exactly the exported jobs, including the average attempts per conversion.
+    const scope = showOverall ? 'Overall (Pending Inspection and Pending Submission)' : `${typeLabel}, visible list`;
+    XLSX.utils.book_append_sheet(
+      wb,
+      XLSX.utils.json_to_sheet(performanceSummaryRows(summarizePendingPerformance(source), scope, activeRange)),
+      'Summary'
+    );
     const todayStr = new Date().toISOString().split('T')[0];
-    XLSX.writeFile(wb, `pending_${jobType.toLowerCase()}_${todayStr}.xlsx`);
+    XLSX.writeFile(wb, `pending_${showOverall ? 'overall' : jobType.toLowerCase()}_${todayStr}.xlsx`);
   };
 
   return (
@@ -1176,7 +1231,7 @@ export default function PendingSubmissionsSection({ isAdmin, signedInAgentName =
           <button
             onClick={handleExportExcel}
             className="px-3.5 py-2 rounded-xl text-xs font-bold border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 transition-all flex items-center gap-1.5 shadow-2xs cursor-pointer"
-            title={`Download the visible ${jobType === 'SUBMISSION' ? 'Pending Submission' : 'Pending Inspection'} list to Excel`}
+            title={showOverall ? 'Download every job of both types in the date range to Excel' : `Download the visible ${jobType === 'SUBMISSION' ? 'Pending Submission' : 'Pending Inspection'} list to Excel`}
           >
             <Download className="w-3.5 h-3.5 text-slate-500" />
             <span>Export</span>
@@ -1186,7 +1241,7 @@ export default function PendingSubmissionsSection({ isAdmin, signedInAgentName =
           <button
             onClick={handleExportMaxAttempts}
             className="px-3.5 py-2 rounded-xl text-xs font-bold border border-rose-200 bg-rose-50 hover:bg-rose-100 text-rose-700 transition-all flex items-center gap-1.5 shadow-2xs cursor-pointer"
-            title={`Download the ${jobType === 'SUBMISSION' ? 'Pending Submission' : 'Pending Inspection'} Max Attempts report, grouped by insurance company, with full history`}
+            title={`Download the ${showOverall ? 'Overall' : jobType === 'SUBMISSION' ? 'Pending Submission' : 'Pending Inspection'} Max Attempts report, grouped by insurance company, with full history`}
           >
             <Download className="w-3.5 h-3.5 text-rose-500" />
             <span>Max Attempts Report</span>
@@ -1208,7 +1263,7 @@ export default function PendingSubmissionsSection({ isAdmin, signedInAgentName =
       <div className="bg-white border border-slate-200/80 rounded-2xl p-2 shadow-xs" id="pending-job-type-tabs">
         <div className="flex flex-col sm:flex-row gap-2">
           {JOB_TYPE_TABS.map((tab) => {
-            const active = tab.type === jobType;
+            const active = !showOverall && tab.type === jobType;
             return (
               <button
                 key={tab.type}
@@ -1236,8 +1291,111 @@ export default function PendingSubmissionsSection({ isAdmin, signedInAgentName =
               </button>
             );
           })}
+          {isUserAdmin && (
+            <button
+              id="pending-tab-overall"
+              type="button"
+              onClick={() => {
+                setShowOverall(true);
+                setIsCallSessionActive(false);
+              }}
+              className={`flex-1 px-4 py-2.5 rounded-xl text-left transition-all cursor-pointer border ${
+                showOverall
+                  ? 'bg-slate-900 border-slate-900 text-white shadow-sm'
+                  : 'bg-slate-50 hover:bg-slate-100 border-slate-200 text-slate-700'
+              }`}
+              aria-pressed={showOverall}
+            >
+              <span className="flex items-center justify-between gap-2">
+                <span className="text-sm font-black">Overall</span>
+                <span
+                  className={`px-2 py-0.5 rounded-full text-[10px] font-mono font-bold ${
+                    showOverall ? 'bg-slate-700 text-slate-100' : 'bg-amber-100 text-amber-800'
+                  }`}
+                >
+                  {tabOpenCounts.INSPECTION + tabOpenCounts.SUBMISSION} open
+                </span>
+              </span>
+              <span className={`block text-[11px] mt-0.5 ${showOverall ? 'text-slate-300' : 'text-slate-500'}`}>
+                KPI dashboard of every job, inspection and submission together.
+              </span>
+            </button>
+          )}
         </div>
       </div>
+
+      {/* Date range: applies to the list, tiles, Agent KPI and exports. Empty dates mean every record (the default). */}
+      <div className="bg-white border border-slate-200/80 rounded-2xl p-3 shadow-xs" id="pending-date-range-bar">
+        <div className="flex flex-col md:flex-row md:items-center gap-2">
+          <span className="text-xs font-bold text-slate-800 uppercase tracking-wider">Date range:</span>
+          <select
+            id="pending-date-basis"
+            value={dateBasis}
+            onChange={(e) => setDateBasis(e.target.value as PendingDateBasis)}
+            className="px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold text-slate-700 focus:outline-none focus:ring-2 focus:ring-[#ff353e]/20"
+            title="Which date of a job the range is applied to"
+          >
+            {PENDING_DATE_BASES.map((b) => (
+              <option key={b} value={b}>
+                {DATE_BASIS_LABELS[b]}
+              </option>
+            ))}
+          </select>
+          <label className="flex items-center gap-1.5 text-xs font-semibold text-slate-600">
+            From
+            <input
+              id="pending-date-from"
+              type="date"
+              value={dateFrom}
+              onChange={(e) => setDateFrom(e.target.value)}
+              className="px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold text-slate-700"
+            />
+          </label>
+          <label className="flex items-center gap-1.5 text-xs font-semibold text-slate-600">
+            To
+            <input
+              id="pending-date-to"
+              type="date"
+              value={dateTo}
+              onChange={(e) => setDateTo(e.target.value)}
+              className="px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold text-slate-700"
+            />
+          </label>
+          {activeRange && (
+            <button
+              id="pending-date-clear"
+              type="button"
+              onClick={() => {
+                setDateFrom('');
+                setDateTo('');
+              }}
+              className="text-xs font-bold text-[#ff353e] hover:text-[#d9222b] flex items-center gap-1 cursor-pointer"
+            >
+              <X className="w-3.5 h-3.5" />
+              <span>Clear dates</span>
+            </button>
+          )}
+          <span className="text-[11px] text-slate-500 md:ml-auto">{activeRange ? describeDateRange(activeRange) : 'All dates (no range applied)'}</span>
+        </div>
+        {activeRange && jobsWithoutRangeDate > 0 && (
+          <p className="text-[11px] text-amber-800 mt-2">
+            {jobsWithoutRangeDate} job{jobsWithoutRangeDate === 1 ? ' has' : 's have'} no{' '}
+            {dateBasis === 'CLOSED' ? 'closed date (still open)' : DATE_BASIS_LABELS[dateBasis].toLowerCase()} and{' '}
+            {jobsWithoutRangeDate === 1 ? 'is' : 'are'} not included in this range.
+          </p>
+        )}
+      </div>
+
+      {showOverall ? (
+        <PendingOverallDashboard
+          jobs={rangedAllJobs}
+          overdueAfterDays={workflowSettings.overdue_after_days}
+          rangeLabel={describeDateRange(activeRange)}
+          dateParams={dateParams}
+          refreshToken={kpiRefreshToken}
+        />
+      ) : (
+      <>
 
       {/* Agent chips: click a name to see that agent's records, then use Start Calling */}
       <div className="bg-white border border-slate-200/80 rounded-2xl p-4 shadow-xs" id="pending-agent-filter-bar">
@@ -1335,7 +1493,7 @@ export default function PendingSubmissionsSection({ isAdmin, signedInAgentName =
       </div>
 
       {/* Metric Cards */}
-      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-8 gap-3.5">
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 xl:grid-cols-9 gap-3.5">
         <div
           onClick={() => {
             setStatusFilter('ALL');
@@ -1474,17 +1632,34 @@ export default function PendingSubmissionsSection({ isAdmin, signedInAgentName =
         <div
           id="pending-conversion-rate-card"
           className="p-4 rounded-2xl border bg-emerald-50 border-emerald-200 text-emerald-800"
-          title={`All closed green records (${counts.closedGreen}) out of all records in scope (${counts.total}), open and closed`}
+          title={`Records an agent closed ${jobType === 'SUBMISSION' ? 'as submitted' : 'as scheduled'} (${counts.perf.agent_converted}) out of all records in scope (${counts.total}). Records closed by upload are not counted.`}
         >
           <div className="flex items-center justify-between">
-            <span className="text-[11px] font-bold uppercase tracking-wider block opacity-80">Conversion Rate</span>
+            <span className="text-[11px] font-bold uppercase tracking-wider block opacity-80">Agent Conversion Rate</span>
             <Target className="w-4 h-4 opacity-70" />
           </div>
           <span className="text-2xl font-black mt-1 block">
-            {counts.conversionRate === null ? 'n/a' : `${counts.conversionRate}%`}
+            {counts.perf.agent_conversion_rate === null ? 'n/a' : `${counts.perf.agent_conversion_rate}%`}
           </span>
           <span className="text-[10px] font-semibold opacity-70 block mt-0.5">
-            {counts.closedGreen} of {counts.total} {jobType === 'SUBMISSION' ? 'submitted' : 'scheduled'}
+            {counts.perf.agent_converted} of {counts.total} {jobType === 'SUBMISSION' ? 'submitted' : 'scheduled'}
+          </span>
+        </div>
+
+        <div
+          id="pending-closure-rate-card"
+          className="p-4 rounded-2xl border bg-sky-50 border-sky-200 text-sky-800"
+          title={`Every closed record (${counts.perf.closed}), including closed by upload, withdrawn and max attempts, out of all records in scope (${counts.total})`}
+        >
+          <div className="flex items-center justify-between">
+            <span className="text-[11px] font-bold uppercase tracking-wider block opacity-80">Closure Rate</span>
+            <CheckCircle2 className="w-4 h-4 opacity-70" />
+          </div>
+          <span className="text-2xl font-black mt-1 block">
+            {counts.perf.closure_rate === null ? 'n/a' : `${counts.perf.closure_rate}%`}
+          </span>
+          <span className="text-[10px] font-semibold opacity-70 block mt-0.5">
+            {counts.perf.closed} of {counts.total} closed
           </span>
         </div>
       </div>
@@ -1522,6 +1697,7 @@ export default function PendingSubmissionsSection({ isAdmin, signedInAgentName =
       <AgentKpiPanel
         section="pending_submissions"
         jobType={jobType}
+        dateParams={dateParams}
         focusAgentId={sessionAgent ? sessionAgent.id : null}
         refreshToken={kpiRefreshToken}
       />
@@ -1944,6 +2120,8 @@ export default function PendingSubmissionsSection({ isAdmin, signedInAgentName =
       </div>
 
         </>
+      )}
+      </>
       )}
 
       {/* Log Outcome Modal (Exactly TEN agent outcomes) */}

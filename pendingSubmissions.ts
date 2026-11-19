@@ -6,6 +6,7 @@ import {
   ABSENT_CLOSE_OUTCOMES,
   PENDING_JOB_TYPES,
   PendingJobType,
+  SYSTEM_OUTCOMES,
   isAgentOutcome,
   normalizeJobType,
   parseJobStatus,
@@ -69,6 +70,10 @@ export interface PendingSubmissionJobView {
   customer_email: string | null;
   schedule_date: string | null;
   latest_pending_reason: string | null;
+  /** The reason in the upload that first created the job. Null for jobs created before it was recorded. */
+  original_pending_reason: string | null;
+  /** When an agent last logged an outcome on the job (system outcomes excluded). */
+  last_outcome_at: string | null;
   job_type: PendingJobType;
   type_changed_at: string | null;
   status: "GREEN" | "AMBER" | "RED";
@@ -975,13 +980,13 @@ export async function importPendingSubmissions(
         `INSERT INTO pending_submission_jobs (
            external_id, solver_name, solver_contact, solver_contact_raw, solver_email,
            vehicle_reg, vehicle_reg_raw, insurance_company, client_phone, client_phone_raw,
-           customer_email, schedule_date, latest_pending_reason, status, assigned_agent_id,
+           customer_email, schedule_date, latest_pending_reason, original_pending_reason, status, assigned_agent_id,
            first_imported_at, last_seen_in_import_at, job_type
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'AMBER', ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?)`,
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'AMBER', ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?)`,
         [
           r.external_id, r.solver_name, r.solver_contact, r.solver_contact_raw, r.solver_email,
           r.vehicle_reg, r.vehicle_reg_raw, r.insurance_company, r.client_phone, r.client_phone_raw,
-          r.customer_email, r.schedule_date, r.latest_pending_reason, plannedAgent(r), r.job_type,
+          r.customer_email, r.schedule_date, r.latest_pending_reason, r.latest_pending_reason, plannedAgent(r), r.job_type,
         ]
       );
       createdJobIds.push(Number(inserted.lastInsertId));
@@ -1165,12 +1170,15 @@ export async function getPendingSubmissionJobs(
     SELECT
       j.id, j.external_id, j.solver_name, j.solver_contact, j.solver_contact_raw, j.solver_email,
       j.vehicle_reg, j.vehicle_reg_raw, j.insurance_company, j.client_phone, j.client_phone_raw,
-      j.customer_email, j.schedule_date, j.latest_pending_reason, j.status, j.latest_outcome,
+      j.customer_email, j.schedule_date, j.latest_pending_reason, j.original_pending_reason, j.status, j.latest_outcome,
       j.assigned_agent_id, a.name AS assigned_agent_name, j.scheduled_at, j.scheduled_place,
       j.solver_notification_status, j.solver_notified_at, j.solver_notification_error,
       j.solver_notification_message, j.solver_notification_transaction_id,
       j.solver_notification_attempts, j.solver_notification_attempted_at,
-      j.first_imported_at, j.last_seen_in_import_at, j.closed_at, j.created_at, j.updated_at, j.job_type, j.type_changed_at
+      j.first_imported_at, j.last_seen_in_import_at, j.closed_at, j.created_at, j.updated_at, j.job_type, j.type_changed_at,
+      (SELECT MAX(l.created_at) FROM pending_submission_logs l
+        WHERE l.pending_submission_job_id = j.id
+          AND l.outcome NOT IN (${SYSTEM_OUTCOMES.map((o) => `'${o}'`).join(", ")})) AS last_outcome_at
     FROM pending_submission_jobs j
     LEFT JOIN agents a ON a.id = j.assigned_agent_id
     WHERE 1=1
@@ -1243,6 +1251,8 @@ export async function getPendingSubmissionJobs(
       customer_email: r.customer_email,
       schedule_date: r.schedule_date,
       latest_pending_reason: r.latest_pending_reason,
+      original_pending_reason: r.original_pending_reason ?? null,
+      last_outcome_at: r.last_outcome_at ?? null,
       job_type: normalizeJobType(r.job_type),
       type_changed_at: r.type_changed_at ?? null,
       status: r.status,

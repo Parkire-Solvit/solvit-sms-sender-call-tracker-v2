@@ -30,6 +30,7 @@ import {
   primaryPhoneOf,
 } from "./pendingSubmissions";
 import { ABSENT_CLOSE_OUTCOMES, PendingJobType, normalizeJobType } from "./pendingSubmissionOutcomes";
+import { DATE_BASIS_COLUMNS, PendingDateRange, dateRangeBoundsMs, describeDateRange } from "./shared/pendingPerformance";
 
 const DAY_MS = 86_400_000;
 
@@ -45,8 +46,13 @@ export interface AgentKpiReport {
   /** Label for records closed because an upload no longer contained them. */
   upload_closed_label: string;
   unassigned_open: number;
-  /** Conversion of all records (all GREEN / all records), whoever holds them. Pending Submissions: per job type. */
+  /**
+   * Conversion of all records, whoever holds them. Pending Submissions: per job type, and records closed by an upload
+   * are not counted as conversions (Agent conversion rate).
+   */
   conversion?: ConversionStat;
+  /** Pending Submissions: the date range applied, as text, or null when every record is included. */
+  date_range?: string | null;
   agents: Array<AgentKpi & { pace: AgentPace; conversion?: ConversionStat }>;
 }
 
@@ -114,21 +120,46 @@ async function buildReport(
 // ---------------------------------------------------------------------------
 
 /** With a job type, only that type's jobs are counted (the two tabs of Pending Submissions have their own KPI). */
+/** SQL condition (and its parameters) that keeps only the records inside the date range. Empty when there is no range. */
+function dateRangeCondition(range: PendingDateRange | null | undefined): { sql: string; params: string[] } {
+  if (!range || (!range.from && !range.to)) return { sql: "", params: [] };
+  const column = DATE_BASIS_COLUMNS[range.basis];
+  const { startMs, endMs } = dateRangeBoundsMs(range);
+  const parts: string[] = [`${column} IS NOT NULL`];
+  const params: string[] = [];
+  if (startMs !== null) {
+    parts.push(`${column} >= ?`);
+    params.push(new Date(startMs).toISOString());
+  }
+  if (endMs !== null) {
+    parts.push(`${column} < ?`);
+    params.push(new Date(endMs).toISOString());
+  }
+  return { sql: parts.join(" AND "), params };
+}
+
+/**
+ * With a job type, only that type's jobs are counted (the two tabs of Pending Submissions have their own KPI).
+ * With a date range, only records whose date for the range's basis falls inside it are counted, with no 30-day
+ * window; without one, the report is exactly as before.
+ */
 export async function getPendingSubmissionAgentKpis(
   db: DbAdapter,
   nowMs: number = Date.now(),
-  jobType?: PendingJobType
+  jobType?: PendingJobType,
+  range: PendingDateRange | null = null
 ): Promise<AgentKpiReport> {
   await closeMaturedPendingSubmissions(db);
   const settings = await getPendingSubmissionSettings(db);
   const agents = await getValidSubmissionAgents(db, settings.callback_team_tag);
   const lowerBound = dateOnly(nowMs - (KPI_WINDOW_DAYS + 1) * DAY_MS);
+  const ranged = dateRangeCondition(range);
 
   const rows = await db.queryAll<any>(
     `SELECT id, assigned_agent_id, client_phone, solver_contact, vehicle_reg, status, latest_outcome, closed_at, schedule_date, first_imported_at, job_type, type_changed_at
      FROM pending_submission_jobs
-     WHERE status = 'AMBER' OR (closed_at IS NOT NULL AND closed_at >= ?)`,
-    [lowerBound]
+     WHERE ${ranged.sql ? ranged.sql : "status = 'AMBER' OR (closed_at IS NOT NULL AND closed_at >= ?)"}`,
+    ranged.sql ? ranged.params : [lowerBound]
   );
   const jobs = rows
     .map((r) => ({ ...r, id: num(r.id), assigned_agent_id: r.assigned_agent_id === null || r.assigned_agent_id === undefined ? null : num(r.assigned_agent_id) }))
@@ -150,11 +181,24 @@ export async function getPendingSubmissionAgentKpis(
     };
   });
 
-  const report = await buildReport(db, "pending_submissions", nowMs, agents, records, { calls: settings.max_attempts, sms: settings.max_sms_attempts }, "Closed by upload", KPI_WINDOW_DAYS);
+  const report = await buildReport(
+    db,
+    "pending_submissions",
+    nowMs,
+    agents,
+    records,
+    { calls: settings.max_attempts, sms: settings.max_sms_attempts },
+    "Closed by upload",
+    ranged.sql ? null : KPI_WINDOW_DAYS
+  );
 
-  // Conversion rate: all GREEN records over all records of the type, with no date window.
-  const conversionRows = await db.queryAll<{ assigned_agent_id: unknown; status: string; job_type: unknown; n: unknown }>(
-    `SELECT assigned_agent_id, status, job_type, COUNT(*) AS n FROM pending_submission_jobs GROUP BY assigned_agent_id, status, job_type`
+  // Agent conversion rate: records an agent closed GREEN over all records of the type (no date window unless a
+  // range is chosen). Records closed because an upload no longer contained them are not conversions.
+  const conversionRows = await db.queryAll<{ assigned_agent_id: unknown; status: string; latest_outcome: string | null; job_type: unknown; n: unknown }>(
+    `SELECT assigned_agent_id, status, latest_outcome, job_type, COUNT(*) AS n FROM pending_submission_jobs
+     ${ranged.sql ? `WHERE ${ranged.sql}` : ""}
+     GROUP BY assigned_agent_id, status, latest_outcome, job_type`,
+    ranged.params
   );
   const { overall, byAgent } = computeConversion(
     conversionRows
@@ -162,11 +206,14 @@ export async function getPendingSubmissionAgentKpis(
       .map((r) => ({
         assigned_agent_id: r.assigned_agent_id === null || r.assigned_agent_id === undefined ? null : num(r.assigned_agent_id),
         status: String(r.status),
+        latest_outcome: r.latest_outcome ?? null,
         n: num(r.n),
       })),
-    agents.map((a) => a.id)
+    agents.map((a) => a.id),
+    ABSENT_CLOSE_OUTCOMES
   );
   report.conversion = overall;
+  report.date_range = ranged.sql ? describeDateRange(range) : null;
   report.agents = report.agents.map((a) => ({ ...a, conversion: byAgent.get(a.agent_id) }));
   return report;
 }

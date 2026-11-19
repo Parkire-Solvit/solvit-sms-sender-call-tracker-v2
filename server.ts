@@ -66,7 +66,8 @@ import { callbackCommentProblem } from "./src/lib/callbackComment";
 import { getDataResetPreview, buildDataBackup, deleteAllRecords, undoLastUpload, verifyBackupAccess } from "./dataReset";
 import { claimOutcomeReceipt, releaseOutcomeReceipt } from "./outcomeReceipts";
 import { isSolverSmsEnabled } from "./solverSmsSwitch";
-import { getPendingMaxAttemptsTimeline, filterMaxAttemptsGroups, buildPendingMaxAttemptsWorkbook } from "./pendingMaxAttemptsReport";
+import { getPendingMaxAttemptsTimeline, filterMaxAttemptsGroups, filterMaxAttemptsGroupsByDate, buildPendingMaxAttemptsWorkbook } from "./pendingMaxAttemptsReport";
+import { parseDateRangeParams } from "./shared/pendingPerformance";
 import { createAgent } from "./agentManagement";
 
 // SSE Clients for real-time agent name push
@@ -1822,7 +1823,9 @@ function computeActivitySummary(events: any[], totalAgents: number = 0) {
   app.get("/api/agent-kpi/pending-submissions", requireSection('pending'), async (req, res) => {
     try {
       const jobType = parseJobTypeParam(req.query.job_type);
-      res.json(await refreshCache.get(`kpi-pending:${jobType ?? 'ALL'}`, () => getPendingSubmissionAgentKpis(db, Date.now(), jobType)));
+      const range = parseDateRangeParams(req.query as Record<string, unknown>);
+      const rangeKey = range ? `${range.basis}:${range.from ?? ''}:${range.to ?? ''}` : 'all-dates';
+      res.json(await refreshCache.get(`kpi-pending:${jobType ?? 'ALL'}:${rangeKey}`, () => getPendingSubmissionAgentKpis(db, Date.now(), jobType, range)));
     } catch (err) {
       sendError(res, err, "Error building the pending submissions agent KPI");
     }
@@ -1877,9 +1880,12 @@ function computeActivitySummary(events: any[], totalAgents: number = 0) {
     try {
       const agent = String(req.query.assigned_agent_name || req.query.agent || "").trim();
       const company = String(req.query.insurance_company || "").trim();
-      const jobType = parseJobTypeParam(req.query.job_type) ?? "INSPECTION";
-      const groups = filterMaxAttemptsGroups(await getPendingMaxAttemptsTimeline(db, jobType), agent, company);
-      const report = buildPendingMaxAttemptsWorkbook(groups, agent, company, Date.now(), jobType);
+      // job_type=ALL (the Overall tab) reports both types together.
+      const jobType = String(req.query.job_type || "").trim().toUpperCase() === "ALL" ? "ALL" : parseJobTypeParam(req.query.job_type) ?? "INSPECTION";
+      const range = parseDateRangeParams(req.query as Record<string, unknown>);
+      const timeline = await getPendingMaxAttemptsTimeline(db, jobType);
+      const groups = filterMaxAttemptsGroupsByDate(filterMaxAttemptsGroups(timeline, agent, company), range);
+      const report = buildPendingMaxAttemptsWorkbook(groups, agent, company, Date.now(), jobType, range);
       res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
       res.setHeader("Content-Disposition", `attachment; filename="${report.filename}"`);
       res.send(report.buffer);
