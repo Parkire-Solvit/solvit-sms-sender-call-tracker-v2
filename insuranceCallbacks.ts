@@ -342,100 +342,6 @@ export async function updateCallbackSettings(
 }
 
 /**
- * Seed channel partner allocations on startup
- */
-export async function seedChannelPartnerAllocations(db: DbAdapter): Promise<void> {
-  try {
-    // Look up Mercy and Caroline agents
-    const agents = await db.queryAll<{ id: number; name: string }>(
-      `SELECT id, name FROM agents WHERE archived_at IS NULL`
-    );
-    let mercy = agents.find((a) => a.name.trim().toLowerCase() === "mercy");
-    let caroline = agents.find((a) => a.name.trim().toLowerCase() === "caroline");
-
-    if (!mercy) {
-      await db.execute(`INSERT INTO agents (name, tag) VALUES ('Mercy', 'Callback Team') ON CONFLICT (name) DO NOTHING`);
-      mercy = (await db.queryOne<{ id: number; name: string }>(`SELECT id, name FROM agents WHERE LOWER(name) = 'mercy'`)) || undefined;
-    }
-    if (!caroline) {
-      await db.execute(`INSERT INTO agents (name, tag) VALUES ('Caroline', 'Callback Team') ON CONFLICT (name) DO NOTHING`);
-      caroline = (await db.queryOne<{ id: number; name: string }>(`SELECT id, name FROM agents WHERE LOWER(name) = 'caroline'`)) || undefined;
-    }
-
-    const mercyId = mercy ? mercy.id : null;
-    const carolineId = caroline ? caroline.id : null;
-
-    const allocations: Array<{ partner: string; agentId: number | null }> = [
-      // Mercy
-      { partner: "Britam", agentId: mercyId },
-      { partner: "Sanlam Allianz", agentId: mercyId },
-      { partner: "GA Insurance", agentId: mercyId },
-      { partner: "OLD MUTUAL", agentId: mercyId },
-      { partner: "Heritage", agentId: mercyId },
-      { partner: "Pioneer General Insurance Limited", agentId: mercyId },
-      { partner: "ICEA Lion", agentId: mercyId },
-      { partner: "Takaful", agentId: mercyId },
-      { partner: "Pioneer", agentId: mercyId },
-      { partner: "Madison", agentId: mercyId },
-      { partner: "Cannon", agentId: mercyId },
-      { partner: "Lami World", agentId: mercyId },
-      { partner: "Intra Africa", agentId: mercyId },
-      { partner: "DIRECTLINE INSURANCE", agentId: mercyId },
-      { partner: "Sanlam", agentId: mercyId },
-      { partner: "Mayfair Insurance", agentId: mercyId },
-
-      // Caroline
-      { partner: "APA", agentId: carolineId },
-      { partner: "KENINDIA ASSURANCE COMPANY LTD", agentId: carolineId },
-      { partner: "Fidelity", agentId: carolineId },
-      { partner: "First Assurance", agentId: carolineId },
-      { partner: "CIC General Insurance Ltd", agentId: carolineId },
-      { partner: "PACIS Insurance", agentId: carolineId },
-      { partner: "Occidental", agentId: carolineId },
-      { partner: "NCBA-IG", agentId: carolineId },
-      { partner: "Definite Assurance Co. Limited.", agentId: carolineId },
-      { partner: "MUA", agentId: carolineId },
-      { partner: "Geminia Insurance Company Limited", agentId: carolineId },
-      { partner: "AAR Insurance", agentId: carolineId },
-      { partner: "AMACO INSURANCE LTD", agentId: carolineId },
-      { partner: "STAR DISCOVER INSURANCE COMPANY LIMITED", agentId: carolineId },
-      { partner: "Choice Microfinance Bank Limited", agentId: carolineId },
-      { partner: "Nirvana Microfinance Bank Limited", agentId: carolineId },
-    ];
-
-    const validPartners = allocations.map((a) => a.partner);
-    await db.execute(
-      `DELETE FROM channel_partner_allocations WHERE channel_partner NOT IN (${validPartners.map(() => '?').join(',')})`,
-      validPartners
-    );
-
-    for (const alloc of allocations) {
-      await db.execute(
-        `INSERT INTO channel_partner_allocations (channel_partner, assigned_agent_id, updated_at)
-         VALUES (?, ?, CURRENT_TIMESTAMP)
-         ON CONFLICT (channel_partner) DO UPDATE SET assigned_agent_id = EXCLUDED.assigned_agent_id, updated_at = CURRENT_TIMESTAMP`,
-        [alloc.partner, alloc.agentId]
-      );
-    }
-    console.log("[ALLOCATIONS] Successfully seeded/updated channel_partner_allocations");
-
-    const allocations2 = await db.queryAll<{ channel_partner: string; assigned_agent_id: number }>(
-      `SELECT channel_partner, assigned_agent_id FROM channel_partner_allocations WHERE assigned_agent_id IS NOT NULL`
-    );
-    for (const alloc of allocations2) {
-      await db.execute(
-        `UPDATE callback_jobs SET assigned_agent_id = ?, updated_at = CURRENT_TIMESTAMP
-         WHERE channel_partner = ? AND status = 'AMBER'`,
-        [alloc.assigned_agent_id, alloc.channel_partner]
-      );
-    }
-    console.log("[ALLOCATIONS] Resynced open jobs against corrected allocation table");
-  } catch (err) {
-    console.error("[ALLOCATIONS] Error seeding channel partner allocations:", err);
-  }
-}
-
-/**
  * Get all partner allocations and unallocated partners in callback_jobs
  */
 export async function getChannelPartnerAllocations(db: DbAdapter): Promise<{
@@ -484,22 +390,15 @@ export async function setChannelPartnerAllocation(
   const partner = channelPartner.trim();
   if (!partner) throw new Error("Channel partner name is required");
 
-  // Upsert into channel_partner_allocations
-  const existing = await db.queryOne<{ channel_partner: string }>(
-    `SELECT channel_partner FROM channel_partner_allocations WHERE channel_partner = ?`,
-    [partner]
+  // One upsert. RETURNING is explicit because the database adapter otherwise appends "RETURNING id" to every
+  // INSERT, and this table has no id column (that made every first allocation of a partner fail).
+  await db.execute(
+    `INSERT INTO channel_partner_allocations (channel_partner, assigned_agent_id, updated_at)
+     VALUES (?, ?, CURRENT_TIMESTAMP)
+     ON CONFLICT (channel_partner) DO UPDATE SET assigned_agent_id = EXCLUDED.assigned_agent_id, updated_at = CURRENT_TIMESTAMP
+     RETURNING channel_partner`,
+    [partner, assignedAgentId]
   );
-  if (existing) {
-    await db.execute(
-      `UPDATE channel_partner_allocations SET assigned_agent_id = ?, updated_at = CURRENT_TIMESTAMP WHERE channel_partner = ?`,
-      [assignedAgentId, partner]
-    );
-  } else {
-    await db.execute(
-      `INSERT INTO channel_partner_allocations (channel_partner, assigned_agent_id, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)`,
-      [partner, assignedAgentId]
-    );
-  }
 
   // Immediately update every open AMBER vehicle for that partner to the new assigned_agent_id
   await db.execute(

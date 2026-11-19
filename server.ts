@@ -22,7 +22,6 @@ import {
   getCallbackJobLogs,
   closeMaturedCallbackJobs,
   getMaxAttemptsReport,
-  seedChannelPartnerAllocations,
   getChannelPartnerAllocations,
   setChannelPartnerAllocation,
   backfillAdditionalImportPhones,
@@ -138,8 +137,8 @@ async function startServer() {
     return requested;
   };
 
-  // Seed channel-partner → agent allocations for the callbacks feature
-  await seedChannelPartnerAllocations(db);
+  // Channel partner allocations are managed only in Team Settings. They are no longer re-seeded from a fixed list
+  // at startup, which overwrote and deleted the team's choices on every deploy or restart.
   await backfillAdditionalImportPhones(db);
 
   // Seed the initial admin user (from ADMIN_USERNAME/ADMIN_PASSWORD) if none exists
