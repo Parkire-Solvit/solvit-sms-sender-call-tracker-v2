@@ -57,7 +57,7 @@ import {
   getApprovalSettings, updateApprovalWorkingSettings, updateApprovalAdminSettings, listApprovalSenders, senderMailboxFor, getApprovalDirectory,
   saveApprovalDirectory, upsertApprovalSolvers, setApprovalSolverContact, getApprovalState, getApprovalRevision, listApprovalEmails, listApprovalJobs,
   listApprovalSolvers, logApprovalAttempt, setApprovalRoute, reactivateApprovalJob, setApprovalNoFollowUpReason, closeApprovalJobs, recordApprovalEmail,
-  recordSentFollowUp, importApprovalExport, closeMissingFromImport,
+  recordSentFollowUp, importApprovalExport, closeMissingFromImport, recordApprovalMailCheck, listApprovalMailChecks, getApprovalMailCheck,
 } from "./pendingApprovals";
 import { ApprovalMailer, approvalMailConfigFromEnv, NOT_CONFIGURED } from "./pendingApprovalMail";
 import { buildReceived, buildSolver, groupBy as approvalGroupBy, type ApprovalContext, type SolverMap } from "./shared/pendingApproval";
@@ -1922,8 +1922,10 @@ function computeActivitySummary(events: any[], totalAgents: number = 0) {
     try {
       res.setHeader("Cache-Control", "no-store");
       const revision = await getApprovalRevision(db);
-      const canSend = approvalMailer.configured && Boolean(await approvalSender(req));
-      const mail = { configured: approvalMailer.configured, can_send: canSend };
+      const sender = await approvalSender(req);
+      const canSend = approvalMailer.configured && Boolean(sender);
+      // "verified" means a test email was accepted for this person's sender mailbox, not merely that credentials exist.
+      const mail = { configured: approvalMailer.configured, can_send: canSend, verified: (await getApprovalMailCheck(db, sender))?.ok === true };
       // The screen polls with the revision it already has and only downloads the jobs when something changed.
       if (req.query.rev === revision) return res.json({ unchanged: true, revision, mail });
       res.json({ ...(await getApprovalState(db)), mail, me: { name: approvalActor(req) } });
@@ -2106,16 +2108,29 @@ function computeActivitySummary(events: any[], totalAgents: number = 0) {
   app.get("/api/pending-approvals/admin-settings", requireAdmin, async (_req, res) => {
     try {
       const s = await getApprovalSettings(db);
-      res.json({ team_tag: s.team_tag, default_sender_mailbox: s.default_sender_mailbox, senders: await listApprovalSenders(db), mail_configured: approvalMailer.configured, env_sender: approvalMailer.fallbackFrom });
+      res.json({ team_tag: s.team_tag, default_sender_mailbox: s.default_sender_mailbox, senders: await listApprovalSenders(db), mail_configured: approvalMailer.configured, env_sender: approvalMailer.fallbackFrom, mail_checks: await listApprovalMailChecks(db) });
     } catch (err) {
       sendError(res, err, "Error loading Pending Approval administration settings");
+    }
+  });
+
+  // Checks whether email can really be sent as a mailbox, and optionally sends a test email. Administrators only.
+  app.post("/api/pending-approvals/mail/check", requireAdmin, async (req, res) => {
+    try {
+      const mailbox = String(req.body?.mailbox || "").trim() || await approvalSender(req);
+      const result = await approvalMailer.checkConnection({ mailbox, testTo: String(req.body?.test_to || ""), requestedBy: approvalActor(req) });
+      // Remember the outcome so the screens can say whether sending is verified. A check that proved nothing is not stored.
+      if (result.attempted && mailbox) await recordApprovalMailCheck(db, { mailbox, ok: result.ok, message: result.message, by: approvalActor(req) });
+      res.json({ ...result, mail_checks: await listApprovalMailChecks(db) });
+    } catch (err) {
+      sendError(res, err, "Error checking the email connection");
     }
   });
 
   app.put("/api/pending-approvals/admin-settings", requireAdmin, async (req, res) => {
     try {
       const r = await updateApprovalAdminSettings(db, req.body || {});
-      res.json({ team_tag: r.settings.team_tag, default_sender_mailbox: r.settings.default_sender_mailbox, senders: r.senders, mail_configured: approvalMailer.configured, env_sender: approvalMailer.fallbackFrom });
+      res.json({ team_tag: r.settings.team_tag, default_sender_mailbox: r.settings.default_sender_mailbox, senders: r.senders, mail_configured: approvalMailer.configured, env_sender: approvalMailer.fallbackFrom, mail_checks: await listApprovalMailChecks(db) });
     } catch (err) {
       sendError(res, err, "Error saving Pending Approval administration settings");
     }

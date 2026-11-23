@@ -170,6 +170,16 @@ async function main() {
   await pa.updateApprovalAdminSettings(db, { default_sender_mailbox: "" });
   assert(await pa.senderMailboxFor(db, "someone.else", "env@solvit.co.ke") === "env@solvit.co.ke" && await pa.senderMailboxFor(db, "someone.else") === "", "the environment mailbox is the last fallback; with none, nothing is sent");
 
+  // ---------- Email check results ----------
+  assert((await pa.listApprovalMailChecks(db)).length === 0 && await pa.getApprovalMailCheck(db, "cs-team@solvit.co.ke") === null, "no email check has been recorded yet, so nothing is verified");
+  await pa.recordApprovalMailCheck(db, { mailbox: "CS-Team@Solvit.co.ke", ok: false, message: "Microsoft would not send", by: "Boss" });
+  assert((await pa.getApprovalMailCheck(db, "cs-team@solvit.co.ke"))?.ok === false, "a failed check is recorded (mailboxes compared in lower case)");
+  await pa.recordApprovalMailCheck(db, { mailbox: "cs-team@solvit.co.ke", ok: true, message: "Verified", by: "Boss" });
+  const checks = await pa.listApprovalMailChecks(db);
+  assert(checks.length === 1 && checks[0].ok === true && checks[0].checked_by === "Boss" && typeof checks[0].checked_at === "string", "a newer check replaces the older one for the same mailbox");
+  await pa.recordApprovalMailCheck(db, { mailbox: "other@solvit.co.ke", ok: true, message: "Verified", by: "Boss" });
+  assert((await pa.listApprovalMailChecks(db)).length === 2 && await pa.getApprovalMailCheck(db, "") === null, "each mailbox has its own result; a blank mailbox has none");
+
   // ---------- Who may open the section ----------
   await db.execute("INSERT INTO agents (name, tag) VALUES ('Terry Approvals', 'Approvals Team')");
   await db.execute("INSERT INTO agents (name, tag) VALUES ('Other Agent', 'Callback Team')");

@@ -175,6 +175,7 @@ export function ComposeModal({ kind, keyName, list, shared, onClose }: { kind: '
         dangerouslySetInnerHTML={{ __html: (built?.html || '<p>No jobs selected.</p>') + attachLine }} />
       <Note>{multi ? 'More than one job: the Excel list is attached automatically when you send.' : 'Single job: sent directly, no Excel needed.'}</Note>
       {!canSend && <Note bad>{state.mail.configured ? 'No sender mailbox is set for your login. Ask an administrator to set one in Import & Settings.' : 'Email is not configured on the server yet, so it cannot be sent from here. You can copy the text or download the Excel.'}</Note>}
+      {canSend && !state.mail.verified && <Note>Email sending has not been verified for your mailbox yet, so this email may fail. If it does, ask an administrator to complete the email check in Import & Settings.</Note>}
       {error && <Note bad>{error}</Note>}
       <div className="flex flex-wrap justify-end gap-2 pt-1">
         <button type="button" className={btn} onClick={onClose}>Cancel</button>
@@ -242,6 +243,7 @@ export function ReceivedModal({ ids, shared, onClose, onDone }: { ids: string[];
         <textarea className={`${field} min-h-[60px]`} value={note} onChange={(e) => setNote(e.target.value)} placeholder="e.g. Logbook received by email from the insurer" />
       </label>
       {!canSend && <Note bad>{state.mail.configured ? 'No sender mailbox is set for your login, so emails cannot be sent. You can still close the jobs without email.' : 'Email is not configured on the server yet. You can still close the jobs without email; tell the valuer yourself.'}</Note>}
+      {canSend && !state.mail.verified && <Note>Email sending has not been verified for your mailbox yet, so the emails may fail. If they do, nothing is closed; you can still close without email.</Note>}
       {error && <Note bad>{error}</Note>}
       <div className="flex flex-wrap justify-end gap-2 pt-1">
         <button type="button" className={btn} onClick={onClose}>Cancel</button>

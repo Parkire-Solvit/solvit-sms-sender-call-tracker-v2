@@ -85,8 +85,11 @@ export default function PendingApprovalSection({ isAdmin, signedInAgentName }: {
       </div>
 
       {error && <Note bad>{error} <button type="button" className="underline font-bold cursor-pointer" onClick={() => load(true)}>Try again</button></Note>}
-      {state && shared && !state.mail.configured && tab !== 'settings' && (
-        <Note>Email is not configured on the server yet, so emails cannot be sent from here. Everything else works. Logging outcomes, closing jobs and reports are not affected.</Note>
+      {state && shared && tab !== 'settings' && !state.mail.configured && (
+        <Note>Email is not configured on the server yet, so emails cannot be sent from here. Everything else works: logging outcomes, closing jobs and reports are not affected.{isAdmin ? ' The setup steps are in Import & Settings.' : ' Ask an administrator to set it up.'}</Note>
+      )}
+      {state && shared && tab !== 'settings' && state.mail.configured && !state.mail.verified && (
+        <Note>{state.mail.can_send ? 'Email sending has not been verified for your mailbox yet, so an email may fail to send.' : 'No sender mailbox is set for your login, so emails cannot be sent from here.'}{isAdmin ? ' Complete the check in Import & Settings (Access and email sending).' : ' Ask an administrator to complete the email check.'} Everything else works.</Note>
       )}
 
       {!state && !error && <div className="text-xs text-slate-500 p-6">Loading Pending Approval…</div>}

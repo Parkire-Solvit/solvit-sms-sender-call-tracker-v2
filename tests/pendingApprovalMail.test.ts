@@ -1,6 +1,6 @@
 // tests/pendingApprovalMail.test.ts
 // Sending through Microsoft Graph, with a fake Microsoft in place of the real one: nothing is ever sent.
-import { ApprovalMailer, approvalMailConfigFromEnv, NOT_CONFIGURED, type ApprovalMailConfig } from "../pendingApprovalMail";
+import { ApprovalMailer, approvalMailConfigFromEnv, explainRefusal, NOT_CONFIGURED, tokenRoles, type ApprovalMailConfig } from "../pendingApprovalMail";
 
 function assert(condition: boolean, message: string) {
   if (!condition) throw new Error(`Assertion failed: ${message}`);
@@ -72,6 +72,66 @@ await (async () => {
 
   await rejects("sign-in fails", 502, () => new ApprovalMailer(cfg, fakeMicrosoft({ tokenOk: false }).http).send(mail), "bad secret");
   await rejects("Microsoft refuses", 502, () => new ApprovalMailer(cfg, fakeMicrosoft({ sendOk: false }).http).send(mail), "Access is denied");
+
+  // ---------- The connection check ----------
+  const jwt = (claims: object) => `h.${Buffer.from(JSON.stringify(claims)).toString("base64url")}.s`;
+  assert(JSON.stringify(tokenRoles(jwt({ roles: ["Mail.Send", "Mail.Read"] }))) === '["Mail.Send","Mail.Read"]', "the permissions are read from the token");
+  assert(JSON.stringify(tokenRoles(jwt({ aud: "x" }))) === "[]", "a token with no roles has none");
+  assert(tokenRoles("garbage") === null && tokenRoles("a.@@@.c") === null, "an unreadable token gives null");
+  const stepOf = (r: any, name: string) => r.steps.find((x: any) => x.name === name);
+  const msFake = (opts: { roles?: string[]; tokenOk?: boolean; sendStatus?: number; network?: boolean } = {}) => {
+    const calls: Call[] = [];
+    const http = (async (url: string, init: any) => {
+      calls.push({ url, init });
+      if (opts.network) throw new TypeError("fetch failed");
+      if (url.includes("login.microsoftonline.com")) {
+        return opts.tokenOk === false
+          ? { ok: false, status: 401, json: async () => ({ error_description: "AADSTS7000215: Invalid client secret" }) }
+          : { ok: true, status: 200, json: async () => ({ access_token: jwt({ roles: opts.roles ?? ["Mail.Send"] }), expires_in: 3600 }) };
+      }
+      return (opts.sendStatus ?? 202) < 300 ? { ok: true, status: 202, json: async () => ({}) } : { ok: false, status: opts.sendStatus, json: async () => ({ error: { message: "Access is denied" } }) };
+    }) as unknown as typeof fetch;
+    return { calls, http };
+  };
+
+  const none = await new ApprovalMailer(null).checkConnection({ mailbox: "cs@solvit.co.ke", testTo: "me@solvit.co.ke" });
+  assert(!none.ok && !none.attempted && stepOf(none, "Microsoft credentials on the server").ok === false && none.steps.length === 1, "no credentials: fails at the first step and nothing is remembered");
+
+  const badSecret = await new ApprovalMailer(cfg, msFake({ tokenOk: false }).http).checkConnection({ mailbox: "cs@solvit.co.ke", testTo: "me@solvit.co.ke" });
+  assert(!badSecret.ok && badSecret.attempted && stepOf(badSecret, "Sign in to Microsoft").ok === false && stepOf(badSecret, "Sign in to Microsoft").detail.includes("client secret has not expired"), "a bad secret fails at sign-in and says what to check");
+
+  const offline = await new ApprovalMailer(cfg, msFake({ network: true }).http).checkConnection({ mailbox: "cs@solvit.co.ke", testTo: "me@solvit.co.ke" });
+  const offlineDetail = stepOf(offline, "Sign in to Microsoft").detail;
+  assert(!offline.ok && offlineDetail.includes("Could not reach Microsoft") && !offlineDetail.includes("client secret"), "a network failure is reported as one, not blamed on the secret");
+
+  const noPerm = msFake({ roles: [] });
+  const noPermRes = await new ApprovalMailer(cfg, noPerm.http).checkConnection({ mailbox: "cs@solvit.co.ke", testTo: "me@solvit.co.ke" });
+  assert(stepOf(noPermRes, "Mail.Send permission").ok === null && stepOf(noPermRes, "Mail.Send permission").detail.includes("grant admin consent"), "a missing Mail.Send is flagged as not proven, with what to do");
+  assert(noPermRes.ok && noPermRes.attempted, "an accepted test email still counts as proof (for example when sending is controlled by Exchange RBAC)");
+
+  const noMailbox = await new ApprovalMailer(cfg, msFake().http).checkConnection({ mailbox: "", testTo: "me@solvit.co.ke" });
+  assert(!noMailbox.ok && !noMailbox.attempted && stepOf(noMailbox, "Sender mailbox").ok === false, "no sender mailbox: reported, and nothing remembered");
+
+  const noTest = msFake();
+  const noTestRes = await new ApprovalMailer(cfg, noTest.http).checkConnection({ mailbox: "cs@solvit.co.ke" });
+  assert(!noTestRes.ok && !noTestRes.attempted && stepOf(noTestRes, "Test email").ok === null && !noTest.calls.some((c) => c.url.includes("/sendMail")), "without a test address nothing is sent and nothing is verified");
+  assert(stepOf(noTestRes, "Mail.Send permission").ok === true, "the permission step passes when the token carries Mail.Send");
+
+  const badTo = await new ApprovalMailer(cfg, msFake().http).checkConnection({ mailbox: "cs@solvit.co.ke", testTo: "nope" });
+  assert(!badTo.ok && !badTo.attempted && stepOf(badTo, "Test email").ok === false, "an invalid test address is rejected before anything is sent");
+
+  const denied = await new ApprovalMailer(cfg, msFake({ sendStatus: 403 }).http).checkConnection({ mailbox: "cs@solvit.co.ke", testTo: "me@solvit.co.ke" });
+  assert(!denied.ok && denied.attempted && stepOf(denied, "Test email").detail.includes("Access is denied") && stepOf(denied, "Test email").detail.includes("Exchange access policy"), "Microsoft refusing the mailbox is reported with the likely fix");
+
+  const good = msFake();
+  const goodRes = await new ApprovalMailer(cfg, good.http).checkConnection({ mailbox: "cs@solvit.co.ke", testTo: "me@solvit.co.ke", requestedBy: "Admin <b>" });
+  assert(goodRes.ok && goodRes.attempted && goodRes.steps.every((x) => x.ok === true), "all steps pass and the test email is accepted: verified");
+  const testBody = JSON.parse(good.calls.find((c) => c.url.includes("/sendMail"))!.init.body);
+  assert(good.calls.find((c) => c.url.includes("/sendMail"))!.url.includes("cs%40solvit.co.ke") && testBody.message.toRecipients[0].emailAddress.address === "me@solvit.co.ke", "the test email goes from the chosen mailbox to the chosen address");
+  assert(testBody.message.body.content.includes("Admin &lt;b&gt;") && !testBody.message.body.content.includes("Admin <b>"), "the requester's name is escaped in the test email");
+
+  assert(explainRefusal(403, "a@b.co", "denied").includes("Mail.Send") && explainRefusal(404, "a@b.co", "gone").includes("not found as a mailbox") && explainRefusal(500, "a@b.co", "oops").endsWith("Microsoft said: oops"), "refusals explain what to fix");
+  await rejects("a network failure while sending", 502, () => new ApprovalMailer(cfg, msFake({ network: true }).http).send(mail), "Could not reach Microsoft");
 
   console.log("All Pending Approval email tests passed!");
 })();

@@ -105,6 +105,31 @@ export async function senderMailboxFor(db: Db, username: string, envFallback = "
   return s.default_sender_mailbox || envFallback || "";
 }
 
+/* ---------- Email checks ---------- */
+
+export interface ApprovalMailCheck { mailbox: string; ok: boolean; message: string; checked_by: string; checked_at: string }
+
+/** Remembers the outcome of an email check for a mailbox, replacing the previous one. */
+export async function recordApprovalMailCheck(db: Db, c: { mailbox: string; ok: boolean; message: string; by: string }): Promise<void> {
+  await db.execute(
+    `INSERT INTO pending_approval_mail_checks (mailbox, ok, message, checked_by) VALUES (?, ?, ?, ?)
+     ON CONFLICT (mailbox) DO UPDATE SET ok = EXCLUDED.ok, message = EXCLUDED.message, checked_by = EXCLUDED.checked_by, checked_at = CURRENT_TIMESTAMP`,
+    [c.mailbox.trim().toLowerCase(), c.ok, c.message.slice(0, 1000), c.by.slice(0, 255)]
+  );
+}
+
+const toCheck = (r: any): ApprovalMailCheck => ({ mailbox: r.mailbox, ok: r.ok === true, message: r.message, checked_by: r.checked_by, checked_at: iso(r.checked_at)! });
+
+export async function listApprovalMailChecks(db: Db): Promise<ApprovalMailCheck[]> {
+  return (await db.queryAll<any>("SELECT * FROM pending_approval_mail_checks ORDER BY mailbox")).map(toCheck);
+}
+
+export async function getApprovalMailCheck(db: Db, mailbox: string): Promise<ApprovalMailCheck | null> {
+  if (!mailbox) return null;
+  const r = await db.queryOne<any>("SELECT * FROM pending_approval_mail_checks WHERE mailbox = ?", [mailbox.trim().toLowerCase()]);
+  return r ? toCheck(r) : null;
+}
+
 /* ---------- Team and solvers ---------- */
 
 export async function getApprovalDirectory(db: Db): Promise<ApprovalDirectory> {
