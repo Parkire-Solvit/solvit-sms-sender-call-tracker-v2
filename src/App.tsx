@@ -39,7 +39,8 @@ import {
   ExternalLink,
   Car,
   Mail,
-  ClipboardList
+  ClipboardList,
+  ClipboardCheck
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { clsx, type ClassValue } from 'clsx';
@@ -56,6 +57,7 @@ import { InsuranceCallbackSection } from './components/InsuranceCallbackSection'
 import { AgentPerformanceNarrative } from './components/AgentPerformanceNarrative';
 import { EmailSlaSection } from './components/EmailSlaSection';
 import PendingSubmissionsSection from './components/PendingSubmissionsSection';
+import PendingApprovalSection from './components/PendingApprovalSection';
 import SaveStatusBanner from './components/SaveStatusBanner';
 import { startSessionGuard, pingSession } from './lib/safeSave';
 import { allowedViews, landingView, resolveView, VIEW_LABELS, type AccountRole, type AppView, type Section as AccessSection } from './lib/appViews';
@@ -376,6 +378,7 @@ export default function App() {
                   'insurance-callbacks': { id: 'nav-tab-insurance-callbacks', Icon: Car },
                   'email': { id: 'nav-tab-email-sla', Icon: Mail },
                   'pending-submissions': { id: 'nav-tab-pending-submissions', Icon: ClipboardList },
+                  'pending-approval': { id: 'nav-tab-pending-approval', Icon: ClipboardCheck },
                 };
                 const { id, Icon } = meta[v];
                 return (
@@ -499,6 +502,13 @@ export default function App() {
       ) : activeView === 'pending-submissions' ? (
         <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-6">
           <PendingSubmissionsSection
+            isAdmin={isAdminAuthenticated}
+            signedInAgentName={isAgentAccount ? (accountAgentName || accountDisplayName) : null}
+          />
+        </main>
+      ) : activeView === 'pending-approval' ? (
+        <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-6">
+          <PendingApprovalSection
             isAdmin={isAdminAuthenticated}
             signedInAgentName={isAgentAccount ? (accountAgentName || accountDisplayName) : null}
           />

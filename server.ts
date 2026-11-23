@@ -53,6 +53,14 @@ import {
   ensureSubmissionsAssigned,
 } from "./pendingSubmissions";
 import { sendError, HttpError } from "./httpError";
+import {
+  getApprovalSettings, updateApprovalWorkingSettings, updateApprovalAdminSettings, listApprovalSenders, senderMailboxFor, getApprovalDirectory,
+  saveApprovalDirectory, upsertApprovalSolvers, setApprovalSolverContact, getApprovalState, getApprovalRevision, listApprovalEmails, listApprovalJobs,
+  listApprovalSolvers, logApprovalAttempt, setApprovalRoute, reactivateApprovalJob, setApprovalNoFollowUpReason, closeApprovalJobs, recordApprovalEmail,
+  recordSentFollowUp, importApprovalExport, closeMissingFromImport,
+} from "./pendingApprovals";
+import { ApprovalMailer, approvalMailConfigFromEnv, NOT_CONFIGURED } from "./pendingApprovalMail";
+import { buildReceived, buildSolver, groupBy as approvalGroupBy, type ApprovalContext, type SolverMap } from "./shared/pendingApproval";
 import { getPendingSubmissionAgentKpis, getCallbackAgentKpis } from "./agentKpiService";
 import { notifySolver } from "./solverNotifications";
 import { INTEGRATIONS, getIntegrationPublicView, updateIntegrationSettings, getHostPinnacleConfig } from "./integrationSettings";
@@ -1890,6 +1898,226 @@ function computeActivitySummary(events: any[], totalAgents: number = 0) {
       res.send(report.buffer);
     } catch (err) {
       sendError(res, err, "Error generating the pending submissions max attempts Excel");
+    }
+  });
+
+  // --- Pending Approval Endpoints ---
+  // Jobs that are valued and submitted but cannot be approved until documents arrive. Open to administrators and to
+  // agents whose tag is the approvals team tag. Only the team tag and the sender mailboxes are administrator-only.
+  const approvalMailer = new ApprovalMailer(approvalMailConfigFromEnv());
+  const approvalActor = (req: express.Request): string => {
+    const a = authContext(req);
+    return a?.agentName || a?.displayName || a?.username || "Unknown";
+  };
+  const approvalSender = async (req: express.Request): Promise<string> =>
+    senderMailboxFor(db, authContext(req)?.username || "", approvalMailer.fallbackFrom);
+  const solverMapOf = (list: Array<{ name: string }>): SolverMap => Object.fromEntries(list.map((s) => [s.name.trim().toLowerCase(), s]));
+  const asIds = (v: unknown): string[] => {
+    if (!Array.isArray(v) || v.length === 0 || v.length > 500) throw new HttpError(400, "Choose between 1 and 500 jobs.");
+    return v.map((x) => String(x));
+  };
+  const asAddrs = (v: unknown): string[] => (Array.isArray(v) ? v.map((x) => String(x).trim()).filter(Boolean) : []);
+
+  app.get("/api/pending-approvals/state", requireSection('approvals'), async (req, res) => {
+    try {
+      res.setHeader("Cache-Control", "no-store");
+      const revision = await getApprovalRevision(db);
+      const canSend = approvalMailer.configured && Boolean(await approvalSender(req));
+      const mail = { configured: approvalMailer.configured, can_send: canSend };
+      // The screen polls with the revision it already has and only downloads the jobs when something changed.
+      if (req.query.rev === revision) return res.json({ unchanged: true, revision, mail });
+      res.json({ ...(await getApprovalState(db)), mail, me: { name: approvalActor(req) } });
+    } catch (err) {
+      sendError(res, err, "Error loading Pending Approval");
+    }
+  });
+
+  app.get("/api/pending-approvals/emails", requireSection('approvals'), async (_req, res) => {
+    try {
+      res.json(await listApprovalEmails(db, 500));
+    } catch (err) {
+      sendError(res, err, "Error loading the Pending Approval email log");
+    }
+  });
+
+  app.post("/api/pending-approvals/jobs/:id/attempts", requireSection('approvals'), async (req, res) => {
+    try {
+      res.json(await logApprovalAttempt(db, String(req.params.id), req.body || {}, approvalActor(req)));
+    } catch (err) {
+      sendError(res, err, "Error saving the follow-up");
+    }
+  });
+
+  app.post("/api/pending-approvals/jobs/:id/route", requireSection('approvals'), async (req, res) => {
+    try {
+      await setApprovalRoute(db, String(req.params.id), req.body?.route);
+      res.json({ ok: true });
+    } catch (err) {
+      sendError(res, err, "Error setting the job source");
+    }
+  });
+
+  app.post("/api/pending-approvals/jobs/:id/reactivate", requireSection('approvals'), async (req, res) => {
+    try {
+      await reactivateApprovalJob(db, String(req.params.id));
+      res.json({ ok: true });
+    } catch (err) {
+      sendError(res, err, "Error reactivating the job");
+    }
+  });
+
+  app.post("/api/pending-approvals/jobs/no-follow-up-reason", requireSection('approvals'), async (req, res) => {
+    try {
+      res.json({ updated: await setApprovalNoFollowUpReason(db, req.body?.ids, req.body?.reason) });
+    } catch (err) {
+      sendError(res, err, "Error saving the reason");
+    }
+  });
+
+  // Document received: closes the jobs, and (unless told not to) emails the allocated valuers and the solvers.
+  app.post("/api/pending-approvals/jobs/received", requireSection('approvals'), async (req, res) => {
+    try {
+      const ids = asIds(req.body?.ids);
+      const note = String(req.body?.note || "").trim().slice(0, 2000);
+      const sendEmail = req.body?.send_email === true;
+      const actor = approvalActor(req);
+      const open = (await listApprovalJobs(db, ids)).filter((j) => j.status === "open");
+      if (open.length === 0) throw new HttpError(409, "None of these jobs is open any more. Refresh the page.");
+      const failures: string[] = [];
+      if (sendEmail) {
+        if (!approvalMailer.configured) throw new HttpError(501, NOT_CONFIGURED);
+        const from = await approvalSender(req);
+        const ctx: ApprovalContext = { dir: await getApprovalDirectory(db), solvers: solverMapOf(await listApprovalSolvers(db)), senderName: actor };
+        const sentTo: string[] = [];
+        const byValuer = approvalGroupBy(open, (j) => j.allocated_to || "Unallocated");
+        for (const name of Object.keys(byValuer)) {
+          const b = buildReceived(name, byValuer[name], note, ctx);
+          try {
+            await approvalMailer.send({ from, to: b.to, cc: b.cc, subject: b.subject, html: b.html });
+          } catch (e) {
+            const already = sentTo.length ? ` ${sentTo.join(", ")} ${sentTo.length === 1 ? "was" : "were"} already emailed.` : "";
+            throw new HttpError(502, `Not sent to the valuation team (${name}): ${(e as Error).message}.${already} Jobs were not closed.`);
+          }
+          sentTo.push(name);
+          await recordApprovalEmail(db, { by: actor, kind: "received", key: name, to: b.to, cc: b.cc, subject: b.subject, jobIds: byValuer[name].map((j) => j.id) });
+        }
+        const bySolver = approvalGroupBy(open, (j) => j.solver || "Unknown solver");
+        for (const name of Object.keys(bySolver)) {
+          const b = buildSolver(name, bySolver[name], ctx);
+          if (!b.to[0]) { failures.push(`${name} (no email)`); continue; }
+          try {
+            await approvalMailer.send({ from, to: b.to, cc: b.cc, subject: b.subject, html: b.html });
+            await recordApprovalEmail(db, { by: actor, kind: "solver", key: name, to: b.to, cc: b.cc, subject: b.subject, jobIds: bySolver[name].map((j) => j.id) });
+          } catch (e) {
+            failures.push(`${name} (${(e as Error).message})`);
+          }
+        }
+      }
+      const closed = await closeApprovalJobs(db, open.map((j) => j.id), { actor, via: "received", note });
+      res.json({ closed: closed.length, solver_failures: failures });
+    } catch (err) {
+      sendError(res, err, "Error marking documents received");
+    }
+  });
+
+  // A follow-up email to an AM team member or an insurer, with the Excel list attached when more than one job is listed.
+  app.post("/api/pending-approvals/mail/send", requireSection('approvals'), async (req, res) => {
+    try {
+      const b = req.body || {};
+      const rec = b.record || {};
+      const kind = rec.kind === "am" ? "am" : rec.kind === "ins" ? "ins" : null;
+      const jobIds = asIds(rec.job_ids);
+      if (!kind) throw new HttpError(400, "The email must say whether it is for the AM team or an insurer.");
+      if (typeof b.html !== "string" || b.html.length > 500_000) throw new HttpError(400, "The email body is missing or too large.");
+      if (!approvalMailer.configured) throw new HttpError(501, NOT_CONFIGURED);
+      const from = await approvalSender(req);
+      const to = asAddrs(b.to), cc = asAddrs(b.cc), subject = String(b.subject || "");
+      await approvalMailer.send({ from, to, cc, subject, html: b.html, attachments: Array.isArray(b.attachments) ? b.attachments : [] });
+      console.log(new Date().toISOString(), "[PENDING-APPROVAL] mail sent by", authContext(req)?.username, "from", from, "to", to.join(","), "jobs", jobIds.length);
+      try {
+        const recorded = await recordSentFollowUp(db, { by: approvalActor(req), kind, key: String(rec.key || "").slice(0, 255), to, cc, subject, jobIds, party: kind === "am" ? "AM team" : "Insurer" });
+        res.json({ ok: true, recorded });
+      } catch (err) {
+        console.error("[PENDING-APPROVAL] The email was sent but could not be recorded:", err);
+        res.json({ ok: true, recorded: 0, warning: "The email was sent, but it could not be recorded. Log the follow-up by hand." });
+      }
+    } catch (err) {
+      sendError(res, err, "Error sending the email");
+    }
+  });
+
+  app.post("/api/pending-approvals/import", requireSection('approvals'), async (req, res) => {
+    try {
+      const { file_name, rows } = req.body || {};
+      res.json(await importApprovalExport(db, typeof file_name === "string" ? file_name : "", approvalActor(req), rows));
+    } catch (err) {
+      sendError(res, err, "Error importing the pending approvals export");
+    }
+  });
+
+  app.post("/api/pending-approvals/import/:importId/close-missing", requireSection('approvals'), async (req, res) => {
+    try {
+      const importId = Number(req.params.importId);
+      if (!Number.isInteger(importId) || importId <= 0) throw new HttpError(400, "That upload was not found.");
+      res.json(await closeMissingFromImport(db, importId, approvalActor(req)));
+    } catch (err) {
+      sendError(res, err, "Error closing the jobs missing from the export");
+    }
+  });
+
+  app.put("/api/pending-approvals/settings", requireSection('approvals'), async (req, res) => {
+    try {
+      const s = await updateApprovalWorkingSettings(db, { target_conversion: req.body?.target_conversion });
+      res.json({ target_conversion: s.target_conversion });
+    } catch (err) {
+      sendError(res, err, "Error saving the report target");
+    }
+  });
+
+  app.put("/api/pending-approvals/directory", requireSection('approvals'), async (req, res) => {
+    try {
+      res.json(await saveApprovalDirectory(db, req.body || {}));
+    } catch (err) {
+      sendError(res, err, "Error saving the team emails");
+    }
+  });
+
+  app.post("/api/pending-approvals/solvers", requireSection('approvals'), async (req, res) => {
+    try {
+      const items = req.body?.items;
+      if (!Array.isArray(items) || items.length > 2000) throw new HttpError(400, "Provide between 1 and 2000 solvers.");
+      res.json({ saved: await upsertApprovalSolvers(db, items) });
+    } catch (err) {
+      sendError(res, err, "Error saving solver contacts");
+    }
+  });
+
+  app.put("/api/pending-approvals/solvers/contact", requireSection('approvals'), async (req, res) => {
+    try {
+      const field = req.body?.field;
+      if (field !== "phone" && field !== "email") throw new HttpError(400, "Choose phone or email.");
+      await setApprovalSolverContact(db, String(req.body?.name || ""), field, String(req.body?.value ?? ""));
+      res.json({ ok: true });
+    } catch (err) {
+      sendError(res, err, "Error saving the solver contact");
+    }
+  });
+
+  app.get("/api/pending-approvals/admin-settings", requireAdmin, async (_req, res) => {
+    try {
+      const s = await getApprovalSettings(db);
+      res.json({ team_tag: s.team_tag, default_sender_mailbox: s.default_sender_mailbox, senders: await listApprovalSenders(db), mail_configured: approvalMailer.configured, env_sender: approvalMailer.fallbackFrom });
+    } catch (err) {
+      sendError(res, err, "Error loading Pending Approval administration settings");
+    }
+  });
+
+  app.put("/api/pending-approvals/admin-settings", requireAdmin, async (req, res) => {
+    try {
+      const r = await updateApprovalAdminSettings(db, req.body || {});
+      res.json({ team_tag: r.settings.team_tag, default_sender_mailbox: r.settings.default_sender_mailbox, senders: r.senders, mail_configured: approvalMailer.configured, env_sender: approvalMailer.fallbackFrom });
+    } catch (err) {
+      sendError(res, err, "Error saving Pending Approval administration settings");
     }
   });
 

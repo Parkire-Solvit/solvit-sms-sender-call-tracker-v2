@@ -56,6 +56,17 @@ Admins continue using the SMS Sender password. CS staff use Microsoft sign-in on
 
 Email SLA time is Monday-Friday, 8 AM-5 PM Africa/Nairobi. The clock pauses overnight and on weekends. Admins must enter Kenyan public holiday dates in Email SLA settings; an empty list does **not** exclude holidays. Migration 014 uses each existing email's settings snapshot where available, and current settings for older rows without one; subsequent settings edits do not rewrite recorded deadlines. Validate one member's sign-in, assignment notice, Outlook reply sync, and another member's denied access before widening the pilot.
 
+### Pending Approval
+
+Pending Approval (after Pending Submissions in the navigation) clears jobs that are valued and submitted but cannot be approved because documents are missing. It was specified by the section's manager as the "Pending Approvals Desk" and is built into this portal on PostgreSQL. Migrations `20261123T1000_pending_approval.sql` (schema) and `20261123T1001_pending_approval_seed.sql` (the November sample jobs, 111 solver contacts and the AM/valuation team addresses) must be applied with the usual pre-deploy command.
+
+- **Access:** the same structure as the other sections. Administrators always; agents whose agent tag equals the approvals team tag (default `Approvals Team`, changed by an administrator in Pending Approval, Import & Settings). Only the team tag and the sender mailboxes are administrator-only; the weekly upload, team emails, solver contacts and report target are open to the section's members.
+- **Jobs** arrive only by uploading the weekly pending-jobs Excel export (Import & Settings). Open jobs missing from a new upload are shown and only closed, as approved, after the user confirms (the latest upload only, once).
+- **Routing:** Solver and Broker jobs are phoned; Ref Agent jobs are emailed to the AM team member who initiated them; Channel Partner and Not recorded jobs are emailed to the insurer; Not found is inferred or set by hand. An email covering more than one job always carries an Excel list. Document received closes the job and emails the allocated valuer and the solver. A job with 3 or more follow-ups and no approval is non-actionable.
+- **Concurrency:** follow-ups are append-only rows and closing is guarded, so two people working the same job never overwrite each other.
+- **KPI Dashboard:** conversion against an adjustable target (default 99%), by period, reason, source and insurer, Segment 1 and Segment 2, team activity, with an Excel download.
+- **Email** goes through Microsoft Graph with the existing `MICROSOFT_TENANT_ID`, `MICROSOFT_CLIENT_ID` and `MICROSOFT_CLIENT_SECRET`, and needs the **application** permission `Mail.Send`. Until it is granted the section works fully except sending, and shows "Email is not configured". `Mail.Send` as an application permission can send as any mailbox, so restrict it to the mailboxes the section uses with an Exchange Online Application Access Policy (`New-ApplicationAccessPolicy`) or RBAC for Applications before enabling it. Each login sends from the mailbox an administrator lists for it, otherwise from the default sender mailbox (or `PENDING_APPROVAL_MAIL_FROM`). `PENDING_APPROVAL_ALLOWED_RECIPIENT_DOMAINS` optionally limits recipient domains (blank allows any, as insurers are external).
+
 ## Commands
 
 ```bash

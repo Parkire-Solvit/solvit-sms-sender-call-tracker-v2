@@ -1,5 +1,5 @@
 import type { DbAdapter } from '../../db';
-import { DEFAULT_CALLBACK_TAG, DEFAULT_PENDING_TAG, normalizeRole, sectionsFor } from './access';
+import { DEFAULT_APPROVALS_TAG, DEFAULT_CALLBACK_TAG, DEFAULT_PENDING_TAG, normalizeRole, sectionsFor } from './access';
 import type { AuthContext } from './adminSession';
 
 /**
@@ -20,11 +20,13 @@ export async function loadAuthContext(db: Pick<DbAdapter, 'queryOne'>, userId: n
     agent_archived_at: unknown;
     callback_tag: string | null;
     pending_tag: string | null;
+    approvals_tag: string | null;
   }>(
     `SELECT u.id, u.username, u.display_name, u.active, u.role, u.agent_id,
             a.name AS agent_name, a.tag AS agent_tag, a.archived_at AS agent_archived_at,
             (SELECT callback_team_tag FROM callback_settings WHERE id = 1) AS callback_tag,
-            (SELECT callback_team_tag FROM pending_submission_settings WHERE id = 1) AS pending_tag
+            (SELECT callback_team_tag FROM pending_submission_settings WHERE id = 1) AS pending_tag,
+            (SELECT team_tag FROM pending_approval_settings WHERE id = 1) AS approvals_tag
      FROM users u
      LEFT JOIN agents a ON a.id = u.agent_id
      WHERE u.id = ?`,
@@ -41,6 +43,7 @@ export async function loadAuthContext(db: Pick<DbAdapter, 'queryOne'>, userId: n
       : { name: row.agent_name ?? '', tag: row.agent_tag, archived: row.agent_archived_at !== null && row.agent_archived_at !== undefined },
     callbackTag: row.callback_tag || DEFAULT_CALLBACK_TAG,
     pendingTag: row.pending_tag || DEFAULT_PENDING_TAG,
+    approvalsTag: row.approvals_tag || DEFAULT_APPROVALS_TAG,
   });
   if (sections.length === 0) return null;
 
