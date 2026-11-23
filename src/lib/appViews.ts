@@ -2,21 +2,22 @@
 // this only decides what the interface offers.
 
 export type AccountRole = 'admin' | 'agent' | 'cs_member';
-export type Section = 'call_activity' | 'callbacks' | 'pending';
-export type AppView = 'admin' | 'insurance-callbacks' | 'pending-submissions' | 'email';
+export type Section = 'call_activity' | 'callbacks' | 'pending' | 'approvals';
+export type AppView = 'admin' | 'insurance-callbacks' | 'pending-submissions' | 'pending-approval' | 'email';
 
 const VIEW_FOR_SECTION: Record<Section, AppView> = {
   call_activity: 'admin',
   callbacks: 'insurance-callbacks',
   pending: 'pending-submissions',
+  approvals: 'pending-approval',
 };
 
 /** Screens in the order they are offered. Administrators see all of them. */
 export function allowedViews(role: AccountRole | null, sections: ReadonlyArray<Section>): AppView[] {
-  if (role === 'admin') return ['admin', 'insurance-callbacks', 'email', 'pending-submissions'];
+  if (role === 'admin') return ['admin', 'insurance-callbacks', 'email', 'pending-submissions', 'pending-approval'];
   if (role === 'cs_member') return ['email'];
   if (role === 'agent') {
-    const order: Section[] = ['callbacks', 'pending', 'call_activity'];
+    const order: Section[] = ['callbacks', 'pending', 'approvals', 'call_activity'];
     return order.filter((s) => sections.includes(s)).map((s) => VIEW_FOR_SECTION[s]);
   }
   return [];
@@ -39,4 +40,5 @@ export const VIEW_LABELS: Record<AppView, string> = {
   'insurance-callbacks': 'Pending Scheduling',
   email: 'Email SLA',
   'pending-submissions': 'Pending Submissions',
+  'pending-approval': 'Pending Approval',
 };

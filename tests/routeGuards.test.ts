@@ -14,6 +14,7 @@ const PUBLIC = "public";
 const CA = "section: call_activity";
 const CB = "section: callbacks";
 const PS = "section: pending";
+const AP = "section: approvals";
 
 // method + path -> rule
 const POLICY: Record<string, string> = {
@@ -55,6 +56,15 @@ const POLICY: Record<string, string> = {
   "GET /api/pending-submissions/team": ADMIN, "POST /api/pending-submissions/reassign-open": ADMIN,
   "GET /api/pending-submissions/integrations": ADMIN, "PUT /api/pending-submissions/integrations/:integration": ADMIN,
   "POST /api/pending-submissions/integrations/host_pinnacle/test-sms": ADMIN,
+
+  // Pending Approval: agents with the approvals team tag work the section; only the team tag and sender mailboxes are admin only
+  "GET /api/pending-approvals/state": AP, "GET /api/pending-approvals/emails": AP,
+  "POST /api/pending-approvals/jobs/:id/attempts": AP, "POST /api/pending-approvals/jobs/:id/route": AP, "POST /api/pending-approvals/jobs/:id/reactivate": AP,
+  "POST /api/pending-approvals/jobs/no-follow-up-reason": AP, "POST /api/pending-approvals/jobs/received": AP, "POST /api/pending-approvals/mail/send": AP,
+  "POST /api/pending-approvals/import": AP, "POST /api/pending-approvals/import/:importId/close-missing": AP,
+  "PUT /api/pending-approvals/settings": AP, "PUT /api/pending-approvals/directory": AP,
+  "POST /api/pending-approvals/solvers": AP, "PUT /api/pending-approvals/solvers/contact": AP,
+  "GET /api/pending-approvals/admin-settings": ADMIN, "PUT /api/pending-approvals/admin-settings": ADMIN,
 };
 
 function ruleOf(guard: string | undefined): string {

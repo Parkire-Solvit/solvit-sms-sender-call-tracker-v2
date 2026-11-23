@@ -41,7 +41,7 @@ async function main() {
   const admin = await accounts.createUserAccount(db, { username: "boss", password: "pw-boss-1", display_name: "Boss", role: "admin" });
   assert(admin.role === "admin" && admin.agent_id === null, "an administrator can be created");
   const adminCtx = await loadAuthContext(db, admin.id);
-  assert(adminCtx && adminCtx.role === "admin" && adminCtx.sections.length === 3, "an administrator opens everything");
+  assert(adminCtx && adminCtx.role === "admin" && adminCtx.sections.length === 4 && adminCtx.sections.includes("approvals"), "an administrator opens everything");
 
   // New accounts default to the Agent level.
   const mary = await createAgent(db, { name: "Mary Muriuki", tag: "Callback Team" });

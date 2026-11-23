@@ -39,7 +39,7 @@ async function loader(userId: number): Promise<AuthContext | null> {
   const sections = sectionsFor({
     role: a.role, active: a.active,
     agent: a.hasAgent ? { name: `Agent ${userId}`, tag: a.tag, archived: a.archived } : null,
-    callbackTag: "Callback Team", pendingTag: "Callback Team(Submission)",
+    callbackTag: "Callback Team", pendingTag: "Callback Team(Submission)", approvalsTag: "Approvals Team",
   });
   if (sections.length === 0) return null;
   return { userId, username: `user${userId}`, displayName: `User ${userId}`, role: a.role, agentId: a.hasAgent ? userId : null, agentName: a.hasAgent ? `Agent ${userId}` : null, sections };

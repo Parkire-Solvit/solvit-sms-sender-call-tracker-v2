@@ -5,13 +5,15 @@ export type UserRole = 'admin' | 'agent';
 /**
  * call_activity: the compliance dashboard (read only for agents).
  * callbacks / pending: the Insurance Callbacks screen, and the Pending Inspection and Pending Submission screens.
+ * approvals: the Pending Approval screen (jobs that cannot be approved until documents arrive).
  */
-export type Section = 'call_activity' | 'callbacks' | 'pending';
+export type Section = 'call_activity' | 'callbacks' | 'pending' | 'approvals';
 
-export const ALL_SECTIONS: ReadonlyArray<Section> = ['call_activity', 'callbacks', 'pending'];
+export const ALL_SECTIONS: ReadonlyArray<Section> = ['call_activity', 'callbacks', 'pending', 'approvals'];
 
 export const DEFAULT_CALLBACK_TAG = 'Callback Team';
 export const DEFAULT_PENDING_TAG = 'Callback Team(Submission)';
+export const DEFAULT_APPROVALS_TAG = 'Approvals Team';
 
 export function normalizeRole(value: unknown): UserRole {
   return value === 'agent' ? 'agent' : 'admin';
@@ -30,6 +32,8 @@ export interface AccessInput {
   /** The team tag that grants the Callbacks screen, and the one that grants the Pending screens (both tabs). */
   callbackTag: string;
   pendingTag: string;
+  /** The team tag that grants the Pending Approval screen. */
+  approvalsTag: string;
 }
 
 /**
@@ -37,7 +41,7 @@ export interface AccessInput {
  *  - Inactive account: nothing.
  *  - Administrator: everything.
  *  - Agent linked to an archived agent record: nothing (a departed agent's login stops working).
- *  - Agent whose current tag is the callback team tag and/or the pending team tag: those sections only.
+ *  - Agent whose current tag is the callback team tag, the pending team tag and/or the approvals team tag: those sections only.
  *  - Any other agent (no link, or a tag that matches neither team): Call Activity.
  * The tag is read from the database on every request, so re-tagging an agent changes their access at once.
  */
@@ -51,6 +55,7 @@ export function sectionsFor(input: AccessInput): Section[] {
   if (tag !== '') {
     if (tag === tagKey(input.callbackTag)) sections.push('callbacks');
     if (tag === tagKey(input.pendingTag)) sections.push('pending');
+    if (tag === tagKey(input.approvalsTag)) sections.push('approvals');
   }
   return sections.length > 0 ? sections : ['call_activity'];
 }
