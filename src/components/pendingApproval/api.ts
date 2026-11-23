@@ -7,12 +7,13 @@ export interface ApprovalState {
   directory: ApprovalDirectory;
   solvers: ApprovalSolver[];
   jobs: ApprovalJob[];
-  mail: { configured: boolean; can_send: boolean };
+  mail: { configured: boolean; can_send: boolean; verified: boolean };
   me: { name: string };
 }
 
 export interface ApprovalEmailRow { id: number; at: string; by: string; kind: string; key: string; to: string[]; cc: string[]; subject: string; jobs: string[] }
-export interface AdminSettings { team_tag: string; default_sender_mailbox: string; senders: Array<{ username: string; mailbox: string }>; mail_configured: boolean; env_sender: string }
+export interface AdminSettings { team_tag: string; default_sender_mailbox: string; senders: Array<{ username: string; mailbox: string }>; mail_configured: boolean; env_sender: string; mail_checks: Array<{ mailbox: string; ok: boolean; message: string; checked_by: string; checked_at: string }> }
+export interface MailCheckResult { ok: boolean; attempted: boolean; message: string; steps: Array<{ name: string; ok: boolean | null; detail: string }> }
 
 export async function api<T = any>(method: string, url: string, body?: unknown): Promise<T> {
   const r = await fetch(url, {

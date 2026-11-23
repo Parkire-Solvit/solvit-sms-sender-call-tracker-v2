@@ -3,7 +3,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import * as XLSX from 'xlsx';
 import { Upload } from 'lucide-react';
 import { fmtDT, okMail, parseSolverSheet, parseTeamRows, type ApprovalDirectory, type ApprovalPerson } from '../../../shared/pendingApproval';
-import { api, type AdminSettings, type ApprovalEmailRow, type Shared } from './api';
+import { api, type AdminSettings, type ApprovalEmailRow, type MailCheckResult, type Shared } from './api';
 import { Note, Panel, Pill, btn, btnOk, btnPrimary, btnSm, field, label, th } from './ui';
 
 /* ---------- Email log ---------- */
@@ -245,30 +245,64 @@ function SolversPanel({ shared }: { shared: Shared }) {
 
 /* ---------- Access and email sending (administrators) ---------- */
 
+const mailboxKey = (m: string) => m.trim().toLowerCase();
+const when = (iso: string) => fmtDT(iso);
+
 function AdminPanel() {
   const [s, setS] = useState<AdminSettings | null>(null);
   const [msg, setMsg] = useState<{ bad: boolean; text: string } | null>(null);
+  const [testTo, setTestTo] = useState('');
+  const [from, setFrom] = useState('');
+  const [running, setRunning] = useState(false);
+  const [result, setResult] = useState<MailCheckResult | null>(null);
   useEffect(() => { api<AdminSettings>('GET', '/api/pending-approvals/admin-settings').then(setS).catch((e) => setMsg({ bad: true, text: e.message })); }, []);
   if (!s) return msg ? <Note bad>{msg.text}</Note> : null;
   const set = (patch: Partial<AdminSettings>) => setS({ ...s, ...patch });
+
+  const checkFor = (mailbox: string) => s.mail_checks.find((c) => c.mailbox === mailboxKey(mailbox));
+  const defaultMailbox = s.default_sender_mailbox.trim() || s.env_sender;
+  const mailboxes = [...new Set([defaultMailbox, ...s.senders.map((x) => x.mailbox)].map((m) => m.trim()).filter(Boolean))];
+  const fromMailbox = from || defaultMailbox;
+  const defaultCheck = defaultMailbox ? checkFor(defaultMailbox) : undefined;
+  const anyVerified = s.mail_checks.some((c) => c.ok);
+  const pill = (mailbox: string) => {
+    const c = mailbox.trim() ? checkFor(mailbox) : undefined;
+    if (!mailbox.trim()) return null;
+    return c ? (c.ok ? <Pill tone="ok">Verified {when(c.checked_at)}</Pill> : <Pill tone="bad">Last check failed {when(c.checked_at)}</Pill>) : <Pill tone="warn">Not verified</Pill>;
+  };
+
   const save = async () => {
     try {
       const r = await api<AdminSettings>('PUT', '/api/pending-approvals/admin-settings', { team_tag: s.team_tag, default_sender_mailbox: s.default_sender_mailbox, senders: s.senders });
-      setS(r); setMsg({ bad: false, text: 'Saved' });
+      setS(r); setMsg({ bad: false, text: 'Saved. If you changed a mailbox, run the check again.' });
     } catch (e) { setMsg({ bad: true, text: (e as Error).message }); }
   };
+
+  const check = async () => {
+    setRunning(true); setResult(null);
+    try {
+      const r = await api<MailCheckResult & { mail_checks: AdminSettings['mail_checks'] }>('POST', '/api/pending-approvals/mail/check', { mailbox: fromMailbox, test_to: testTo.trim() });
+      setResult(r);
+      setS((cur) => (cur ? { ...cur, mail_checks: r.mail_checks } : cur));
+    } catch (e) { setResult({ ok: false, attempted: false, message: (e as Error).message, steps: [] }); }
+    finally { setRunning(false); }
+  };
+
   return (
     <Panel title="Access and email sending (administrators only)" how="Agents whose agent tag matches the team tag below open Pending Approval. Emails are sent from the signed-in person's own mailbox if you list one here, otherwise from the default mailbox.">
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 max-w-2xl">
         <label className={label}>Approvals team tag<input className={field} value={s.team_tag} onChange={(e) => set({ team_tag: e.target.value })} /></label>
-        <label className={label}>Default sender mailbox<input className={field} value={s.default_sender_mailbox} placeholder={s.env_sender || 'cs-team@solvit.co.ke'} onChange={(e) => set({ default_sender_mailbox: e.target.value })} /></label>
+        <label className={label}>Default sender mailbox<input className={field} value={s.default_sender_mailbox} placeholder={s.env_sender || 'e.g. cs-team@solvit.co.ke'} onChange={(e) => set({ default_sender_mailbox: e.target.value })} /></label>
       </div>
+      {defaultMailbox && <div className="mt-1.5 text-[11px] text-slate-500 flex items-center gap-2">Default sender {defaultMailbox}: {pill(defaultMailbox)}</div>}
+
       <h4 className="text-xs font-black text-slate-800 mt-4 mb-1">Sender mailbox per login</h4>
       <div className="space-y-1.5 max-w-2xl">
         {s.senders.map((r, i) => (
-          <div key={i} className="flex gap-1.5">
+          <div key={i} className="flex gap-1.5 items-center">
             <input className={field} value={r.username} placeholder="Portal username" aria-label="Portal username" onChange={(e) => set({ senders: s.senders.map((x, k) => (k === i ? { ...x, username: e.target.value } : x)) })} />
             <input className={field} value={r.mailbox} placeholder="mailbox@solvit.co.ke" aria-label="Sender mailbox" onChange={(e) => set({ senders: s.senders.map((x, k) => (k === i ? { ...x, mailbox: e.target.value } : x)) })} />
+            <span className="shrink-0">{pill(r.mailbox)}</span>
             <button type="button" className={`${btn} ${btnSm}`} onClick={() => set({ senders: s.senders.filter((_, k) => k !== i) })}>Remove</button>
           </div>
         ))}
@@ -277,7 +311,56 @@ function AdminPanel() {
       <div className="flex flex-wrap items-center gap-2 mt-4">
         <button type="button" className={btnPrimary} onClick={save}>Save</button>
         {msg && (msg.bad ? <Note bad>{msg.text}</Note> : <Pill tone="ok">{msg.text}</Pill>)}
-        {s.mail_configured ? <Pill tone="ok">Microsoft email connection configured</Pill> : <Pill tone="warn">Email is not configured on the server yet</Pill>}
+      </div>
+
+      <div className="mt-6 border-t border-slate-100 pt-4">
+        <h4 className="text-sm font-black text-slate-900">Email sending status</h4>
+        <div className="flex flex-wrap items-center gap-2 mt-2 text-[11px] text-slate-600">
+          {s.mail_configured ? <Pill tone="info">Microsoft credentials found on the server</Pill> : <Pill tone="bad">Microsoft credentials missing on the server</Pill>}
+          {defaultCheck?.ok ? <Pill tone="ok">Sending verified for {defaultMailbox}</Pill>
+            : defaultCheck ? <Pill tone="bad">Sending failed for {defaultMailbox}</Pill>
+            : <Pill tone="warn">Sending not verified yet</Pill>}
+        </div>
+        <p className="text-[11px] text-slate-500 mt-1.5 leading-relaxed">Credentials being present does not mean emails will send: Microsoft must also have granted the app permission and allowed the mailbox. Only a test email proves it.</p>
+
+        <details className="mt-3 rounded-xl border border-slate-200 bg-slate-50/60 px-3 py-2" open={!anyVerified}>
+          <summary className="text-xs font-bold text-slate-800 cursor-pointer">How to set up email sending</summary>
+          <div className="text-[11px] text-slate-700 leading-relaxed space-y-2 mt-2">
+            <p>The portal sends through Microsoft Graph as a real Solvit mailbox, so each email lands in that mailbox's Sent Items. It uses the same Microsoft app as Email SLA: the <code>MICROSOFT_TENANT_ID</code>, <code>MICROSOFT_CLIENT_ID</code> and <code>MICROSOFT_CLIENT_SECRET</code> settings on the server.</p>
+            <ol className="list-decimal pl-5 space-y-2">
+              <li><b>Grant the permission.</b> In the Microsoft Entra admin center open App registrations, then the app whose Application (client) ID matches <code>MICROSOFT_CLIENT_ID</code>. Go to API permissions, Add a permission, Microsoft Graph, Application permissions, choose <b>Mail.Send</b>, add it, then press <b>Grant admin consent</b>. A Microsoft 365 administrator must do this.</li>
+              <li><b>Limit who it can send as.</b> By default an app with Mail.Send can send as <b>any</b> mailbox in the company. In Exchange Online PowerShell, put only the allowed sending mailboxes (for example cs-team and the approvals staff) in a mail-enabled security group, then run <code>New-ApplicationAccessPolicy -AppId &lt;client id&gt; -PolicyScopeGroupId &lt;group address&gt; -AccessRight RestrictAccess -Description "Pending Approval sending"</code>. If Email SLA already restricts this app to a group of mailboxes, add the sending mailboxes to that group or Microsoft will refuse them. If you use Exchange RBAC for Applications instead, give the app the Mail.Send role over the same mailboxes. Policy changes can take a while to apply. Please confirm the exact steps against Microsoft's current documentation for your tenant.</li>
+              <li><b>Choose the sender.</b> Enter a <b>Default sender mailbox</b> above: a real Exchange mailbox such as <code>cs-team@solvit.co.ke</code> (a shared mailbox works; a group or alias does not). Optionally add a mailbox for individual logins; any login without one uses the default. Press <b>Save</b>.</li>
+              <li><b>Prove it works.</b> In the box below enter your own email address and press <b>Check connection and send test email</b>. Every step must pass and the test email must arrive in your inbox (look in junk too). The status above then turns green and the warning disappears for staff.</li>
+              <li>If a step fails, its message says what to fix. Run the check again after each change.</li>
+            </ol>
+          </div>
+        </details>
+
+        <div className="mt-3 grid grid-cols-1 sm:grid-cols-[1fr_1fr_auto] gap-2 items-end max-w-3xl">
+          <label className={label}>Check sending as
+            <select className={field} value={fromMailbox} onChange={(e) => setFrom(e.target.value)} disabled={!mailboxes.length}>
+              {!mailboxes.length && <option value="">Set and save a sender mailbox first</option>}
+              {mailboxes.map((m) => <option key={m} value={m}>{m}</option>)}
+            </select>
+          </label>
+          <label className={label}>Send a test email to<input type="email" className={field} value={testTo} placeholder="your.name@solvit.co.ke" onChange={(e) => setTestTo(e.target.value)} /></label>
+          <button type="button" className={btnPrimary} disabled={running || !mailboxes.length} onClick={check}>{running ? 'Checking…' : 'Check connection and send test email'}</button>
+        </div>
+
+        {result && (
+          <div className="mt-3 space-y-1.5 max-w-3xl" role="status">
+            <Note bad={!result.ok}>{result.message}</Note>
+            <ul className="space-y-1">
+              {result.steps.map((st, i) => (
+                <li key={i} className="flex gap-2 text-[11px] leading-relaxed">
+                  <span className={`font-black shrink-0 w-4 ${st.ok === true ? 'text-emerald-600' : st.ok === false ? 'text-rose-600' : 'text-amber-600'}`} aria-label={st.ok === true ? 'passed' : st.ok === false ? 'failed' : 'not proven'}>{st.ok === true ? '✓' : st.ok === false ? '✗' : '?'}</span>
+                  <span><b className="text-slate-800">{st.name}.</b> <span className="text-slate-600">{st.detail}</span></span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
       </div>
     </Panel>
   );

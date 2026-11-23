@@ -64,7 +64,7 @@ const POLICY: Record<string, string> = {
   "POST /api/pending-approvals/import": AP, "POST /api/pending-approvals/import/:importId/close-missing": AP,
   "PUT /api/pending-approvals/settings": AP, "PUT /api/pending-approvals/directory": AP,
   "POST /api/pending-approvals/solvers": AP, "PUT /api/pending-approvals/solvers/contact": AP,
-  "GET /api/pending-approvals/admin-settings": ADMIN, "PUT /api/pending-approvals/admin-settings": ADMIN,
+  "GET /api/pending-approvals/admin-settings": ADMIN, "PUT /api/pending-approvals/admin-settings": ADMIN, "POST /api/pending-approvals/mail/check": ADMIN,
 };
 
 function ruleOf(guard: string | undefined): string {
