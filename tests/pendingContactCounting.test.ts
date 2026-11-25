@@ -68,6 +68,19 @@ assert(bad.get(7)!.client_attempt_count === 0 && bad.get(7)!.client_sms_count ==
 const unassigned = countClientContacts([job(8, null, "0722111222", "KAA 001A")], events, team);
 assert(unassigned.get(8)!.client_attempt_count === 0 && unassigned.get(8)!.client_sms_count === 0, "an unassigned record has no counted activity");
 
+// Older phone-app labels are read the same way as in Callbacks.
+const legacy = countClientContacts([job(10, ALICE, "0744000010", "KDD 010D")], [
+  ev(ALICE, "sms", "Sent", "0744000010", T(1)),
+  ev(ALICE, "Text Message", null, "0744000010", T(2)),
+  ev(ALICE, "SMS", "SENT", "0744000010", T(3)),
+  ev(ALICE, "Phone Call", "dialled", "0744000010", T(4)),
+  ev(ALICE, "call", "Outgoing", "0744000010", T(5)),
+  ev(ALICE, "CALL", "placed", "0744000010", T(6)),
+  ev(ALICE, "call", "incoming", "0744000010", T(7)),
+], team).get(10)!;
+assert(legacy.client_sms_count === 3, `three SMS with old and new labels all count (got ${legacy.client_sms_count})`);
+assert(legacy.client_attempt_count === 3, `three outgoing calls with old and new labels count (got ${legacy.client_attempt_count})`);
+
 // Empty input
 assert(countClientContacts([], events, team).size === 0, "no jobs gives an empty map");
 

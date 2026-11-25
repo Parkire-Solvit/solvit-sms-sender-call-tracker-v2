@@ -1,6 +1,12 @@
 // FIXPASS pendingSubmissions.ts
 import { DbAdapter, DbTransactionClient } from "./db";
-import { COUNTED_CALL_STATUSES, hasReachedMaxAttempts, normalizeRegAlphaNumeric } from "./insuranceCallbacks";
+import {
+  COUNTED_CALL_STATUSES,
+  hasReachedMaxAttempts,
+  normalizeCommunicationStatus,
+  normalizeCommunicationType,
+  normalizeRegAlphaNumeric,
+} from "./insuranceCallbacks";
 import { HttpError } from "./httpError";
 import {
   ABSENT_CLOSE_OUTCOMES,
@@ -531,8 +537,12 @@ export function countClientContacts(
     const agentId = Number(ev.agent_id);
     const ts = parseDbTimestamp(ev.timestamp);
     if (isNaN(ts)) continue;
-    const isCall = ev.type === "CALL" && COUNTED_CALL_STATUSES.has(String(ev.status ?? "").toUpperCase());
-    const isSms = ev.type === "SMS";
+    // Read historical handset labels exactly as Callbacks does. Older builds
+    // stored values such as "sms", "Text Message", "Phone Call" and
+    // "Dialled"; strict comparisons made those events disappear here.
+    const eventType = normalizeCommunicationType(ev.type);
+    const isCall = eventType === "CALL" && COUNTED_CALL_STATUSES.has(normalizeCommunicationStatus(ev.status));
+    const isSms = eventType === "SMS";
     if (!isCall && !isSms) continue;
 
     const phone = normalizePhone(ev.target_phone);
