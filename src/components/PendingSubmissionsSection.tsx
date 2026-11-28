@@ -2022,7 +2022,7 @@ export default function PendingSubmissionsSection({ isAdmin, signedInAgentName =
                             Calls {job.client_attempt_count}/{workflowSettings.max_attempts}
                           </span>
                           <span
-                            title={job.job_type === 'SUBMISSION' ? 'SMS to the solver or the customer (one shared count)' : 'SMS to the customer'}
+                            title="SMS to the solver or the customer (one shared count)"
                             className={`font-mono font-bold whitespace-nowrap ${
                               job.client_sms_count >= workflowSettings.max_sms_attempts
                                 ? 'text-rose-600'

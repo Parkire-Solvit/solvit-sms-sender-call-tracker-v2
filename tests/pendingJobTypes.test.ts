@@ -11,7 +11,7 @@ import {
   parseJobTypeParam,
   statusForAgentOutcome,
 } from "../pendingSubmissionOutcomes";
-import { countClientContacts, countedPhonesOf, countingStartMs, normalizePhone, primaryPhoneOf } from "../pendingSubmissions";
+import { countClientContacts, countedPhonesOf, countedSmsPhonesOf, countingStartMs, normalizePhone, primaryPhoneOf } from "../pendingSubmissions";
 
 function assert(condition: boolean, message: string) {
   if (!condition) throw new Error(`Assertion failed: ${message}`);
@@ -116,6 +116,14 @@ assert(countedPhonesOf({ job_type: "INSPECTION", client_phone: normalizePhone(CL
 assert(countedPhonesOf({ job_type: "SUBMISSION", client_phone: normalizePhone(CLIENT), solver_contact: normalizePhone(SOLVER) }).join(",") === [normalizePhone(SOLVER), normalizePhone(CLIENT)].join(","), "submission: the solver first, then the customer");
 assert(countedPhonesOf({ job_type: "SUBMISSION", client_phone: normalizePhone(SOLVER), solver_contact: normalizePhone(SOLVER) }).length === 1, "a repeated number is listed once");
 assert(countedPhonesOf({ client_phone: normalizePhone(CLIENT), solver_contact: normalizePhone(SOLVER) }).length === 1, "a job with no type is an inspection job");
+assert(countedSmsPhonesOf({ client_phone: normalizePhone(CLIENT), solver_contact: normalizePhone(SOLVER) }).join(",") === [normalizePhone(SOLVER), normalizePhone(CLIENT)].join(","), "SMS may go to either contact for every job type");
+
+const inspectionSolverSms = countClientContacts(
+  [mk(24, "INSPECTION", "KHH 024H")],
+  [ev("SMS", "SENT", SOLVER, T(1))],
+  team
+).get(24)!;
+assert(inspectionSolverSms.client_sms_count === 1, `an SMS to the solver counts while an inspection is pending (got ${inspectionSolverSms.client_sms_count})`);
 assert(primaryPhoneOf({ job_type: "SUBMISSION", client_phone: normalizePhone(CLIENT), solver_contact: normalizePhone(SOLVER) }) === normalizePhone(SOLVER), "the main contact of a submission job (used for grouping) is still the solver");
 
 // ---- a type change restarts counting ----

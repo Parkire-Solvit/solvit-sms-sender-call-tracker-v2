@@ -459,6 +459,16 @@ export function countedPhonesOf(job: { job_type?: unknown; client_phone: string;
   return phones.filter((p, i) => p !== "" && phones.indexOf(p) === i);
 }
 
+/**
+ * SMS follow-ups can legitimately go to either contact on a pending record.
+ * In particular, agents commonly text the solver while an inspection record
+ * is still open. Keep call counting unchanged, but do not discard that SMS.
+ */
+export function countedSmsPhonesOf(job: { client_phone: string; solver_contact: string }): string[] {
+  const phones = [normalizePhone(job.solver_contact), normalizePhone(job.client_phone)];
+  return phones.filter((p, i) => p !== "" && phones.indexOf(p) === i);
+}
+
 /** Counting starts at the later of the first import and the last type change. NaN when the import time is unreadable. */
 export function countingStartMs(job: { first_imported_at: unknown; type_changed_at?: unknown }): number {
   const first = parseDbTimestamp(job.first_imported_at);
@@ -482,15 +492,15 @@ export interface ContactEvent {
  * - Only events made by the job's ASSIGNED agent count.
  * - A call counts only when type is CALL and status is in COUNTED_CALL_STATUSES (OUTGOING), and its normalised
  *   phone equals the client's phone.
- * - An SMS counts when type is SMS and its normalised phone equals the client's phone OR its registration
- *   (letters and digits only) equals the job's vehicle registration.
+ * - An SMS counts when type is SMS and its normalised phone equals either the client or solver phone, OR its
+ *   registration (letters and digits only) equals the job's vehicle registration.
  * - An event is never counted twice for the same job.
  * Pending Submissions keeps one rule Callbacks does not have: an event only counts if it happened on or after
  * the job's first_imported_at.
  * Solver calls are informational: any team agent, OUTGOING, phone equals the solver's phone.
- * An inspection job counts the CLIENT's number. A submission job (the car was inspected but the solver has not
- * submitted the data) counts BOTH the solver's number and the client's number, as one shared count against the same
- * maximums (see countedPhonesOf). Calls to any other number (a broker) are not counted. Counting starts at the later of
+ * For calls, an inspection job counts the CLIENT's number and a submission job counts BOTH the solver's and client's
+ * numbers. SMS to either contact counts for both job types because agents often follow up with the solver while an
+ * inspection is still pending. Calls to any other number (a broker) are not counted. Counting starts at the later of
  * first_imported_at and type_changed_at.
  */
 export function countClientContacts(
@@ -510,7 +520,8 @@ export function countClientContacts(
   }
 
   const firstMs = new Map<number, number>();
-  const byClient = new Map<string, ContactJob[]>();
+  const byCallPhone = new Map<string, ContactJob[]>();
+  const bySmsPhone = new Map<string, ContactJob[]>();
   const byReg = new Map<string, ContactJob[]>();
   const bySolver = new Map<string, ContactJob[]>();
   const push = (m: Map<string, ContactJob[]>, key: string, job: ContactJob) => {
@@ -523,8 +534,10 @@ export function countClientContacts(
     const ms = countingStartMs(j);
     if (isNaN(ms)) continue;
     firstMs.set(j.id, ms);
-    // byClient holds every counted number: the client for an inspection job, the solver and the client for a submission job.
-    for (const counted of countedPhonesOf(j)) push(byClient, counted, j);
+    // Calls retain the job-type rule. SMS can be a follow-up to either the
+    // solver or the client, regardless of which queue the record is in.
+    for (const counted of countedPhonesOf(j)) push(byCallPhone, counted, j);
+    for (const counted of countedSmsPhonesOf(j)) push(bySmsPhone, counted, j);
     push(byReg, normalizeRegAlphaNumeric(j.vehicle_reg), j);
     push(bySolver, normalizePhone(j.solver_contact), j);
   }
@@ -549,7 +562,10 @@ export function countClientContacts(
     const reg = isSms ? normalizeRegAlphaNumeric(ev.reg_no) : "";
 
     const candidates = new Set<ContactJob>();
-    if (phone) for (const j of byClient.get(phone) ?? []) candidates.add(j);
+    if (phone) {
+      const matchingJobs = isSms ? bySmsPhone.get(phone) : byCallPhone.get(phone);
+      for (const j of matchingJobs ?? []) candidates.add(j);
+    }
     if (reg) for (const j of byReg.get(reg) ?? []) candidates.add(j);
 
     for (const job of candidates) {
