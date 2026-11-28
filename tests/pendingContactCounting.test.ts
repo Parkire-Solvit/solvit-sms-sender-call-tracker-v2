@@ -1,5 +1,5 @@
 // V15 tests/pendingContactCounting.test.ts
-import { countClientContacts, normalizePhone } from "../pendingSubmissions";
+import { canonicalAgentIdMap, countClientContacts, normalizePhone } from "../pendingSubmissions";
 import { hasReachedMaxAttempts } from "../insuranceCallbacks";
 
 function assert(condition: boolean, message: string) {
@@ -67,6 +67,29 @@ assert(bad.get(7)!.client_attempt_count === 0 && bad.get(7)!.client_sms_count ==
 // An unassigned job counts nothing
 const unassigned = countClientContacts([job(8, null, "0722111222", "KAA 001A")], events, team);
 assert(unassigned.get(8)!.client_attempt_count === 0 && unassigned.get(8)!.client_sms_count === 0, "an unassigned record has no counted activity");
+
+const identities = canonicalAgentIdMap(
+  [{ id: ALICE, name: "Mary Muriuki" }],
+  [
+    { id: ALICE, name: "Mary Muriuki" },
+    { id: 20, name: "Mary", needs_review: true },
+    { id: 21, name: "Unknown Agent", needs_review: true },
+  ]
+);
+assert(identities.get(20) === ALICE, "a unique shortened handset identity maps to the team agent");
+assert(!identities.has(21), "an unknown handset identity is never guessed");
+
+const intentionalShortName = canonicalAgentIdMap(
+  [{ id: ALICE, name: "Mary Muriuki" }],
+  [{ id: 22, name: "Mary", needs_review: false }]
+);
+assert(!intentionalShortName.has(22), "a configured short-name agent is not fuzzy-mapped to someone else");
+
+const ambiguous = canonicalAgentIdMap(
+  [{ id: 30, name: "Mary Muriuki" }, { id: 31, name: "Mary Wanjiku" }],
+  [{ id: 32, name: "Mary", needs_review: true }]
+);
+assert(!ambiguous.has(32), "an ambiguous shortened name is not attributed");
 
 // Older phone-app labels are read the same way as in Callbacks.
 const legacy = countClientContacts([job(10, ALICE, "0744000010", "KDD 010D")], [

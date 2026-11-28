@@ -487,6 +487,57 @@ export interface ContactEvent {
   reg_no: string | null;
 }
 
+interface AgentIdentityRow {
+  id: number;
+  name: string;
+  needs_review?: boolean | number | null;
+}
+
+function normaliseAgentName(raw: unknown): string {
+  return String(raw ?? "").trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+/**
+ * Maps duplicate handset identities (for example "Mary") to the one active
+ * team identity (for example "Mary Muriuki"). A shortened name is accepted
+ * only when it matches exactly one team member, preventing ambiguous events
+ * from being credited to the wrong person.
+ */
+export function canonicalAgentIdMap(
+  teamAgents: AgentIdentityRow[],
+  allAgents: AgentIdentityRow[],
+  aliases: Array<{ alias_normalised: string; agent_id: number }> = []
+): Map<number, number> {
+  const result = new Map<number, number>();
+  const teamById = new Map(teamAgents.map((a) => [Number(a.id), a]));
+  const teamNames = teamAgents.map((a) => ({ id: Number(a.id), name: normaliseAgentName(a.name) }));
+  for (const a of teamAgents) result.set(Number(a.id), Number(a.id));
+  for (const alias of aliases) {
+    const canonical = Number(alias.agent_id);
+    if (!teamById.has(canonical)) continue;
+    const aliasName = normaliseAgentName(alias.alias_normalised);
+    for (const source of allAgents) {
+      if (normaliseAgentName(source.name) === aliasName) result.set(Number(source.id), canonical);
+    }
+  }
+  for (const source of allAgents) {
+    const sourceId = Number(source.id);
+    if (result.has(sourceId)) continue;
+    // Only auto-created handset identities are eligible for fuzzy matching.
+    // A deliberately configured agent named "Mary" must never be silently
+    // credited to a different team member.
+    const needsReview = source.needs_review === true || Number(source.needs_review) === 1;
+    if (!needsReview) continue;
+    const sourceName = normaliseAgentName(source.name);
+    if (!sourceName || ["agent", "unknown", "unknown agent"].includes(sourceName)) continue;
+    const matches = teamNames.filter(({ name }) =>
+      name === sourceName || name.startsWith(`${sourceName} `) || sourceName.startsWith(`${name} `)
+    );
+    if (matches.length === 1) result.set(sourceId, matches[0].id);
+  }
+  return result;
+}
+
 /**
  * Pure counting rule (no database). The client rules are the same as Insurance Job Callbacks:
  * - Only events made by the job's ASSIGNED agent count.
@@ -602,12 +653,11 @@ export async function computePendingSubmissionActivity(db: Q, jobs: ContactJob[]
   if (jobs.length === 0) return new Map();
 
   const settings = await getPendingSubmissionSettings(db);
-  const agents = (
-    await db.queryAll<{ id: number }>(
-      `SELECT id FROM agents WHERE LOWER(TRIM(tag)) = LOWER(TRIM(?)) AND archived_at IS NULL`,
+  const teamAgents = await db.queryAll<AgentIdentityRow>(
+      `SELECT id, name, needs_review FROM agents WHERE LOWER(TRIM(tag)) = LOWER(TRIM(?)) AND archived_at IS NULL`,
       [settings.callback_team_tag]
-    )
-  ).map((a) => num(a.id));
+    );
+  const agents = teamAgents.map((a) => num(a.id));
   const teamAgentIds = new Set<number>(agents);
 
   let minMs = Infinity;
@@ -657,15 +707,31 @@ export async function computePendingSubmissionActivity(db: Q, jobs: ContactJob[]
     return applyManualOutcomeFallback(countClientContacts(jobs, [], teamAgentIds));
   }
 
+  const allAgents = await db.queryAll<AgentIdentityRow>(
+    `SELECT id, name, needs_review FROM agents WHERE archived_at IS NULL`
+  );
+  const aliases = await db.queryAll<{ alias_normalised: string; agent_id: number }>(
+    `SELECT alias_normalised, agent_id FROM agent_aliases`
+  );
+  const canonicalIds = canonicalAgentIdMap(teamAgents, allAgents, aliases);
+  const eventAgentIds = [...canonicalIds.keys()];
+  if (eventAgentIds.length === 0) {
+    return applyManualOutcomeFallback(countClientContacts(jobs, [], teamAgentIds));
+  }
+
   // Coarse prefilter only (date-only bound, two days of slack). The exact per-job cutoff is applied in code.
   const lowerBound = new Date(minMs - 2 * DAY_MS).toISOString().slice(0, 10);
-  const placeholders = agents.map(() => "?").join(", ");
-  const events = await db.queryAll<ContactEvent>(
+  const placeholders = eventAgentIds.map(() => "?").join(", ");
+  const rawEvents = await db.queryAll<ContactEvent>(
     `SELECT id, agent_id, type, status, timestamp, target_phone, reg_no
      FROM events
      WHERE agent_id IN (${placeholders}) AND timestamp >= ?`,
-    [...agents, lowerBound]
+    [...eventAgentIds, lowerBound]
   );
+  const events = rawEvents.map((event) => ({
+    ...event,
+    agent_id: event.agent_id === null ? null : canonicalIds.get(Number(event.agent_id)) ?? Number(event.agent_id),
+  }));
   return applyManualOutcomeFallback(countClientContacts(jobs, events, teamAgentIds));
 }
 

@@ -428,6 +428,37 @@ async function startServer() {
         );
       }
 
+      // Older handset builds sometimes send only a first name (for example
+      // "Mary" instead of the configured "Mary Muriuki"). Resolve that name
+      // to an existing configured agent when the match is unique, and retain
+      // it as an alias so later events use the same identity. This prevents
+      // call/SMS history from being split across duplicate agent rows.
+      if (!agent && name !== "Unknown Agent") {
+        const normalisedName = name.replace(/\s+/g, " ").trim().toLowerCase();
+        const configuredAgents = await db.queryAll<{ id: number; name: string; archived_at: unknown }>(
+          `SELECT id, name, archived_at
+           FROM agents
+           WHERE archived_at IS NULL
+             AND COALESCE(needs_review, FALSE) = FALSE
+             AND name <> 'Unknown Agent'`
+        );
+        const matches = configuredAgents.filter((candidate) => {
+          const candidateName = String(candidate.name || "").replace(/\s+/g, " ").trim().toLowerCase();
+          return candidateName === normalisedName
+            || candidateName.startsWith(`${normalisedName} `)
+            || normalisedName.startsWith(`${candidateName} `);
+        });
+        if (matches.length === 1) {
+          agent = matches[0];
+          await db.execute(
+            `INSERT INTO agent_aliases (alias_normalised, agent_id) VALUES (?, ?)
+             ON CONFLICT (alias_normalised) DO UPDATE SET agent_id = EXCLUDED.agent_id`,
+            [normalisedName, agent.id]
+          );
+          console.log(`[API] Resolved handset identity "${name}" to configured agent ${agent.id}`);
+        }
+      }
+
       // 3. Auto-create unknown device names, but flag them for administrator
       // review so spelling changes cannot silently split one person's history.
       if (!agent && name !== "Unknown Agent") {
